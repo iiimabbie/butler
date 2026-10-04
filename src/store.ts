@@ -1,6 +1,6 @@
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export interface Message {
@@ -23,8 +23,14 @@ export class Store {
   private readonly db: DatabaseSync;
 
   constructor(path: string) {
-    if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-    this.db = new DatabaseSync(path);
+    if (path !== ':memory:') {
+      const directory = dirname(path);
+      if (!existsSync(directory)) { mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700); }
+    }
+    const previousUmask = process.umask(0o077);
+    try { this.db = new DatabaseSync(path); }
+    finally { process.umask(previousUmask); }
+    if (path !== ':memory:') chmodSync(path, 0o600);
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
@@ -38,6 +44,16 @@ export class Store {
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS discord_settings(id INTEGER PRIMARY KEY CHECK(id=1), bot_reply INTEGER NOT NULL CHECK(bot_reply IN (0,1)));
       CREATE TABLE IF NOT EXISTS bot_channel_state(channel_id TEXT NOT NULL, bot_id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(channel_id,bot_id));
+      CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
+      CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
+    `);
+    this.db.exec(`
+      INSERT INTO session_sources(session_id,channel_id,source_type,owner_id,bot_id)
+        SELECT cs.session_id,cs.channel_id,'owner','unknown','' FROM channel_state cs
+        WHERE NOT EXISTS (SELECT 1 FROM session_sources ss WHERE ss.session_id=cs.session_id AND ss.channel_id=cs.channel_id AND ss.source_type='owner' AND ss.bot_id='');
+      INSERT INTO session_sources(session_id,channel_id,source_type,owner_id,bot_id)
+        SELECT bs.session_id,bs.channel_id,'bot','unknown',bs.bot_id FROM bot_channel_state bs
+        WHERE NOT EXISTS (SELECT 1 FROM session_sources ss WHERE ss.session_id=bs.session_id AND ss.channel_id=bs.channel_id AND ss.source_type='bot' AND ss.bot_id=bs.bot_id);
     `);
   }
 
@@ -81,7 +97,12 @@ export class Store {
   }
 
   listSessions(): unknown[] {
-    return this.db.prepare('SELECT s.id,s.created_at,(SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest FROM sessions s ORDER BY rowid DESC LIMIT 50').all();
+    return this.db.prepare('SELECT s.id,s.created_at,(SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest FROM sessions s ORDER BY s.rowid DESC LIMIT 50').all();
+  }
+
+  saveLatestRequest(sessionId: string, bodyJson: string, attemptedAt = new Date().toISOString()): void {
+    this.db.prepare('INSERT INTO latest_cpa_request(id,session_id,attempted_at,body_json) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,attempted_at=excluded.attempted_at,body_json=excluded.body_json')
+      .run(sessionId, attemptedAt, bodyJson);
   }
 
   history(sessionId: string, offset = 0, limit = 20): ToolRecord[] {
@@ -99,16 +120,26 @@ export class Store {
     return this.db.prepare('SELECT * FROM tool_calls WHERE id=?').get(id) as ToolRecord | undefined;
   }
 
-  channelState(channelId: string, defaultModel: string): { sessionId: string; model: string } {
+  channelState(channelId: string, defaultModel: string, ownerId = 'unknown'): { sessionId: string; model: string } {
     const row = this.db.prepare('SELECT session_id,model FROM channel_state WHERE channel_id=?').get(channelId) as { session_id: string; model: string | null } | undefined;
     if (row) return { sessionId: row.session_id, model: row.model ?? defaultModel };
     const sessionId = this.newSession();
-    this.db.prepare('INSERT INTO channel_state(channel_id,session_id,model) VALUES(?,?,NULL)').run(channelId, sessionId);
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('INSERT INTO channel_state(channel_id,session_id,model) VALUES(?,?,NULL)').run(channelId, sessionId);
+      this.db.prepare("INSERT INTO session_sources VALUES(?,?,'owner',?,'')").run(sessionId, channelId, ownerId);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return { sessionId, model: defaultModel };
   }
 
-  setChannelSession(channelId: string, sessionId: string): void {
-    this.db.prepare('UPDATE channel_state SET session_id=? WHERE channel_id=?').run(sessionId, channelId);
+  setChannelSession(channelId: string, sessionId: string, ownerId = 'unknown'): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('UPDATE channel_state SET session_id=? WHERE channel_id=?').run(sessionId, channelId);
+      this.db.prepare("INSERT OR IGNORE INTO session_sources VALUES(?,?,'owner',?,'')").run(sessionId, channelId, ownerId);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   setChannelModel(channelId: string, model: string): void {
@@ -146,11 +177,16 @@ export class Store {
     this.db.prepare('INSERT INTO discord_settings(id,bot_reply) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET bot_reply=excluded.bot_reply').run(enabled ? 1 : 0);
   }
 
-  botSession(channelId: string, botId: string): string {
+  botSession(channelId: string, botId: string, ownerId = 'unknown'): string {
     const row = this.db.prepare('SELECT session_id FROM bot_channel_state WHERE channel_id=? AND bot_id=?').get(channelId, botId) as { session_id: string } | undefined;
     if (row) return row.session_id;
     const sessionId = this.newSession();
-    this.db.prepare('INSERT INTO bot_channel_state VALUES(?,?,?)').run(channelId, botId, sessionId);
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('INSERT INTO bot_channel_state VALUES(?,?,?)').run(channelId, botId, sessionId);
+      this.db.prepare("INSERT INTO session_sources VALUES(?,?,'bot',?,?)").run(sessionId, channelId, ownerId, botId);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return sessionId;
   }
 

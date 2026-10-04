@@ -77,11 +77,13 @@ export async function ask(store: Store, session: string, prompt: string, config:
       config.onSteerPersisted?.(steered);
       input.push({ role: 'user', content: steered });
     }
+    const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, store: false });
+    store.saveLatestRequest(session, requestBody, new Date().toISOString());
     const response = await fetcher(`${config.baseUrl.replace(/\/$/, '')}/responses`, {
       method: 'POST',
       headers,
       signal: AbortSignal.timeout(config.timeoutMs ?? 60_000),
-      body: JSON.stringify({ model: config.model, input, tools: availableTools, store: false }),
+      body: requestBody,
     });
     const raw: unknown = await response.json().catch(() => null);
     if (!response.ok) throw new Error(`CPA HTTP ${response.status}: ${JSON.stringify(raw)}`);

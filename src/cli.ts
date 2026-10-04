@@ -1,5 +1,6 @@
 import type { Store } from './store.js';
 import { ask } from './agent.js';
+import { databasePath, prepareDatabaseDirectory } from './paths.js';
 
 const [command, ...args] = process.argv.slice(2);
 const baseUrl = process.env.CPA_BASE_URL ?? 'http://127.0.0.1:8317/v1';
@@ -12,13 +13,15 @@ try {
     const config = readDiscordConfig(process.env);
     if (command === 'discord-register') await registerDiscordCommands(config);
     else {
-      const dbPath = process.env.BUTLER_DB ?? new URL('../.data/butler.sqlite', import.meta.url).pathname;
+      const dbPath = databasePath();
+      prepareDatabaseDirectory(dbPath);
       const { Store } = await import('./store.js');
       const store = new Store(dbPath);
       await startDiscord(config, store);
     }
   } else {
-    const dbPath = process.env.BUTLER_DB ?? new URL('../.data/butler.sqlite', import.meta.url).pathname;
+    const dbPath = databasePath();
+    prepareDatabaseDirectory(dbPath);
     const { Store } = await import('./store.js');
     const store = new Store(dbPath);
     try {

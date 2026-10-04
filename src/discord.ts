@@ -3,6 +3,8 @@ import { writeFileSync } from 'node:fs';
 import type { Store } from './store.js';
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
+import { databasePath } from './paths.js';
+import { startUi } from './ui.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
@@ -54,8 +56,8 @@ export class DiscordHandler {
       let consumedSteer = false;
       try {
         const { content: userContent } = await resolveDiscordMessage(message, content);
-        const state = this.store.channelState(message.channelId, this.config.defaultModel);
-        if (botInput) state.sessionId = this.store.botSession(message.channelId, message.authorId);
+        const state = this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId);
+        if (botInput) state.sessionId = this.store.botSession(message.channelId, message.authorId, this.config.ownerId);
         sessionId = state.sessionId;
         if (!content) {
           text = '（附件尚未支援；我只處理文字內容。）';
@@ -158,7 +160,7 @@ export class DiscordHandler {
       return;
     }
     if (this.stopping) { await context.reply('Butler 正在關閉，暫時不接受新指令。'); return; }
-    const state = this.store.channelState(context.channelId, this.config.defaultModel);
+    const state = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
     if (context.command === 'status') {
       const embed = new EmbedBuilder().setTitle('Butler status ─ Glad to be of service.').addFields(
         { name: '💼 Work Phase', value: state.sessionId },
@@ -216,7 +218,7 @@ export class DiscordHandler {
     if (context.command === 'new') {
       await this.enqueue(context.channelId, async () => {
         const sessionId = this.store.newSession();
-        this.store.setChannelSession(context.channelId, sessionId);
+        this.store.setChannelSession(context.channelId, sessionId, this.config.ownerId);
         await context.reply(`新 session：${sessionId}`);
       });
       return;
@@ -412,7 +414,7 @@ function isAllowedDiscordChannel(rootIds: string[], channelId: string, parentCha
   return rootIds.includes(channelId) || (parentChannelId !== undefined && rootIds.includes(parentChannelId));
 }
 
-export async function startDiscord(config: DiscordConfig, store: Store, clientOverride?: Client): Promise<void> {
+export async function startDiscord(config: DiscordConfig, store: Store, clientOverride?: Client, dbPath = databasePath()): Promise<void> {
   const readyFile = process.env.BUTLER_RESTART_READY_FILE;
   let finish!: () => void;
   const lifetime = new Promise<void>(resolve => { finish = resolve; });
@@ -460,11 +462,15 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
   client.on('error', () => logSafe('Discord client error'));
 
   let closed = false;
+  let uiStartupFailed = false;
+  let closeUi: (() => Promise<void>) | undefined;
   const shutdown = async () => {
     if (closed) return;
     closed = true;
     process.removeListener('SIGINT', onSigint);
     process.removeListener('SIGTERM', onSigterm);
+    try { await closeUi?.(); } catch { logSafe('UI shutdown failed'); }
+    closeUi = undefined;
     try { await client.destroy(); } catch { logSafe('Discord client shutdown failed'); }
     try { store.close(); } catch { logSafe('Discord database shutdown failed'); }
   };
@@ -473,11 +479,26 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
   try {
+    const uiPort = process.env.BUTLER_UI_PORT;
+    if (uiPort !== undefined && uiPort.trim() !== '') {
+      const port = Number(uiPort);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) { uiStartupFailed = true; throw new Error('BUTLER_UI_PORT must be an integer from 1 to 65535'); }
+      try {
+        const ui = await startUi(dbPath, port);
+        if (closed) {
+          await ui.close();
+          return;
+        }
+        closeUi = ui.close;
+      } catch { uiStartupFailed = true; throw new Error('UI listener could not start'); }
+      console.info(`UI listening on 127.0.0.1:${port}`);
+    }
     await client.login(config.token);
     await lifetime;
     process.exitCode = exitCode;
   } catch {
     await shutdown();
+    if (uiStartupFailed) throw new Error('UI startup failed; Discord was not connected');
     throw new Error('Discord login failed');
   }
 }
