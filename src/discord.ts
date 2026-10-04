@@ -5,6 +5,9 @@ import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
 import { databasePath } from './paths.js';
 import { startUi } from './ui.js';
+import { GoogleAuth } from './google-auth.js';
+import { GoogleClient } from './google-client.js';
+import { createGoogleToolRuntime, type GoogleToolRuntime } from './google-tools.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
@@ -26,7 +29,7 @@ export class DiscordHandler {
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string }>>>();
   private readonly workCounts = new Map<string, number>();
   private stopping = false;
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>) {}
+  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime) {}
 
   queueStatus(channelId: string): 'idle' | 'busy' { return this.queues.has(channelId) ? 'busy' : 'idle'; }
 
@@ -67,6 +70,7 @@ export class DiscordHandler {
           const result = await this.runAsk(this.store, state.sessionId, userContent, {
             baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: state.model,
             discordTools: toolRuntime,
+            googleTools: this.googleTools,
             discordContext: { channelId: message.channelId, messageId: message.messageId },
             consumeSteer: async () => (await this.pendingSteer.get(message.channelId)?.[0])?.content,
             onSteerPersisted: persisted => {
@@ -426,7 +430,9 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
     finish();
     return true;
   } : undefined;
-  const handler = new DiscordHandler(store, config, ask, requestRestart);
+  const googleAuth = new GoogleAuth();
+  const googleTools = createGoogleToolRuntime(new GoogleClient(googleAuth), process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname);
+  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools);
   client = clientOverride ?? new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], rest: { retries: 0 } });
   client.once('clientReady', readyClient => {
     console.info(`Discord ready (bot ID: ${readyClient.user.id})`);
@@ -484,7 +490,11 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
       const port = Number(uiPort);
       if (!Number.isInteger(port) || port < 1 || port > 65535) { uiStartupFailed = true; throw new Error('BUTLER_UI_PORT must be an integer from 1 to 65535'); }
       try {
-        const ui = await startUi(dbPath, port);
+        const ui = await startUi(dbPath, port, {
+          googleAuth,
+          publicOrigin: process.env.BUTLER_UI_PUBLIC_ORIGIN ?? 'https://workspace.example.com',
+          cookiePath: process.env.BUTLER_UI_COOKIE_PATH ?? `/proxy/${port}/`,
+        });
         if (closed) {
           await ui.close();
           return;

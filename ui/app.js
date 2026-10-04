@@ -194,6 +194,7 @@ document.querySelectorAll('[data-kind]').forEach(button => {
 });
 
 $('#refresh').onclick = () => {
+  if (!googleCsrf) void loadGoogleStatus();
   if (activeTab === 'request') void loadLatestRequest();
   else {
     void loadSessions(false);
@@ -212,4 +213,54 @@ $('#download').onclick = () => {
   if (rawRequestBody) downloadBlob(rawRequestBody, 'latest-cpa-request.json', 'application/json');
 };
 
+let googleCsrf = null;
+let googleExpiry;
+function clearGoogleTransaction() {
+  googleCsrf = null;
+  clearTimeout(googleExpiry);
+  $('#google-url').value = '';
+  $('#google-csrf-url')?.remove();
+  $('#google-complete').hidden = true;
+}
+async function loadGoogleStatus() {
+  try {
+    const { status } = await getJson('api/google/status');
+    const labels = { not_configured: '尚未設定 client', not_connected: '尚未連線', connected: '已連線', reauthorization_required: '需要重新授權' };
+    $('#google-status').textContent = labels[status] ?? '連線狀態未知';
+    $('#google-start').disabled = status === 'not_configured';
+  } catch { $('#google-status').textContent = '無法讀取 Google 連線狀態'; }
+}
+$('#google-start').onclick = async () => {
+  clearGoogleTransaction();
+  $('#google-start').disabled = true;
+  $('#google-submit').disabled = true;
+  try {
+    const response = await fetch('api/google/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', cache: 'no-store', credentials: 'same-origin' });
+    if (!response.ok) throw new Error('無法開始授權');
+    const data = await response.json();
+    googleCsrf = data.csrf;
+    $('#google-csrf-url')?.remove();
+    const link = element('a', '開啟 Google 授權頁面');
+    link.id = 'google-csrf-url'; link.href = data.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    $('#google-complete').prepend(link); $('#google-complete').hidden = false;
+    $('#google-status').textContent = '請在 Google 授權後，於五分鐘內複製導回的完整網址並貼回此處。';
+    googleExpiry = setTimeout(() => { clearGoogleTransaction(); $('#google-status').textContent = '授權已逾時，請重新開始。'; }, 300_000);
+  } catch { clearGoogleTransaction(); $('#google-status').textContent = '無法開始授權，請確認 client 設定與公開 UI origin。'; }
+  finally { $('#google-start').disabled = false; $('#google-submit').disabled = false; }
+};
+$('#google-submit').onclick = async () => {
+  const input = $('#google-url'); const pastedUrl = input.value; input.value = '';
+  $('#google-start').disabled = true;
+  $('#google-submit').disabled = true;
+  try {
+    if (!googleCsrf || !pastedUrl) throw new Error('請先開始授權並貼上完整網址');
+    const response = await fetch('api/google/complete', { method: 'POST', headers: { 'content-type': 'application/json', 'x-csrf-token': googleCsrf }, body: JSON.stringify({ url: pastedUrl }), cache: 'no-store', credentials: 'same-origin' });
+    googleCsrf = null;
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? '授權失敗，請重新開始');
+    $('#google-complete').hidden = true; $('#google-status').textContent = '已連線';
+  } catch (error) { $('#google-status').textContent = error.message; }
+  finally { clearGoogleTransaction(); $('#google-start').disabled = false; $('#google-submit').disabled = false; }
+};
+void loadGoogleStatus();
 void loadSessions();

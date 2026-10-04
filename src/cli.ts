@@ -1,6 +1,9 @@
 import type { Store } from './store.js';
 import { ask } from './agent.js';
 import { databasePath, prepareDatabaseDirectory } from './paths.js';
+import { GoogleAuth } from './google-auth.js';
+import { GoogleClient } from './google-client.js';
+import { createGoogleToolRuntime } from './google-tools.js';
 
 const [command, ...args] = process.argv.slice(2);
 const baseUrl = process.env.CPA_BASE_URL ?? 'http://127.0.0.1:8317/v1';
@@ -83,6 +86,7 @@ async function runCommand(store: Store): Promise<void> {
       baseUrl,
       apiKey: process.env.CPA_API_KEY,
       model: required('CPA_MODEL'),
+      googleTools: createGoogleToolRuntime(new GoogleClient(new GoogleAuth()), process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname),
     });
     console.log(`session ${session}\n${text}`);
   } else {
