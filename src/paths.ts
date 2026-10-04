@@ -1,9 +1,9 @@
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
+import { requireSetting, type ButlerConfig } from './config.js';
 import { mkdirSync, chmodSync, existsSync } from 'node:fs';
 
-export function databasePath(env: NodeJS.ProcessEnv = process.env): string {
-  return resolve(env.BUTLER_DB || join(homedir(), '.local/share/butler/butler.sqlite'));
+export function databasePath(config: ButlerConfig): string {
+  return requireSetting(config.paths?.database, 'paths.database');
 }
 
 export function prepareDatabaseDirectory(path: string): void {

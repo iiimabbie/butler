@@ -26,7 +26,7 @@ wait_child() {
 
 while :; do
   rm -f "$READY_FILE"
-  BUTLER_RESTART_READY_FILE="$READY_FILE" "$NODE" "$ROOT/dist/cli.js" discord &
+  BUTLER_RESTART_READY_FILE="$READY_FILE" "$NODE" --network-family-autoselection-attempt-timeout=2000 "$ROOT/dist/cli.js" discord &
   child=$!
   elapsed=0
   timeout=${BUTLER_READY_TIMEOUT_SECONDS:-60}

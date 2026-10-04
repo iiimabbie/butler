@@ -3,7 +3,7 @@ import { mkdirSync, realpathSync, statSync } from 'node:fs';
 import { resolve, relative, basename } from 'node:path';
 import type { Store } from './store.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; actorId?: string; isBot?: boolean; sessionId?: string; store?: Store; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; sessionId?: string; store?: Store; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
@@ -11,29 +11,29 @@ const channelMessage = { channelId: snowflake, messageId: snowflake };
 const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, additionalProperties: false };
 const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
-  { name: 'discord_send_message', description: 'Send a message to an explicitly identified allowlisted Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
-  { name: 'discord_fetch_message', description: 'Fetch one message from an explicitly identified allowlisted Discord channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_fetch_channel_messages', description: 'Fetch a bounded page of messages from an allowlisted channel; pass before to continue toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
-  { name: 'discord_edit_message', description: 'Edit a message authored by this bot in an allowlisted channel.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
-  { name: 'discord_delete_message', description: 'Delete one explicitly identified message in an allowlisted channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_react', description: 'Add a reaction to an explicitly identified message in an allowlisted channel.', properties: { ...channelMessage, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, required: ['channelId', 'messageId', 'emoji'] },
-  { name: 'discord_pin', description: 'Pin one explicitly identified message in an allowlisted channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_unpin', description: 'Unpin one explicitly identified message in an allowlisted channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_create_thread', description: 'Create a public thread from an allowlisted text channel. Threads cannot host nested threads.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 }, messageId: snowflake }, required: ['channelId', 'name'] },
-  { name: 'discord_create_forum_post', description: 'Create a post in an allowlisted forum channel.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'title', 'content'] },
-  { name: 'discord_archive_thread', description: 'Archive an existing thread under an allowlisted root channel; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_delete_thread', description: 'Delete only a verified thread under an allowlisted root channel; messageId is the thread ID here, never its parent.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_rename_post', description: 'Rename a verified post thread under an allowlisted forum.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
-  { name: 'discord_rename_forum', description: 'Rename an allowlisted forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
-  { name: 'discord_bot_mention_toggle', description: 'Owner only: enable or disable replies to other bots that explicitly mention Butler in allowed channels. Persists across restarts.', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
+  { name: 'discord_send_message', description: 'Send a message to an explicitly identified Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
+  { name: 'discord_fetch_message', description: 'Fetch one message from an explicitly identified Discord channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_fetch_channel_messages', description: 'Fetch a bounded page of messages from a channel; pass before to continue toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
+  { name: 'discord_edit_message', description: 'Edit a message authored by this bot in a channel.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
+  { name: 'discord_delete_message', description: 'Delete one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_react', description: 'Add a reaction to an explicitly identified message in a channel.', properties: { ...channelMessage, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, required: ['channelId', 'messageId', 'emoji'] },
+  { name: 'discord_pin', description: 'Pin one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_unpin', description: 'Unpin one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_create_thread', description: 'Create a public thread from a text channel. Threads cannot host nested threads.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 }, messageId: snowflake }, required: ['channelId', 'name'] },
+  { name: 'discord_create_forum_post', description: 'Create a post in a forum channel.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'title', 'content'] },
+  { name: 'discord_archive_thread', description: 'Archive an existing thread under its parent channel; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_delete_thread', description: 'Delete only a verified thread under its parent channel; messageId is the thread ID here, never its parent.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_rename_post', description: 'Rename a verified post thread under a forum.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
+  { name: 'discord_rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
+  { name: 'discord_bot_mention_toggle', description: 'Enable or disable replies to other bots that explicitly mention Butler in allowed channels. Persists across restarts.', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
   { name: 'discord_attach_to_reply', description: 'Queue a local file from the configured attachment directory for the current final reply.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
-  { name: 'discord_send_buttons', description: 'Send persistent interactive Discord buttons whose allowlisted actions are executed once on click.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
+  { name: 'discord_send_buttons', description: 'Send persistent interactive Discord buttons whose actions are executed once on click.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
 ];
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 
-export function createDiscordToolRuntime(options: { token: string; channelIds: string[]; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string }): DiscordToolRuntime {
-  const allowed = new Set(options.channelIds); const fetcher = options.fetcher ?? fetch;
+export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string }): DiscordToolRuntime {
+  const fetcher = options.fetcher ?? fetch;
   const api = async (method: string, path: string, body?: unknown): Promise<unknown> => {
     let response: Response;
     try { response = await fetcher(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
@@ -46,31 +46,23 @@ export function createDiscordToolRuntime(options: { token: string; channelIds: s
     if (String(target.id) !== id) throw new Error('Discord returned a different channel than requested');
     const type = Number(target.type);
     if ([10, 11, 12].includes(type)) {
-      const parent = String(target.parent_id ?? '');
       if (String(target.id) !== id) throw new Error('Discord returned a different channel than requested');
-      if (!allowed.has(parent)) throw new Error('Discord thread parent is not allowlisted');
       if (requireThread && ![10, 11, 12].includes(type)) throw new Error('Target is not a thread');
       return target;
     }
-    if (!allowed.has(id)) throw new Error('Discord tool target channel is not allowlisted');
     if (requireThread) throw new Error('Target is not a thread');
     return target;
   };
-  const assertAllowedChannel = async (id: string): Promise<void> => { if (!allowed.has(id)) await checkRootOrChild(id); };
-  const ownerTools = new Set(['discord_bot_mention_toggle', 'discord_attach_to_reply', 'discord_send_buttons']);
-  const definitions = options.context.isBot ? discordMessageTools.filter(tool => !ownerTools.has(tool.name)) : discordMessageTools;
-  return { definitions, context: options.context, async execute(name, args) {
-    if (options.context.isBot && ownerTools.has(name)) throw new Error('This tool is restricted to the owner');
+  return { definitions: discordMessageTools, context: options.context, async execute(name, args) {
     if (options.context.isBot && !options.context.store?.botReplyEnabled()) throw new Error('Bot replies are disabled');
     const spec = specs.find(item => item.name === name); if (!spec) throw new Error(`Unknown Discord tool: ${name}`);
     validateArgs(spec, args);
     if (name === 'discord_bot_mention_toggle') {
-      if (!options.context.store || !options.context.ownerId || options.context.actorId !== options.context.ownerId) throw new Error('Only the owner can change bot replies');
+      if (!options.context.store) throw new Error('Bot reply settings are unavailable');
       options.context.store.setBotReplyEnabled(args.enabled as boolean);
       return { enabled: options.context.store.botReplyEnabled() };
     }
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
-    if (channelId) await assertAllowedChannel(channelId);
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     if (name === 'discord_attach_to_reply') {
       if (!options.attachmentDir) throw new Error('Local Discord attachments are not configured');
@@ -93,7 +85,7 @@ export function createDiscordToolRuntime(options: { token: string; channelIds: s
       const allowedActions = new Set(specs.filter(s => ['discord_send_message','discord_edit_message','discord_delete_message','discord_react','discord_pin','discord_unpin','discord_create_thread','discord_create_forum_post','discord_archive_thread','discord_delete_thread','discord_rename_post','discord_rename_forum'].includes(s.name)).map(s => s.name));
       const buttons = args.buttons as Array<Record<string, unknown>>;
       if (new Set(buttons.map(item => item.id)).size !== buttons.length) throw new Error('Button IDs must be unique');
-      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new Error('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); if (item.actionArgs && 'channelId' in (item.actionArgs as object)) await assertAllowedChannel(String((item.actionArgs as Record<string, unknown>).channelId)); }
+      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new Error('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); }
       const actionId = randomUUID(); const expiresAt = new Date(Date.now() + Number(args.expiresInMinutes ?? 1440) * 60_000).toISOString();
       const custom: Array<Record<string, unknown>> = buttons.map(item => ({ ...item, custom_id: `${actionId}:${randomUUID()}` }));
       options.context.store.createDiscordAction({ id: actionId, sessionId: options.context.sessionId, channelId: channelId!, ownerId: options.context.ownerId, expiresAt, buttons: custom });
@@ -110,12 +102,12 @@ export function createDiscordToolRuntime(options: { token: string; channelIds: s
       if (name === 'discord_create_forum_post') { if (![15,16].includes(type)) throw new Error('Target channel is not a forum/media channel'); method='POST';path=`/channels/${channelId}/threads`;body={name:args.title,message:{content:args.content,allowed_mentions:{parse:[]}},auto_archive_duration:1440}; }
       else { if (![0,5].includes(type)) throw new Error('Target channel cannot host a public thread'); if (type === 5 && !messageId) throw new Error('Announcement channels require a source message to create a thread'); if (messageId) { method='POST';path=`/channels/${channelId}/messages/${messageId}/threads`;body={name:args.name,auto_archive_duration:1440}; } else { method='POST';path=`/channels/${channelId}/threads`;body={name:args.name,type:11,auto_archive_duration:1440}; } }
     } else if (['discord_archive_thread','discord_delete_thread'].includes(name)) {
-      const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new Error('Thread does not belong to the specified allowlisted root');
+      const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new Error('Thread does not belong to the specified root');
       if (name === 'discord_delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
     } else if (name === 'discord_rename_post') {
       const target = await checkRootOrChild(stringArg(args.threadId,'threadId'),true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new Error('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
     } else if (name === 'discord_rename_forum') {
-      const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new Error('Target is not an allowlisted forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
+      const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new Error('Target is not a forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {

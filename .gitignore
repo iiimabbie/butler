@@ -5,3 +5,4 @@ dist/
 *.sqlite-shm
 *.sqlite-wal
 /workspace/
+/config.yaml

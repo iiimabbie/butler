@@ -3,19 +3,22 @@ import { writeFileSync } from 'node:fs';
 import type { Store } from './store.js';
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
-import { databasePath } from './paths.js';
+import { requireSetting, type ButlerConfig } from './config.js';
+import { createWebToolRuntime, type WebToolRuntime } from './web-tools.js';
+import { createWeatherToolRuntime, type WeatherToolRuntime } from './weather-tools.js';
 import { startUi } from './ui.js';
 import { GoogleAuth } from './google-auth.js';
 import { GoogleClient } from './google-client.js';
 import { createGoogleToolRuntime, type GoogleToolRuntime } from './google-tools.js';
+import { LocalToolRuntime } from './local-tools.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string };
+export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; channelId: string; parentChannelId?: string; messageId?: string; content: string; hasAttachments?: boolean; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown> };
-export type CommandContext = { ownerId: string; channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'new' | 'mode' | 'restart' | 'botreply'; model?: string; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
+export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'new' | 'mode' | 'restart' | 'botreply'; model?: string; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
 export type RestartNotice = { channelId: string; messageId: string };
 const modelCache = new Map<string, { expiresAt: number; models: string[] }>();
 const modelInflight = new Map<string, Promise<string[]>>();
@@ -29,14 +32,20 @@ export class DiscordHandler {
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string }>>>();
   private readonly workCounts = new Map<string, number>();
   private stopping = false;
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime) {}
+  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime) {}
+
+  async close(): Promise<void> {
+    this.stopping = true;
+    try { await this.localTools?.close(); }
+    finally { await Promise.allSettled([...this.queues.values()]); }
+  }
 
   queueStatus(channelId: string): 'idle' | 'busy' { return this.queues.has(channelId) ? 'busy' : 'idle'; }
 
   async message(message: TextMessage): Promise<void> {
     if (message.isSelf || message.isWebhook || !isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId) || this.stopping) return;
     const botInput = message.isBot === true;
-    if (botInput ? !message.mentionsBot || !this.store.botReplyEnabled() : message.authorId !== this.config.ownerId) return;
+    if (botInput && (!message.mentionsBot || !this.store.botReplyEnabled())) return;
     const content = message.content.trim();
     if (!content && !message.hasAttachments) return;
     const mode = this.store.channelMode(message.channelId);
@@ -66,11 +75,14 @@ export class DiscordHandler {
           text = '（附件尚未支援；我只處理文字內容。）';
         } else {
           if (!botInput) this.activeAsk.add(message.channelId);
-          const toolRuntime = createDiscordToolRuntime({ token: this.config.token, channelIds: this.config.channelIds, attachmentDir: process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, actorId: message.authorId, isBot: botInput, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds } });
+          const toolRuntime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, isBot: botInput, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds } });
           const result = await this.runAsk(this.store, state.sessionId, userContent, {
             baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: state.model,
             discordTools: toolRuntime,
             googleTools: this.googleTools,
+            localTools: this.localTools,
+            webTools: this.webTools,
+            weatherTools: this.weatherTools,
             discordContext: { channelId: message.channelId, messageId: message.messageId },
             consumeSteer: async () => (await this.pendingSteer.get(message.channelId)?.[0])?.content,
             onSteerPersisted: persisted => {
@@ -130,7 +142,7 @@ export class DiscordHandler {
     const actionId = customId.slice(0, split);
     const action = this.store.discordAction(actionId);
     const respond = async (content: string) => { try { await interaction.followUp({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS }); } catch { logSafe('Discord button result delivery failed'); } };
-    if (!action || action.status !== 'pending' || this.stopping || action.owner_id !== this.config.ownerId || interaction.user.id !== this.config.ownerId || !isAllowedDiscordChannel(this.config.channelIds, action.channel_id, interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined) || interaction.channelId !== action.channel_id || interaction.message.id !== action.message_id) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕無效或不屬於目前允許的操作。'); return; }
+    if (!action || action.status !== 'pending' || this.stopping || interaction.channelId !== action.channel_id || interaction.message.id !== action.message_id) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕無效或不屬於目前允許的操作。'); return; }
     if (Date.now() >= Date.parse(action.expires_at)) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕已過期。'); return; }
     let buttons: Array<Record<string, unknown>>;
     try { buttons = JSON.parse(action.buttons) as Array<Record<string, unknown>>; } catch { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕設定無效。'); return; }
@@ -147,7 +159,7 @@ export class DiscordHandler {
       let actionFailed = false;
       try {
         if (this.stopping || Date.now() >= Date.parse(action.expires_at)) throw new Error('expired_or_stopping');
-        const runtime = createDiscordToolRuntime({ token: this.config.token, channelIds: this.config.channelIds, attachmentDir: process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname, context: { channelId: action.channel_id, ownerId: this.config.ownerId, sessionId: action.session_id, store: this.store, attachmentFiles: [] } });
+        const runtime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: action.channel_id, ownerId: this.config.ownerId, sessionId: action.session_id, store: this.store, attachmentFiles: [] } });
         const actionArgs = button.actionArgs as Record<string, unknown>;
         toolId = this.store.beginTool(action.session_id, String(button.actionTool), actionArgs);
         result = await runtime.execute(String(button.actionTool), actionArgs);
@@ -159,8 +171,8 @@ export class DiscordHandler {
   }
 
   async command(context: CommandContext): Promise<void> {
-    if (context.ownerId !== this.config.ownerId || !isAllowedDiscordChannel(this.config.channelIds, context.channelId, context.parentChannelId)) {
-      await context.reply('此操作者或頻道未獲允許。');
+    if (!isAllowedDiscordChannel(this.config.channelIds, context.channelId, context.parentChannelId)) {
+      await context.reply('此頻道未訂閱 Butler 指令。');
       return;
     }
     if (this.stopping) { await context.reply('Butler 正在關閉，暫時不接受新指令。'); return; }
@@ -195,6 +207,7 @@ export class DiscordHandler {
     if (context.command === 'restart') {
       if (!this.restart) { await context.reply('目前不是由受控重啟入口啟動，無法重啟。'); return; }
       if (this.queues.size > 0) { await context.reply('目前有頻道工作進行中或排隊，無法重啟。'); return; }
+      if (this.localTools?.activeCount) { await context.reply('目前仍有主機工作運作，請先用 local_process_stop 停止，再重啟。'); return; }
       this.stopping = true;
       let notice: unknown;
       try {
@@ -240,7 +253,7 @@ export class DiscordHandler {
   private enqueue(channelId: string, work: () => Promise<void>): Promise<void> {
     const previous = this.queues.get(channelId) ?? Promise.resolve();
     this.workCounts.set(channelId, (this.workCounts.get(channelId) ?? 0) + 1);
-    const next = previous.catch(() => undefined).then(work);
+    const next = previous.catch(() => undefined).then(() => { if (!this.stopping) return work(); });
     this.queues.set(channelId, next);
     void next.finally(() => {
       const remaining = (this.workCounts.get(channelId) ?? 1) - 1;
@@ -299,23 +312,24 @@ export const commands = [
   new SlashCommandBuilder().setName('botreply').setDescription('Set replies to other bots that mention Butler').addBooleanOption(option => option.setName('enabled').setDescription('Enable replies and Discord tools for bot mentions').setRequired(true)),
 ].map(command => command.toJSON());
 
-export function readDiscordConfig(env: NodeJS.ProcessEnv): DiscordConfig {
-  const required = (key: string) => { const value = env[key]?.trim(); if (!value) throw new Error(`${key} is required`); return value; };
-  const token = required('BUTLER_DISCORD_TOKEN');
-  const ownerId = required('BUTLER_DISCORD_OWNER_ID');
-  const channelIds = required('BUTLER_DISCORD_CHANNEL_IDS').split(',').map(value => value.trim()).filter(Boolean);
-  if (channelIds.length === 0) throw new Error('BUTLER_DISCORD_CHANNEL_IDS must contain at least one channel ID');
-  const defaultModel = required('CPA_MODEL');
-  return { token, ownerId, channelIds, defaultModel, baseUrl: env.CPA_BASE_URL ?? 'http://127.0.0.1:8317/v1', apiKey: env.CPA_API_KEY };
+export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
+  return {
+    token: requireSetting(config.discord?.token, 'discord.token'),
+    ownerId: requireSetting(config.discord?.ownerId, 'discord.ownerId'),
+    channelIds: requireSetting(config.discord?.channelIds, 'discord.channelIds'),
+    defaultModel: requireSetting(config.cpa?.model, 'cpa.model'),
+    baseUrl: requireSetting(config.cpa?.baseUrl, 'cpa.baseUrl'),
+    apiKey: config.llmapikey,
+    attachmentDir: requireSetting(config.paths?.attachments, 'paths.attachments'),
+  };
 }
 
-export async function registerDiscordCommands(config: DiscordConfig, testApi?: DiscordCommandApi): Promise<void> {
-  const guildId = process.env.BUTLER_DISCORD_GUILD_ID?.trim();
-  const applicationId = process.env.BUTLER_DISCORD_APPLICATION_ID?.trim();
-  if (!guildId) throw new Error('BUTLER_DISCORD_GUILD_ID is required');
-  if (!applicationId) throw new Error('BUTLER_DISCORD_APPLICATION_ID is required');
+export async function registerDiscordCommands(config: ButlerConfig, testApi?: DiscordCommandApi): Promise<void> {
+  const guildId = requireSetting(config.discord?.guildId, 'discord.guildId');
+  const applicationId = requireSetting(config.discord?.applicationId, 'discord.applicationId');
+  const token = requireSetting(config.discord?.token, 'discord.token');
   const route = Routes.applicationGuildCommands(applicationId, guildId);
-  const api = testApi ?? (new REST({ version: '10' }).setToken(config.token) as unknown as DiscordCommandApi);
+  const api = testApi ?? (new REST({ version: '10' }).setToken(token) as unknown as DiscordCommandApi);
   const result = await api.get(route);
   if (!Array.isArray(result)) throw new Error('Discord guild command list is invalid');
   const existing = result as Array<{ id?: string; name?: string; description?: string; options?: Array<{ name?: string; description?: string; type?: number | string; required?: boolean; autocomplete?: boolean; choices?: Array<{ name?: string; value?: string | number }> }> }>;
@@ -348,7 +362,7 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
     const restart = interaction.commandName === 'restart';
     const deferred = restart ? Promise.resolve(true) : interaction.deferReply({ flags: 64 }).then(() => true, () => false);
     let acknowledged = false;
-    await handler.command({ ownerId: interaction.user.id, channelId: interaction.channelId ?? '', parentChannelId: interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined, command: interaction.commandName as CommandContext['command'], enabled: interaction.commandName === 'botreply' ? interaction.options.getBoolean('enabled') ?? undefined : undefined, model: interaction.options.getString('id') ?? undefined, mode: interaction.options.getString('value') as 'queue' | 'steer' | null ?? undefined, reply: async (content, options) => {
+    await handler.command({channelId: interaction.channelId ?? '', parentChannelId: interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined, command: interaction.commandName as CommandContext['command'], enabled: interaction.commandName === 'botreply' ? interaction.options.getBoolean('enabled') ?? undefined : undefined, model: interaction.options.getString('id') ?? undefined, mode: interaction.options.getString('value') as 'queue' | 'steer' | null ?? undefined, reply: async (content, options) => {
       if (restart && !acknowledged) {
         acknowledged = true;
         return interaction.reply({ content, ephemeral: options?.ephemeral ?? false, fetchReply: true, allowedMentions: ALLOWED_MENTIONS });
@@ -406,7 +420,7 @@ export async function modelChoices(config: DiscordConfig, focused: string, fetch
 
 export async function handleAutocomplete(config: DiscordConfig, interaction: import('discord.js').AutocompleteInteraction, fetcher: typeof fetch = fetch): Promise<void> {
   try {
-    if (interaction.commandName !== 'model' || interaction.options.getFocused(true).name !== 'id' || interaction.user.id !== config.ownerId || !isAllowedDiscordChannel(config.channelIds, interaction.channelId ?? '', interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined)) {
+    if (interaction.commandName !== 'model' || interaction.options.getFocused(true).name !== 'id' || !isAllowedDiscordChannel(config.channelIds, interaction.channelId ?? '', interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined)) {
       await interaction.respond([]); return;
     }
     await interaction.respond(await modelChoices(config, String(interaction.options.getFocused()), fetcher));
@@ -418,7 +432,7 @@ function isAllowedDiscordChannel(rootIds: string[], channelId: string, parentCha
   return rootIds.includes(channelId) || (parentChannelId !== undefined && rootIds.includes(parentChannelId));
 }
 
-export async function startDiscord(config: DiscordConfig, store: Store, clientOverride?: Client, dbPath = databasePath()): Promise<void> {
+export async function startDiscord(config: DiscordConfig, store: Store, settings: ButlerConfig, dbPath: string, clientOverride?: Client): Promise<void> {
   const readyFile = process.env.BUTLER_RESTART_READY_FILE;
   let finish!: () => void;
   const lifetime = new Promise<void>(resolve => { finish = resolve; });
@@ -430,10 +444,13 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
     finish();
     return true;
   } : undefined;
-  const googleAuth = new GoogleAuth();
-  const googleTools = createGoogleToolRuntime(new GoogleClient(googleAuth), process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname);
-  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools);
+  const googleAuth = new GoogleAuth({ client: settings.google });
+  const googleTools = settings.google ? createGoogleToolRuntime(new GoogleClient(googleAuth), config.attachmentDir) : undefined;
+  const webTools = createWebToolRuntime({ apiKey: settings.webkey });
   client = clientOverride ?? new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], rest: { retries: 0 } });
+  const localTools = new LocalToolRuntime();
+  const weatherTools = createWeatherToolRuntime();
+  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools, localTools, webTools, weatherTools);
   client.once('clientReady', readyClient => {
     console.info(`Discord ready (bot ID: ${readyClient.user.id})`);
     const notice = store.restartNotice();
@@ -470,30 +487,33 @@ export async function startDiscord(config: DiscordConfig, store: Store, clientOv
   let closed = false;
   let uiStartupFailed = false;
   let closeUi: (() => Promise<void>) | undefined;
-  const shutdown = async () => {
-    if (closed) return;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
     closed = true;
-    process.removeListener('SIGINT', onSigint);
-    process.removeListener('SIGTERM', onSigterm);
-    try { await closeUi?.(); } catch { logSafe('UI shutdown failed'); }
-    closeUi = undefined;
-    try { await client.destroy(); } catch { logSafe('Discord client shutdown failed'); }
-    try { store.close(); } catch { logSafe('Discord database shutdown failed'); }
+    shutdownPromise = (async () => {
+      try { await handler.close(); } catch { logSafe('Local runtime shutdown failed'); }
+      process.removeListener('SIGINT', onSigint);
+      process.removeListener('SIGTERM', onSigterm);
+      try { await closeUi?.(); } catch { logSafe('UI shutdown failed'); }
+      closeUi = undefined;
+      try { await client.destroy(); } catch { logSafe('Discord client shutdown failed'); }
+      try { store.close(); } catch { logSafe('Discord database shutdown failed'); }
+    })();
+    return shutdownPromise;
   };
   const onSigint = () => { void shutdown().then(finish).catch(() => { logSafe('Discord SIGINT shutdown failed'); finish(); }); };
   const onSigterm = () => { void shutdown().then(finish).catch(() => { logSafe('Discord SIGTERM shutdown failed'); finish(); }); };
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
   try {
-    const uiPort = process.env.BUTLER_UI_PORT;
-    if (uiPort !== undefined && uiPort.trim() !== '') {
-      const port = Number(uiPort);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) { uiStartupFailed = true; throw new Error('BUTLER_UI_PORT must be an integer from 1 to 65535'); }
+    if (settings.ui) {
+      const { port, publicOrigin, cookiePath } = settings.ui;
       try {
         const ui = await startUi(dbPath, port, {
           googleAuth,
-          publicOrigin: process.env.BUTLER_UI_PUBLIC_ORIGIN ?? 'https://workspace.example.com',
-          cookiePath: process.env.BUTLER_UI_COOKIE_PATH ?? `/proxy/${port}/`,
+          publicOrigin,
+          cookiePath,
         });
         if (closed) {
           await ui.close();

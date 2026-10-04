@@ -4,31 +4,32 @@ import { databasePath, prepareDatabaseDirectory } from './paths.js';
 import { GoogleAuth } from './google-auth.js';
 import { GoogleClient } from './google-client.js';
 import { createGoogleToolRuntime } from './google-tools.js';
+import { readConfig, requireSetting, type ButlerConfig } from './config.js';
 
 const [command, ...args] = process.argv.slice(2);
-const baseUrl = process.env.CPA_BASE_URL ?? 'http://127.0.0.1:8317/v1';
 
 try {
+  const config = readConfig();
   if (command === 'models') {
-    await listModels();
+    await listModels(config);
   } else if (command === 'discord' || command === 'discord-register') {
     const { readDiscordConfig, registerDiscordCommands, startDiscord } = await import('./discord.js');
-    const config = readDiscordConfig(process.env);
     if (command === 'discord-register') await registerDiscordCommands(config);
     else {
-      const dbPath = databasePath();
+      const discordConfig = readDiscordConfig(config);
+      const dbPath = databasePath(config);
       prepareDatabaseDirectory(dbPath);
       const { Store } = await import('./store.js');
       const store = new Store(dbPath);
-      await startDiscord(config, store);
+      await startDiscord(discordConfig, store, config, dbPath);
     }
   } else {
-    const dbPath = databasePath();
+    const dbPath = databasePath(config);
     prepareDatabaseDirectory(dbPath);
     const { Store } = await import('./store.js');
     const store = new Store(dbPath);
     try {
-      await runCommand(store);
+      await runCommand(store, config);
     } finally {
       store.close();
     }
@@ -38,9 +39,10 @@ try {
   process.exitCode = 1;
 }
 
-async function listModels(): Promise<void> {
+async function listModels(config: ButlerConfig): Promise<void> {
+  const baseUrl = requireSetting(config.cpa?.baseUrl, 'cpa.baseUrl');
   const headers: Record<string, string> = {};
-  if (process.env.CPA_API_KEY) headers.authorization = `Bearer ${process.env.CPA_API_KEY}`;
+  if (config.llmapikey) headers.authorization = `Bearer ${config.llmapikey}`;
   const response = await fetch(`${baseUrl.replace(/\/$/, '')}/models`, {
     headers,
     signal: AbortSignal.timeout(15_000),
@@ -53,7 +55,7 @@ async function listModels(): Promise<void> {
   console.log(ids.join('\n'));
 }
 
-async function runCommand(store: Store): Promise<void> {
+async function runCommand(store: Store, config: ButlerConfig): Promise<void> {
   if (command === 'sessions') {
     console.log(JSON.stringify(store.listSessions(), null, 2));
   } else if (command === 'history') {
@@ -83,10 +85,10 @@ async function runCommand(store: Store): Promise<void> {
     const { prompt, sessionId } = parseAskArgs(args);
     const session = store.ensureSession(sessionId);
     const text = await ask(store, session, prompt, {
-      baseUrl,
-      apiKey: process.env.CPA_API_KEY,
-      model: required('CPA_MODEL'),
-      googleTools: createGoogleToolRuntime(new GoogleClient(new GoogleAuth()), process.env.BUTLER_ATTACHMENT_DIR ?? new URL('../.data/attachments', import.meta.url).pathname),
+      baseUrl: requireSetting(config.cpa?.baseUrl, 'cpa.baseUrl'),
+      apiKey: config.llmapikey,
+      model: requireSetting(config.cpa?.model, 'cpa.model'),
+      googleTools: config.google ? createGoogleToolRuntime(new GoogleClient(new GoogleAuth({ client: config.google })), requireSetting(config.paths?.attachments, 'paths.attachments')) : undefined,
     });
     console.log(`session ${session}\n${text}`);
   } else {
@@ -142,12 +144,6 @@ function integerArg(value: string | undefined, fallback: number, name: string, m
     throw new Error(`${name} must be an integer from ${min} to ${max}`);
   }
   return number;
-}
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required`);
-  return value;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

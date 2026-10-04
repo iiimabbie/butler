@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { GoogleClientConfig } from './config.js';
 
 export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose',
@@ -9,7 +10,6 @@ export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file',
 ];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const CLIENT_PATH = join(homedir(), '.config/butler/google-client.json');
 const TOKEN_PATH = join(homedir(), '.local/share/butler/google-token.json');
 
 type OAuthClient = { client_id: string; client_secret: string };
@@ -20,8 +20,7 @@ export class GoogleAuthError extends Error {}
 export class GoogleAuth {
   private pending = new Map<string, Pending>();
   private refreshFlight?: Promise<Token>;
-  constructor(private readonly options: { clientPath?: string; tokenPath?: string; fetcher?: typeof fetch } = {}) {}
-  private get clientPath() { return this.options.clientPath ?? CLIENT_PATH; }
+  constructor(private readonly options: { client?: GoogleClientConfig; tokenPath?: string; fetcher?: typeof fetch } = {}) {}
   private get tokenPath() { return this.options.tokenPath ?? TOKEN_PATH; }
 
   async status(): Promise<'not_configured' | 'not_connected' | 'connected' | 'reauthorization_required'> {
@@ -98,11 +97,9 @@ export class GoogleAuth {
     return body;
   }
   private async readClient(): Promise<OAuthClient> {
-    try {
-      const x: unknown = JSON.parse(await readFile(this.clientPath, 'utf8'));
-      if (!isRecord(x) || typeof x.client_id !== 'string' || !x.client_id || typeof x.client_secret !== 'string' || !x.client_secret) throw new Error();
-      return { client_id: x.client_id, client_secret: x.client_secret };
-    } catch { throw new GoogleAuthError('Google client 尚未設定或格式錯誤'); }
+    const client = this.options.client;
+    if (!client?.clientId || !client.clientSecret) throw new GoogleAuthError('Google client 尚未設定或格式錯誤');
+    return { client_id: client.clientId, client_secret: client.clientSecret };
   }
   private async readToken(): Promise<Token> {
     try {
