@@ -114,7 +114,7 @@ test('failed HTTP and request timeout reject without false success', async () =>
   const t = temp();
   const store = new Store(t.path);
   const session = store.newSession();
-  await assert.rejects(ask(store, session, 'http failure', agentConfig(async () => new Response('no', { status: 500 }))), /CPA HTTP 500/);
+  await assert.rejects(ask(store, session, 'http failure', agentConfig(async () => new Response('no', { status: 500 }))), /LLM HTTP 500/);
   let receivedSignal;
   await assert.rejects(ask(store, session, 'timeout', agentConfig(async (_url, options) => {
     receivedSignal = options.signal;

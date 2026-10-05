@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/cli.js",
+    "start": "node dist/main.js",
     "test": "npm run build && node --test",
-    "discord": "node dist/cli.js discord",
+    "discord": "node dist/main.js",
     "discord:managed": "sh scripts/discord-restart.sh",
-    "discord:register": "node dist/cli.js discord-register"
+    "discord:register": "node dist/main.js register-discord-commands"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

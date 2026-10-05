@@ -8,6 +8,14 @@ export interface Message {
   content: string;
 }
 
+export interface MessageSource {
+  authorId?: string; isBot?: boolean; channelId?: string; discordMessageId?: string; eventTime?: string;
+}
+
+export interface StoredMessage extends Message {
+  id: string; sessionId: string; createdAt: string; source: MessageSource;
+}
+
 export interface ToolRecord {
   id: string;
   session_id: string;
@@ -35,6 +43,7 @@ export class Store {
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS message_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, author_id TEXT, is_bot INTEGER, channel_id TEXT, discord_message_id TEXT, event_time TEXT);
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
@@ -75,12 +84,27 @@ export class Store {
     return this.newSession();
   }
 
-  addMessage(session: string, role: string, content: string): void {
-    this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(randomUUID(), session, role, content, new Date().toISOString());
+  addMessage(session: string, role: string, content: string, source: MessageSource = {}): StoredMessage {
+    const message: StoredMessage = { id: randomUUID(), sessionId: session, role, content, createdAt: new Date().toISOString(), source };
+    this.db.exec('BEGIN');
+    try {
+      this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
+      this.db.prepare('INSERT INTO message_sources(message_id,author_id,is_bot,channel_id,discord_message_id,event_time) VALUES(?,?,?,?,?,?)')
+        .run(message.id, source.authorId ?? null, source.isBot === undefined ? null : source.isBot ? 1 : 0, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+    return message;
   }
 
   messages(session: string): Message[] {
     return this.db.prepare('SELECT role,content FROM messages WHERE session_id=? ORDER BY rowid').all(session) as unknown as Message[];
+  }
+
+  messagesWithSources(session: string): StoredMessage[] {
+    const rows = this.db.prepare(`SELECT m.id,m.session_id,m.role,m.content,m.created_at,s.author_id,s.is_bot,s.channel_id,s.discord_message_id,s.event_time
+      FROM messages m LEFT JOIN message_sources s ON s.message_id=m.id WHERE m.session_id=? ORDER BY m.rowid`).all(session) as Array<{ id: string; session_id: string; role: string; content: string; created_at: string; author_id: string | null; is_bot: number | null; channel_id: string | null; discord_message_id: string | null; event_time: string | null }>;
+    return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at,
+      source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }) } }));
   }
 
   beginTool(session: string, name: string, args: unknown): string {

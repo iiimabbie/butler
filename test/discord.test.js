@@ -324,8 +324,8 @@ test('send failure is safely logged and does not rerun the model request', async
   cleanup(f);
 });
 
-test('CPA failures return a generic safe error without exposing the provider body', async () => {
-  const f = fixture(async () => { throw new Error('CPA HTTP 500: private raw response'); });
+test('LLM failures return a generic safe error without exposing the provider body', async () => {
+  const f = fixture(async () => { throw new Error('LLM HTTP 500: private raw response'); });
   const m = message();
   const logs = [];
   const originalError = console.error;

@@ -11,13 +11,14 @@ import { GoogleAuth } from './google-auth.js';
 import { GoogleClient } from './google-client.js';
 import { createGoogleToolRuntime, type GoogleToolRuntime } from './google-tools.js';
 import { LocalToolRuntime } from './local-tools.js';
+import { Hindsight } from './hindsight.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
-export type TextMessage = { authorId: string; channelId: string; parentChannelId?: string; messageId?: string; content: string; hasAttachments?: boolean; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown> };
+export type TextMessage = { authorId: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'new' | 'mode' | 'restart' | 'botreply'; model?: string; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
 export type RestartNotice = { channelId: string; messageId: string };
 const modelCache = new Map<string, { expiresAt: number; models: string[] }>();
@@ -29,10 +30,10 @@ export type DiscordCommandApi = { get(route: string): Promise<unknown>; post(rou
 export class DiscordHandler {
   private readonly queues = new Map<string, Promise<void>>();
   private readonly activeAsk = new Set<string>();
-  private readonly pendingSteer = new Map<string, Array<Promise<{ content: string }>>>();
+  private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource }>>>();
   private readonly workCounts = new Map<string, number>();
   private stopping = false;
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime) {}
+  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight) {}
 
   async close(): Promise<void> {
     this.stopping = true;
@@ -78,19 +79,22 @@ export class DiscordHandler {
           const toolRuntime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, isBot: botInput, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds } });
           const result = await this.runAsk(this.store, state.sessionId, userContent, {
             baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: state.model,
+            messageSource: { authorId: message.authorId, isBot: botInput, channelId: message.channelId, discordMessageId: message.messageId, eventTime: message.eventTime ?? new Date().toISOString() },
+            hindsight: this.hindsight,
             discordTools: toolRuntime,
             googleTools: this.googleTools,
             localTools: this.localTools,
             webTools: this.webTools,
             weatherTools: this.weatherTools,
             discordContext: { channelId: message.channelId, messageId: message.messageId },
-            consumeSteer: async () => (await this.pendingSteer.get(message.channelId)?.[0])?.content,
+            consumeSteer: async () => this.pendingSteer.get(message.channelId)?.[0],
             onSteerPersisted: persisted => {
               const pending = this.pendingSteer.get(message.channelId);
               if (pending?.length) pending.shift();
               consumedSteer = true;
               if (!pending?.length) this.pendingSteer.delete(message.channelId);
             },
+            onAskFinishing: () => this.activeAsk.delete(message.channelId),
           });
           this.activeAsk.delete(message.channelId);
           text = message.hasAttachments ? `${result}\n\n（收到附件；目前不下載或讀取附件內容。）` : result;
@@ -108,10 +112,12 @@ export class DiscordHandler {
         let preservationFailed = false;
         if (supplements.length && !sessionId) preservationFailed = true;
         if (sessionId && supplements.length) {
+          const saved = [];
           for (const supplement of supplements) {
-            try { this.store.addMessage(sessionId, 'user', supplement.content); }
+            try { saved.push(this.store.addMessage(sessionId, 'user', supplement.content, supplement.source)); }
             catch { preservationFailed = true; }
           }
+          if (this.hindsight && saved.length) await this.hindsight.retain(this.store, sessionId, saved);
         }
         pending.splice(0);
         this.pendingSteer.delete(message.channelId);
@@ -276,13 +282,13 @@ export function splitDiscordText(text: string): string[] {
   return chunks;
 }
 
-async function resolveDiscordMessage(message: TextMessage, content: string): Promise<{ content: string }> {
+async function resolveDiscordMessage(message: TextMessage, content: string): Promise<{ content: string; source: import('./store.js').MessageSource }> {
   let reference = message.reference;
   if (reference?.channelId === message.channelId && message.resolveReference) {
     try { reference = await message.resolveReference(); }
     catch { /* retain known target ID as unavailable */ }
   }
-  return { content: serializeDiscordInput(content, reference) };
+  return { content: serializeDiscordInput(content, reference), source: { authorId: message.authorId, isBot: message.isBot === true, channelId: message.channelId, discordMessageId: message.messageId, eventTime: message.eventTime ?? new Date().toISOString() } };
 }
 
 function serializeDiscordInput(content: string, reference?: ReplyContext): string {
@@ -305,7 +311,7 @@ async function sendText(message: TextMessage, text: string, files?: Array<{ atta
 
 export const commands = [
   new SlashCommandBuilder().setName('status').setDescription('Show Butler session status'),
-  new SlashCommandBuilder().setName('model').setDescription('Set the CPA model').addStringOption(option => option.setName('id').setDescription('CPA model ID').setRequired(true).setAutocomplete(true)),
+  new SlashCommandBuilder().setName('model').setDescription('Set the LLM model').addStringOption(option => option.setName('id').setDescription('LLM model ID').setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder().setName('mode').setDescription('Set message handling mode').addStringOption(option => option.setName('value').setDescription('queue or steer').setRequired(true).addChoices({ name: 'queue', value: 'queue' }, { name: 'steer', value: 'steer' })),
   new SlashCommandBuilder().setName('restart').setDescription('Restart Butler through its managed launcher'),
   new SlashCommandBuilder().setName('new').setDescription('Start a new conversation session'),
@@ -317,9 +323,9 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     token: requireSetting(config.discord?.token, 'discord.token'),
     ownerId: requireSetting(config.discord?.ownerId, 'discord.ownerId'),
     channelIds: requireSetting(config.discord?.channelIds, 'discord.channelIds'),
-    defaultModel: requireSetting(config.cpa?.model, 'cpa.model'),
-    baseUrl: requireSetting(config.cpa?.baseUrl, 'cpa.baseUrl'),
-    apiKey: config.llmapikey,
+    defaultModel: requireSetting(config.llm?.model, 'llm.model'),
+    baseUrl: requireSetting(config.llm?.baseUrl, 'llm.baseUrl'),
+    apiKey: config.llm?.apiKey,
     attachmentDir: requireSetting(config.paths?.attachments, 'paths.attachments'),
   };
 }
@@ -446,11 +452,12 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
   } : undefined;
   const googleAuth = new GoogleAuth({ client: settings.google });
   const googleTools = settings.google ? createGoogleToolRuntime(new GoogleClient(googleAuth), config.attachmentDir) : undefined;
-  const webTools = createWebToolRuntime({ apiKey: settings.webkey });
+  const webTools = createWebToolRuntime(settings.web);
   client = clientOverride ?? new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], rest: { retries: 0 } });
   const localTools = new LocalToolRuntime();
   const weatherTools = createWeatherToolRuntime();
-  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools, localTools, webTools, weatherTools);
+  const hindsight = settings.memory ? new Hindsight(settings.memory) : undefined;
+  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools, localTools, webTools, weatherTools, hindsight);
   client.once('clientReady', readyClient => {
     console.info(`Discord ready (bot ID: ${readyClient.user.id})`);
     const notice = store.restartNotice();
@@ -467,7 +474,7 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
     if (readyFile) { try { writeFileSync(readyFile, 'ready\\n', { mode: 0o600 }); } catch { logSafe('Discord readiness signal failed'); } }
   });
   client.on('messageCreate', message => {
-    void handler.message({ authorId: message.author.id, channelId: message.channelId, parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content: message.content, hasAttachments: message.attachments.size > 0, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id) && new RegExp(`<@!?${client.user.id}>`).test(message.content)), isWebhook: Boolean(message.webhookId), reference: message.reference?.messageId ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, resolveReference: message.reference?.messageId ? async () => {
+    void handler.message({ authorId: message.author.id, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content: message.content, hasAttachments: message.attachments.size > 0, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id) && new RegExp(`<@!?${client.user.id}>`).test(message.content)), isWebhook: Boolean(message.webhookId), reference: message.reference?.messageId ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, resolveReference: message.reference?.messageId ? async () => {
       try {
         const target = await message.fetchReference();
         return { messageId: message.reference!.messageId!, channelId: message.reference!.channelId ?? message.channelId, authorId: target.author.id, content: target.content, hasAttachments: target.attachments.size > 0 };
