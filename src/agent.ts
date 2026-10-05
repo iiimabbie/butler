@@ -132,9 +132,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
       const raw: unknown = await response.json().catch(() => null);
       if (!response.ok) throw new Error(`LLM HTTP ${response.status}: ${JSON.stringify(raw)}`);
       const body = parseResponse(raw);
-      for (const item of body.output) if (isRecord(item) && typeof item.type === 'string' && item.type.toLowerCase().includes('commentary') && typeof item.text === 'string') emitProgress(config, { type: 'status', message: item.text });
-      input.push(...body.output);
       const calls = body.output.filter(isFunctionCall);
+      const commentary = calls.length === 1 ? commentaryText(body) : '';
+      input.push(...body.output);
       if (calls.length === 0) {
         const text = responseText(body);
         if (!text) throw new Error('LLM response has no assistant text');
@@ -151,7 +151,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         return text;
       }
       for (const call of calls) {
-        const output = await executeCall(store, session, call, config, googleRuntime);
+        const output = await executeCall(store, session, call, config, googleRuntime, commentary);
         input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
       }
     }
@@ -162,7 +162,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
   }
 }
 
-async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime): Promise<unknown> {
+async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, commentary = ''): Promise<unknown> {
   let args: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(call.arguments);
@@ -170,15 +170,15 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     args = parsed;
   } catch (error) {
     const id = store.beginTool(session, call.name, { raw_arguments: call.arguments });
-    emitProgress(config, { type: 'tool_start', toolName: call.name });
+    emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, description: commentary || undefined });
     const result = { error: errorMessage(error) };
     store.finishTool(id, 'failed', result);
-    emitProgress(config, { type: 'tool_end', toolName: call.name, status: 'failed' });
+    emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
     return { tool_history_id: id, ...result };
   }
 
   const id = store.beginTool(session, call.name, args);
-  emitProgress(config, { type: 'tool_start', toolName: call.name, args });
+  emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args, description: commentary || undefined });
   let result: unknown;
   try {
     if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
@@ -223,12 +223,12 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
   } catch (error) {
     result = { error: errorMessage(error) };
     store.finishTool(id, 'failed', result);
-    emitProgress(config, { type: 'tool_end', toolName: call.name, status: 'failed' });
+    emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
     return { tool_history_id: id, ...result as Record<string, unknown> };
   }
   // Persistence failures are intentionally outside the tool execution catch. Do not replay a completed tool.
   store.finishTool(id, 'completed', result);
-  emitProgress(config, { type: 'tool_end', toolName: call.name, status: 'completed' });
+  emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'completed' });
   return { tool_history_id: id, ...asOutput(result) };
 }
 
@@ -323,11 +323,19 @@ function isFunctionCall(value: unknown): value is FunctionCall {
     typeof value.call_id === 'string' && typeof value.arguments === 'string';
 }
 
+function commentaryText(body: ResponsesBody): string {
+  return body.output.flatMap(item => {
+    if (!isRecord(item) || item.type !== 'message' || item.channel !== 'commentary' || !Array.isArray(item.content)) return [];
+    return item.content.flatMap(part => isRecord(part) && part.type === 'output_text' && typeof part.text === 'string' ? [part.text] : []);
+  }).join('\n');
+}
+
 function responseText(body: ResponsesBody): string {
-  if (body.output_text !== undefined) return body.output_text;
-  return body.output.map((item) => {
-    if (!isRecord(item) || !Array.isArray(item.content)) return '';
-    return item.content.map((part) => isRecord(part) && typeof part.text === 'string' ? part.text : '').join('');
+  const hasCommentary = body.output.some(item => isRecord(item) && item.type === 'message' && item.channel === 'commentary');
+  if (body.output_text !== undefined && !hasCommentary) return body.output_text;
+  return body.output.map(item => {
+    if (!isRecord(item) || item.type !== 'message' || item.channel === 'commentary' || !Array.isArray(item.content)) return '';
+    return item.content.map(part => isRecord(part) && part.type === 'output_text' && typeof part.text === 'string' ? part.text : '').join('');
   }).join('');
 }
 
