@@ -52,7 +52,8 @@ export async function compactSession(store: Store, sessionId: string, options: C
 function formatMessage(message: StoredMessage): string {
   const role = message.role === 'assistant' ? 'Butler' : message.source.isBot ? `Discord bot author ${message.source.authorId ?? 'unknown'}` : `Discord human author ${message.source.authorId ?? 'unknown'}`;
   const time = message.source.eventTime ?? message.createdAt;
-  return `[${role}; channel=${message.source.channelId ?? 'unknown'}; message=${message.source.discordMessageId ?? 'unknown'}; time=${time}]\n${redactCredentials(message.content)}`;
+  const attachments = message.attachments.length ? `\nAttachments (metadata only; not read): ${message.attachments.map(file => `${file.filename} (${file.mimeType}, ${file.size} bytes, ${file.status})`).join('; ')}` : '';
+  return `[${role}; channel=${message.source.channelId ?? 'unknown'}; message=${message.source.discordMessageId ?? 'unknown'}; time=${time}]\n${redactCredentials(message.content)}${attachments}`;
 }
 
 function redactCredentials(text: string): string {

@@ -3,6 +3,9 @@ const TRAILING_PUNCTUATION = /[.,!?;:，。！？；：、…]+$/u;
 const WRAPPING_QUOTES = new Set(['"', "'", '“', '”', '‘', '’', '「', '」', '『', '』']);
 
 export function formatDiscordUrls(text: string): string {
+  const codeMask = new Uint8Array(text.length);
+  protectCode(text, codeMask);
+  text = wrapMarkdownDestinations(text, codeMask);
   const protectedChars = new Uint8Array(text.length);
   protectCode(text, protectedChars);
   protectMarkdownDestinations(text, protectedChars);
@@ -60,6 +63,37 @@ function protectCode(text: string, mask: Uint8Array): void {
     if (inlineLength) mask[index] = 1;
     index++;
   }
+}
+
+function wrapMarkdownDestinations(text: string, mask: Uint8Array): string {
+  const links = /!?\[[^\]\n]*\]\(\s*(?:<[^>]*>|https?:\/\/[^\s()]*(?:\([^\s()]*\)[^\s()]*)*|[^\s)]*)\s*(?:"[^"\n]*")?\s*\)/gm;
+  return text.replace(links, (link, offset: number) => {
+    if (isEscaped(text, offset) || mask[offset]) return link;
+    const destinationOpen = link.indexOf('](') + 1;
+    const prefix = link.slice(0, destinationOpen + 1);
+    const destinationStart = prefix.length + /^\s*/.exec(link.slice(prefix.length))![0].length;
+    const content = link.slice(destinationStart, -1);
+    if (content.startsWith('<') || isEscaped(text, offset)) return link;
+    const scheme = /^https?:\/\//i.exec(content)?.[0];
+    if (!scheme) return link;
+    let end = scheme.length;
+    let depth = 0;
+    while (end < content.length) {
+      const character = content[end]!;
+      if (/\s/u.test(character)) break;
+      if (character === '(') depth++;
+      else if (character === ')') {
+        if (depth === 0) break;
+        depth--;
+      }
+      end++;
+    }
+    const url = content.slice(0, end);
+    if (!url) return link;
+    const urlStart = offset + destinationStart;
+    if (isEscaped(text, urlStart)) return link;
+    return `${link.slice(0, destinationStart)}<${url}>${link.slice(destinationStart + url.length)}`;
+  });
 }
 
 function protectMarkdownDestinations(text: string, mask: Uint8Array): void {

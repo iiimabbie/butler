@@ -16,8 +16,10 @@ export interface MessageSource {
   authorId?: string; isBot?: boolean; channelId?: string; discordMessageId?: string; eventTime?: string;
 }
 
+export interface MessageInputAttachment { attachmentId: string; filename: string; mimeType: string; size: number; status: 'ready' | 'failed'; localPath?: string; error?: string; }
+
 export interface StoredMessage extends Message {
-  id: string; sessionId: string; createdAt: string; source: MessageSource;
+  id: string; sessionId: string; createdAt: string; source: MessageSource; attachments: MessageInputAttachment[];
 }
 
 type ScheduleDbRow = { id: string; source_channel_id: string; output_channel_id: string; creator_id: string; kind: 'cron' | 'reminder'; content: string; cron: string | null; run_at: string | null; timezone: string; enabled: number; next_run: string | null; created_at: string; updated_at: string };
@@ -58,6 +60,7 @@ export class Store implements SchedulerStore {
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS message_input_attachments(message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, attachment_id TEXT NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL, size INTEGER NOT NULL, local_path TEXT, status TEXT NOT NULL CHECK(status IN ('ready','failed')), error TEXT, PRIMARY KEY(message_id,attachment_id));
       CREATE TABLE IF NOT EXISTS message_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, author_id TEXT, is_bot INTEGER, channel_id TEXT, discord_message_id TEXT, event_time TEXT);
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
@@ -104,13 +107,15 @@ export class Store implements SchedulerStore {
     return this.newSession();
   }
 
-  addMessage(session: string, role: string, content: string, source: MessageSource = {}): StoredMessage {
-    const message: StoredMessage = { id: randomUUID(), sessionId: session, role, content, createdAt: new Date().toISOString(), source };
+  addMessage(session: string, role: string, content: string, source: MessageSource = {}, attachments: MessageInputAttachment[] = []): StoredMessage {
+    const message: StoredMessage = { id: randomUUID(), sessionId: session, role, content, createdAt: new Date().toISOString(), source, attachments };
     this.db.exec('BEGIN');
     try {
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,is_bot,channel_id,discord_message_id,event_time) VALUES(?,?,?,?,?,?)')
         .run(message.id, source.authorId ?? null, source.isBot === undefined ? null : source.isBot ? 1 : 0, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null);
+      const insertAttachment = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,size,local_path,status,error) VALUES(?,?,?,?,?,?,?,?)');
+      for (const attachment of attachments) insertAttachment.run(message.id, attachment.attachmentId, attachment.filename, attachment.mimeType, attachment.size, attachment.localPath ?? null, attachment.status, attachment.error ?? null);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
     return message;
@@ -123,8 +128,10 @@ export class Store implements SchedulerStore {
   messagesWithSources(session: string): StoredMessage[] {
     const rows = this.db.prepare(`SELECT m.id,m.session_id,m.role,m.content,m.created_at,s.author_id,s.is_bot,s.channel_id,s.discord_message_id,s.event_time
       FROM messages m LEFT JOIN message_sources s ON s.message_id=m.id WHERE m.session_id=? ORDER BY m.rowid`).all(session) as Array<{ id: string; session_id: string; role: string; content: string; created_at: string; author_id: string | null; is_bot: number | null; channel_id: string | null; discord_message_id: string | null; event_time: string | null }>;
+    const attachments = this.db.prepare('SELECT message_id,attachment_id,filename,mime_type,size,local_path,status,error FROM message_input_attachments WHERE message_id=?');
     return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at,
-      source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }) } }));
+      source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }) },
+      attachments: (attachments.all(row.id) as Array<{ attachment_id: string; filename: string; mime_type: string; size: number; local_path: string | null; status: 'ready' | 'failed'; error: string | null }>).map(item => ({ attachmentId: item.attachment_id, filename: item.filename, mimeType: item.mime_type, size: item.size, ...(item.local_path ? { localPath: item.local_path } : {}), status: item.status, ...(item.error ? { error: item.error } : {}) })) }));
   }
 
   compactCheckpoint(sessionId: string): { summary: string; throughMessageId: string; updatedAt: string } | undefined {

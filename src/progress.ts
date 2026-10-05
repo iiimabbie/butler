@@ -6,6 +6,7 @@ export type ProgressEvent =
 
 export interface ProgressMessage {
   edit(content: string): Promise<unknown>;
+  delete(): Promise<unknown>;
 }
 
 export interface ProgressTransport {
@@ -58,13 +59,15 @@ export class ProgressRenderer {
     this.scheduleFlush();
   }
 
-  async finish(status: 'completed' | 'failed'): Promise<void> {
+  async finish(_status: 'completed' | 'failed'): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
-    if (status === 'failed') for (const step of this.steps) if (step.status === 'running') step.status = 'failed';
-    if (this.steps.length) await this.flush();
+    await this.flushing;
+    if (!this.sendAttempted || !this.message) return;
+    try { await this.message.delete(); }
+    catch (error) { this.options.log('Could not delete progress message', error); }
   }
 
   private scheduleFlush(): void {

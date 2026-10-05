@@ -124,6 +124,11 @@ async function loadRecords(append = false) {
         card.append(element('strong', `${label}：`));
         card.append(element(['內容', '結果', '參數'].includes(label) ? 'pre' : 'div', value ?? '（空）'));
       }
+      if (kind === 'messages' && row.attachments) {
+        let attachments = [];
+        try { attachments = JSON.parse(row.attachments); } catch { /* malformed metadata is not rendered */ }
+        for (const file of attachments) card.append(element('div', `附件：${file.filename} · ${file.mimeType} · ${file.size} bytes · ${file.status}`));
+      }
       if (row.name === 'discord_attach_to_reply') {
         card.append(element('div', row.delivery_status
           ? `附件傳送：${row.delivery_status} · ${row.delivery_updated_at}`
@@ -160,7 +165,7 @@ async function loadLatestRequest() {
 
     rawRequestBody = data?.body_json ?? null;
     $('#request-meta').textContent = data
-      ? `送出嘗試：${data.attempted_at} · Session：${data.session_id}（不代表 CPA 已收到）`
+      ? `送出嘗試：${data.attempted_at} · Session：${data.session_id} · 附件內容已去除（不代表 CPA 已收到）`
       : '尚未有 CPA 請求快照。';
     $('#request-body').textContent = rawRequestBody ? JSON.stringify(JSON.parse(rawRequestBody), null, 2) : '';
     $('#copy').disabled = !rawRequestBody;
@@ -209,7 +214,7 @@ $('#refresh').onclick = () => {
 $('#more-sessions').onclick = () => void loadSessions(true);
 $('#more-records').onclick = () => void loadRecords(true);
 $('#copy').onclick = () => rawRequestBody && navigator.clipboard.writeText(rawRequestBody)
-  .then(() => setStatus('已複製原始 JSON。'))
+  .then(() => setStatus('已複製去除附件內容的請求檢視 JSON。'))
   .catch(error => setStatus(`複製失敗：${error.message}`));
 $('#download').onclick = () => {
   if (rawRequestBody) downloadBlob(rawRequestBody, 'latest-cpa-request.json', 'application/json');
