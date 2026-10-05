@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, realpathSync, statSync } from 'node:fs';
 import { resolve, relative, basename } from 'node:path';
 import type { Store } from './store.js';
+import { formatDiscordUrls } from './discord-url.js';
 
 export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; sessionId?: string; store?: Store; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
@@ -64,6 +65,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     }
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
+    const content = args.content === undefined ? undefined : formatDiscordUrls(stringArg(args.content, 'content'));
+    if (content !== undefined && content.length > 2000) throw new Error('Formatted Discord message exceeds 2000 characters');
     if (name === 'discord_attach_to_reply') {
       if (!options.attachmentDir) throw new Error('Local Discord attachments are not configured');
       mkdirSync(options.attachmentDir, { recursive: true });
@@ -91,7 +94,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       options.context.store.createDiscordAction({ id: actionId, sessionId: options.context.sessionId, channelId: channelId!, ownerId: options.context.ownerId, expiresAt, buttons: custom });
       const components = [] as Array<{ type: number; components: unknown[] }>;
       for (let i=0;i<custom.length;i+=5) components.push({ type: 1, components: custom.slice(i,i+5).map(item => ({ type: 2, style: ({primary:1,secondary:2,success:3,danger:4} as Record<string,number>)[String(item['style'])], label: item['label'], custom_id: item['custom_id'] })) });
-      const sent = asRecord(await api('POST', `/channels/${channelId}/messages`, { content: args.content, components, allowed_mentions: { parse: [] } }));
+      const sent = asRecord(await api('POST', `/channels/${channelId}/messages`, { content, components, allowed_mentions: { parse: [] } }));
       if (typeof sent.id !== 'string') throw new Error('Discord button message outcome is unknown; do not retry automatically');
       options.context.store.bindDiscordActionMessage(actionId, sent.id);
       return { ok: true, channelId, messageId: sent.id, actionId, expiresAt, status: 'active', result: sent };
@@ -114,7 +117,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       if (appliedTagIds?.some(id => !tags.some(tag => tag.id === id))) throw new Error('appliedTagIds must identify tags available in this forum');
       if (requireTag && !appliedTagIds?.length) return { ok: false, confirmed: false, requiresTag: true, forumId: channelId, available_tags: tags };
       method='POST'; path=`/channels/${channelId}/threads`;
-      body={name:args.title,message:{content:args.content,allowed_mentions:{parse:[]}},auto_archive_duration:1440,...(appliedTagIds?.length ? {applied_tags:appliedTagIds} : {})};
+      body={name:args.title,message:{content,allowed_mentions:{parse:[]}},auto_archive_duration:1440,...(appliedTagIds?.length ? {applied_tags:appliedTagIds} : {})};
     } else if (['discord_archive_thread','discord_delete_thread'].includes(name)) {
       const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new Error('Thread does not belong to the specified root');
       if (name === 'discord_delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
@@ -125,10 +128,10 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {
-        case 'discord_send_message':method='POST';path=`${base}/messages`;body={content:args.content,allowed_mentions:{parse:[]}};break;
+        case 'discord_send_message':method='POST';path=`${base}/messages`;body={content,allowed_mentions:{parse:[]}};break;
         case 'discord_fetch_message':path=`${base}/messages/${messageId}`;break;
         case 'discord_fetch_channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
-        case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content:args.content,allowed_mentions:{parse:[]}};break;
+        case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content,allowed_mentions:{parse:[]}};break;
         case 'discord_delete_message':method='DELETE';path=`${base}/messages/${messageId}`;break;
         case 'discord_react':method='PUT';path=`${base}/messages/${messageId}/reactions/${encodeURIComponent(args.emoji as string)}/@me`;break;
         case 'discord_pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;

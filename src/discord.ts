@@ -20,6 +20,7 @@ import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
 import { compactSession } from './compaction.js';
+import { formatDiscordUrls } from './discord-url.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
@@ -105,7 +106,7 @@ export class DiscordHandler {
           text = '（附件尚未支援；我只處理文字內容。）';
         } else {
           if (!botInput) this.activeAsk.add(message.channelId);
-          progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(content, { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(updated); } }; }, log: logSafe });
+          progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); } }; }, log: logSafe });
           const toolRuntime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, isBot: botInput, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds } });
           let result: string;
           result = await this.runAsk(this.store, state.sessionId, userContent, {
@@ -341,9 +342,9 @@ export class DiscordHandler {
     const session = this.store.newSession();
     const progress = new ProgressRenderer({
       send: async content => {
-        const sent = await target.send(content);
+        const sent = await target.send(formatDiscordUrls(content));
         return { edit: async updated => {
-          if (sent && typeof sent === 'object' && 'edit' in sent) await (sent as { edit(content: string): Promise<unknown> }).edit(updated);
+          if (sent && typeof sent === 'object' && 'edit' in sent) await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated));
           else throw new Error('Progress message is not editable');
         } };
       },
@@ -417,10 +418,19 @@ export class DiscordHandler {
 }
 
 export function splitDiscordText(text: string): string[] {
+  const lowerText = text.toLowerCase();
   const chunks: string[] = [];
   for (let offset = 0; offset < text.length;) {
     let end = Math.min(offset + DISCORD_MESSAGE_LIMIT, text.length);
     if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) end--;
+    const open = lowerText.lastIndexOf('<http', end);
+    if (open >= offset && open < end) {
+      const close = text.indexOf('>', open);
+      if (close >= end && close - open + 1 <= DISCORD_MESSAGE_LIMIT) {
+        if (open > offset) end = open;
+        else end = close + 1;
+      }
+    }
     chunks.push(text.slice(offset, end));
     offset = end;
   }
@@ -447,7 +457,7 @@ function serializeDiscordInput(content: string, reference?: ReplyContext): strin
 }
 
 async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string }>, onFilesDelivered?: () => void): Promise<void> {
-  const chunks = splitDiscordText(text || (files?.length ? ' ' : DELIVERY_ERROR));
+  const chunks = splitDiscordText(formatDiscordUrls(text || (files?.length ? ' ' : DELIVERY_ERROR)));
   for (let index = 0; index < chunks.length; index++) {
     await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
     if (index === 0 && files?.length) onFilesDelivered?.();
