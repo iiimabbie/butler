@@ -1,0 +1,30 @@
+services:
+  hindsight:
+    image: ghcr.io/vectorize-io/hindsight:0.10.2
+    container_name: butler-hindsight-evaluation
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      HINDSIGHT_API_DATABASE_URL: 'pg0://hindsight:5432?listen_addresses=*&hba_file=/home/hindsight/.pg0/host-access.conf'
+    ports:
+      - "127.0.0.1:18888:8888"
+      - "127.0.0.1:15432:5432"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - hindsight_eval_data:/home/hindsight/.pg0
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8888/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+
+volumes:
+  hindsight_eval_data:
+    name: butler-hindsight-evaluation-data
