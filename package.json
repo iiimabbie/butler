@@ -5,7 +5,10 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/main.js",
+    "start": "sh scripts/butler-service.sh start",
+    "stop": "sh scripts/butler-service.sh stop",
+    "restart": "sh scripts/butler-service.sh restart",
+    "status": "sh scripts/butler-service.sh status",
     "test": "npm run build && node --test",
     "discord": "node dist/main.js",
     "discord:managed": "sh scripts/discord-restart.sh",

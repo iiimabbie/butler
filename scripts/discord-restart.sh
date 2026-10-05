@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NODE=${BUTLER_NODE:-node}
 READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/butler-restart.XXXXXX")
 READY_FILE="$READY_DIR/ready"
+SERVICE_READY_FILE=${BUTLER_SERVICE_READY_FILE:-}
 child=
 signal_status=0
 
@@ -26,6 +27,7 @@ wait_child() {
 
 while :; do
   rm -f "$READY_FILE"
+  if [ -n "$SERVICE_READY_FILE" ]; then rm -f "$SERVICE_READY_FILE"; fi
   BUTLER_RESTART_READY_FILE="$READY_FILE" "$NODE" --network-family-autoselection-attempt-timeout=2000 "$ROOT/dist/main.js" &
   child=$!
   elapsed=0
@@ -39,6 +41,10 @@ while :; do
     wait_child || true
     child=
     exit "$signal_status"
+  fi
+
+  if [ -f "$READY_FILE" ] && [ -n "$SERVICE_READY_FILE" ]; then
+    printf 'ready\n' >"$SERVICE_READY_FILE"
   fi
 
   if [ ! -f "$READY_FILE" ]; then
