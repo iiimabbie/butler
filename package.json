@@ -9,13 +9,15 @@
     "test": "npm run build && node --test",
     "discord": "node dist/main.js",
     "discord:managed": "sh scripts/discord-restart.sh",
-    "discord:register": "node dist/main.js register-discord-commands"
+    "discord:register": "node dist/main.js register-discord-commands",
+    "discord:deploy": "npm run build && npm run discord:register"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "typescript": "^5.8.0"
   },
   "dependencies": {
+    "croner": "^10.0.1",
     "discord.js": "14.27.0",
     "yaml": "^2.9.1"
   },

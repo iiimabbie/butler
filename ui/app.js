@@ -50,9 +50,11 @@ async function loadSessions(append = false) {
     if (!append) host.replaceChildren();
     for (const session of data.items) {
       const button = element('button', undefined, 'session');
-      const source = session.source_type
-        ? `Discord ${session.source_type} · channel ${session.channel_id} · owner ${session.owner_id}${session.bot_id ? ` · bot ${session.bot_id}` : ''}`
-        : '來源未知';
+      const source = session.source_type === 'owner'
+        ? `頻道共用對話 · channel ${session.channel_id} · owner ${session.owner_id}`
+        : session.source_type === 'bot'
+          ? `Discord bot · channel ${session.channel_id} · owner ${session.owner_id}${session.bot_id ? ` · bot ${session.bot_id}` : ''}`
+          : '來源未知';
       const model = session.current_model
         ? ` · 目前模型設定 ${session.current_model}`
         : session.uses_default_model ? ' · 目前模型設定採預設 CPA_MODEL' : '';
@@ -116,7 +118,7 @@ async function loadRecords(append = false) {
     for (const row of data.items) {
       const card = element('div', undefined, 'record');
       const fields = kind === 'messages'
-        ? [['ID', row.id], ['角色', row.role], ['時間', row.created_at], ['內容', row.content]]
+        ? [['ID', row.id], ['角色', row.role], ...(row.author_id ? [['作者 ID', row.author_id]] : []), ...(row.is_bot === null ? [] : [['作者類型', row.is_bot ? 'Discord bot' : '人類']]), ['時間', row.event_time ?? row.created_at], ['內容', row.content]]
         : [['ID', row.id], ['工具', row.name], ['狀態', row.status], ['建立', row.created_at], ['完成', row.finished_at ?? '尚未完成'], ['參數', row.arguments], ['結果', row.result ?? (row.status === 'pending' ? '等待中' : '無結果')]];
       for (const [label, value] of fields) {
         card.append(element('strong', `${label}：`));

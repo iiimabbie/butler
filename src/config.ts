@@ -2,16 +2,19 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import type { ImageConfig } from './image-tools.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
-  discord?: { token?: string; ownerId?: string; channelIds?: string[]; applicationId?: string; guildId?: string };
+  discord?: { token?: string; ownerId?: string; channelIds?: string[] };
   llm?: { baseUrl?: string; apiKey?: string; model?: string };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
   google?: GoogleClientConfig;
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number; recallBudget?: string; reflectBudget?: string; maxTokens?: number };
+  image?: ImageConfig;
+  schedule?: { timezone?: string };
 };
 
 const CONFIG_PATH = fileURLToPath(new URL('../config.yaml', import.meta.url));
@@ -22,7 +25,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
   catch { throw new Error('Butler config could not be read as YAML'); }
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'schedule'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -35,7 +38,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
     if (name === 'discord') {
       const channelIds = section.channelIds;
       if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined, applicationId: string('applicationId'), guildId: string('guildId') };
+      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
@@ -62,6 +65,15 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
       const maxTokens = section.maxTokens;
       if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || (maxTokens as number) < 1 || (maxTokens as number) > 32000)) throw new Error('Butler config memory.maxTokens must be an integer from 1 to 32000');
       config.memory = { baseUrl: baseUrl.replace(/\/$/, ''), bankId: requireSetting(string('bankId'), 'memory.bankId'), timeoutMs: timeoutMs as number | undefined, recallBudget: string('recallBudget'), reflectBudget: string('reflectBudget'), maxTokens: maxTokens as number | undefined };
+    } else if (name === 'image') {
+      const baseUrl = requireSetting(string('baseUrl'), 'image.baseUrl');
+      validateHttpUrl(baseUrl, 'image.baseUrl');
+      if (section.protocol !== 'images') throw new Error('Butler config image.protocol must be images');
+      const timeoutMs = section.timeoutMs;
+      if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 120000)) throw new Error('Butler config image.timeoutMs must be an integer from 1 to 120000');
+      config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined };
+    } else if (name === 'schedule') {
+      config.schedule = { timezone: string('timezone') ?? 'Asia/Taipei' };
     } else {
       const port = section.port;
       if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Butler config ui.port must be an integer from 1 to 65535');

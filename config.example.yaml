@@ -1,0 +1,52 @@
+discord:
+  token: YOUR_DISCORD_BOT_TOKEN
+  ownerId: "YOUR_DISCORD_ACCOUNT_ID"
+  # Root channels where Butler automatically replies; all received messages are still saved and retained. Slash commands are not restricted.
+  # Discord tools and scheduled outputs use bot permissions, not this list.
+  channelIds:
+    - "YOUR_CHANNEL_ID"
+
+llm:
+  baseUrl: https://your-cpa.example/v1
+  apiKey: YOUR_CPA_API_KEY
+  model: YOUR_CHAT_MODEL
+
+web:
+  provider: tavily
+  baseUrl: https://api.tavily.com
+  apiKey: YOUR_TAVILY_API_KEY
+
+# Optional. Omit to disable the web UI.
+ui:
+  port: 3211
+  publicOrigin: https://butler.example.com
+  cookiePath: /
+
+paths:
+  database: /absolute/path/to/butler/.data/butler.sqlite
+  attachments: /absolute/path/to/butler/.data/attachments
+
+google:
+  clientId: YOUR_GOOGLE_OAUTH_CLIENT_ID
+  clientSecret: YOUR_GOOGLE_OAUTH_CLIENT_SECRET
+
+# Optional shared long-term memory.
+memory:
+  baseUrl: http://127.0.0.1:18888
+  bankId: butler-discord-shared
+  timeoutMs: 30000
+  # recallBudget: 2.00
+  # reflectBudget: 2.00
+  # maxTokens: 8000
+
+# Optional independent image generation endpoint. Only protocol: images is supported.
+image:
+  baseUrl: https://your-cpa.example/v1
+  apiKey: YOUR_IMAGE_API_KEY
+  model: gpt-image-2.5
+  protocol: images
+  timeoutMs: 120000
+
+# Optional default timezone for cron and reminder creation.
+schedule:
+  timezone: Asia/Taipei

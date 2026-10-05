@@ -58,14 +58,44 @@ export class Hindsight {
     return result;
   }
 
+  async listPersonDocuments(limit: number, offset: number): Promise<unknown> {
+    return this.get(`${this.bankUrl()}/documents?${new URLSearchParams({ tags: 'butler-person', limit: String(limit), offset: String(offset) })}`);
+  }
+
+  async getDocument(documentId: string): Promise<unknown> {
+    return this.get(`${this.bankUrl()}/documents/${encodeURIComponent(documentId)}`);
+  }
+
+  async retainPersonProfile(key: string, content: string, canonicalName: string): Promise<unknown> {
+    const result = await this.post(`${this.bankUrl()}/memories`, { async: false, items: [{ content, context: `Person profile for ${canonicalName} (${key})`, document_id: `butler-person:${key}`, update_mode: 'replace', tags: ['butler-person'], entities: [{ text: canonicalName, type: 'PERSON' }], resolve_entities: false, metadata: { person_key: key, canonical_name: canonicalName, document_type: 'person_profile' } }] });
+    const record = asRecord(result);
+    if (record?.success !== true || record.async !== false || record.items_count !== 1) throw new Error('Hindsight profile retain response is invalid or incomplete');
+    return result;
+  }
+
+  async deleteDocument(documentId: string): Promise<unknown> {
+    const response = await this.request(`${this.bankUrl()}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' });
+    const body = await readBounded(response);
+    if (!response.ok) throw new Error(`Hindsight returned HTTP ${response.status}`);
+    let result: unknown;
+    try { result = JSON.parse(body); } catch { throw new Error(`Hindsight document delete response is invalid JSON (HTTP ${response.status}); outcome unknown`); }
+    const record = asRecord(result);
+    if (record?.success !== true || record.document_id !== documentId || !Number.isSafeInteger(record.memory_units_deleted) || (record.memory_units_deleted as number) < 0) {
+      throw new Error('Hindsight document delete response is invalid or incomplete; outcome unknown');
+    }
+    return result;
+  }
+
   async retain(store: Store, session: string, messages: MemoryMessage[]): Promise<void> {
     if (!messages.length) return;
     const items = messages.map(message => {
       const source = message.source;
       const time = source.eventTime ?? message.createdAt;
       const authorId = message.role === 'assistant' ? 'butler' : source.authorId ?? 'unknown';
-      const context = `${speaker(message)}; author=${authorId}; channel=${source.channelId ?? 'unknown'}; discord_message=${source.discordMessageId ?? 'unknown'}; session=${message.sessionId}; sqlite_message=${message.id}; role=${message.role}; time=${time}`;
-      return { content: message.content, context, timestamp: time, document_id: `butler:${message.id}`, metadata: { session_id: message.sessionId, sqlite_message_id: message.id, discord_message_id: source.discordMessageId ?? 'unknown', channel_id: source.channelId ?? 'unknown', author_id: authorId, is_bot: message.role === 'assistant' ? 'true' : source.isBot === undefined ? 'unknown' : String(source.isBot), role: message.role, event_time: time }, tags: ['butler', 'discord-shared', message.role] };
+      const canonicalName = message.role !== 'assistant' && source.authorId ? `Discord account ${source.authorId}` : null;
+      const identityContext = canonicalName ? `; canonical_identity=${canonicalName}` : '';
+      const context = `${speaker(message)}${identityContext}; author=${authorId}; channel=${source.channelId ?? 'unknown'}; discord_message=${source.discordMessageId ?? 'unknown'}; session=${message.sessionId}; sqlite_message=${message.id}; role=${message.role}; time=${time}`;
+      return { content: message.content, context, timestamp: time, document_id: `butler:${message.id}`, metadata: { session_id: message.sessionId, sqlite_message_id: message.id, discord_message_id: source.discordMessageId ?? 'unknown', channel_id: source.channelId ?? 'unknown', author_id: authorId, is_bot: message.role === 'assistant' ? 'true' : source.isBot === undefined ? 'unknown' : String(source.isBot), role: message.role, event_time: time }, ...(canonicalName ? { entities: [{ text: canonicalName, type: 'PERSON' }], resolve_entities: false } : {}), tags: ['butler', 'discord-shared', message.role] };
     });
     const audit = store.beginTool(session, 'hindsight_retain', { bankId: this.config.bankId, sqliteMessageIds: messages.map(message => message.id), itemsCount: items.length });
     let result: unknown;
@@ -86,6 +116,14 @@ export class Hindsight {
   private baseUrl(): string { return this.config.baseUrl.replace(/\/$/, ''); }
   private async request(url: string, init: RequestInit): Promise<Response> {
     return this.fetcher(url, { ...init, headers: { 'content-type': 'application/json', ...init.headers }, signal: AbortSignal.timeout(this.config.timeoutMs ?? 8000) });
+  }
+  private async get(url: string): Promise<unknown> {
+    const response = await this.request(url, { method: 'GET' });
+    const text = await readBounded(response);
+    if (!response.ok) throw new Error(`Hindsight returned HTTP ${response.status}`);
+    let body: unknown;
+    try { body = JSON.parse(text); } catch { throw new Error(`Hindsight returned invalid JSON (HTTP ${response.status})`); }
+    return body;
   }
   private async post(url: string, data: unknown): Promise<unknown> {
     const response = await this.request(url, { method: 'POST', body: JSON.stringify(data) });
