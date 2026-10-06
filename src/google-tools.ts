@@ -16,8 +16,8 @@ const schemas: Record<string, { description: string; properties: Record<string, 
   google_calendar_update_event: { description: 'PATCH supplied fields only; require at least one field. Setting all_day requires both start/end. Default primary.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
   google_calendar_delete_event: { description: 'Delete an event only on the current sender (human or bot). Default primary.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
   google_tasks_list: { description: 'List tasks (not task lists), default @default, show_completed false; returns next_page_token.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
-  google_tasks_create: { description: 'Create a task. due is a date (YYYY-MM-DD or RFC3339); time is discarded, not a reminder. Default @default.', properties: { title: str, notes: str, due: str, task_list_id: str }, required: ['title'] },
-  google_tasks_update: { description: 'PATCH at least one of title/notes/due; empty notes clears notes. due is date-only, not a reminder.', properties: { task_id: str, title: str, notes: str, due: str, task_list_id: str }, required: ['task_id'] },
+  google_tasks_create: { description: 'Create a task; only title is required. due is optional: omit it when no date is specified, and do not ask for or guess a date. When supplied, due must be a date (YYYY-MM-DD or RFC3339); time is discarded, not a reminder. Default @default.', properties: { title: str, notes: str, due: { ...str, description: 'Optional due date. Omit when no date is specified; an empty string is treated as omitted.' }, task_list_id: str }, required: ['title'] },
+  google_tasks_update: { description: 'PATCH at least one of title/notes/due; empty notes clears notes. due is optional and date-only, not a reminder; omit or pass empty to leave the existing date unchanged.', properties: { task_id: str, title: str, notes: str, due: { ...str, description: 'Optional due date. Omit or pass an empty string to leave the existing date unchanged; this does not clear it.' }, task_list_id: str }, required: ['task_id'] },
   google_tasks_complete: { description: 'Mark a task completed on the current sender (human or bot). Default @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_tasks_delete: { description: 'Delete a task on the current sender (human or bot). Default @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_drive_search: { description: 'Search Drive by filename substring, excluding trash; returns next_page_token.', properties: { query: str, max_results: count(100, 10), page_token: str }, required: ['query'] },
@@ -93,7 +93,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   if (n === 'google_tasks_create' || n === 'google_tasks_update') {
     const body: Record<string, unknown> = {};
     for (const k of ['title', 'notes']) if (a[k] !== undefined) body[k] = s(k);
-    if (a.due !== undefined) {
+    if (a.due !== undefined && s('due') !== '') {
       const due = s('due');
       if (due.length !== 10) timed(due);
       dateOnly(due.slice(0, 10));
@@ -143,7 +143,8 @@ function validate(name: string, args: Record<string, unknown>): void {
     const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number } | undefined;
     if (!rule) throw new Error('Unknown Google tool argument');
     if (rule.type === 'string') {
-      if (typeof value !== 'string' || (!value && !['body', 'subject', 'content', 'notes', 'description', 'location'].includes(key))) throw new Error(`${key} must be a ${['body', 'subject', 'content', 'notes', 'description', 'location'].includes(key) ? '' : 'non-empty '}string`);
+      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location'].includes(key) || (key === 'due' && ['google_tasks_create', 'google_tasks_update'].includes(name));
+      if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new Error(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
     } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new Error(`${key} must be boolean`);
     else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new Error(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
   }
