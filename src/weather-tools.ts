@@ -6,7 +6,7 @@ const DAILY_FIELDS = ['weather_code', 'temperature_2m_max', 'temperature_2m_min'
 export const weatherDefinitions = [
   {
     type: 'function', name: 'weather_search',
-    description: 'Find location candidates. Resolve ambiguous places before forecasting; do not assume the first match. Cite Open-Meteo and GeoNames in the final reply.',
+    description: 'Find location candidates and return their coordinates.',
     parameters: {
       type: 'object', properties: { location: { type: 'string', minLength: 1 }, country_code: { type: 'string', pattern: '^[A-Za-z]{2}$' } },
       required: ['location'], additionalProperties: false,
@@ -14,7 +14,7 @@ export const weatherDefinitions = [
   },
   {
     type: 'function', name: 'weather_forecast',
-    description: 'Get Open-Meteo model-based current conditions and forecast for coordinates. These are forecasts, not measured observations; weather_code is a WMO code and null means unavailable. Use returned times, timezone and units, and cite Open-Meteo.',
+    description: 'Get model-based current conditions and forecast for coordinates. Values are forecasts, not measured observations; weather_code is a WMO code, and null means unavailable.',
     parameters: {
       type: 'object', properties: {
         latitude: { type: 'number', minimum: -90, maximum: 90 }, longitude: { type: 'number', minimum: -180, maximum: 180 },

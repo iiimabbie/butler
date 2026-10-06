@@ -1,34 +1,35 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, realpathSync, statSync } from 'node:fs';
-import { resolve, relative, basename } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { realpathSync, statSync } from 'node:fs';
+import { resolve, basename } from 'node:path';
 import type { Store } from './store.js';
 import { formatDiscordUrls } from './discord-url.js';
 
 export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; sessionId?: string; store?: Store; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
+const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
 const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true }, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, additionalProperties: false };
 const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
-  { name: 'discord_send_message', description: 'Send a message to an explicitly identified Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
-  { name: 'discord_fetch_message', description: 'Fetch one message from an explicitly identified Discord channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; use before to continue toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
-  { name: 'discord_edit_message', description: 'Edit a message authored by this bot in a channel.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
-  { name: 'discord_delete_message', description: 'Delete one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_react', description: 'Add a reaction to an explicitly identified message in a channel.', properties: { ...channelMessage, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, required: ['channelId', 'messageId', 'emoji'] },
-  { name: 'discord_pin', description: 'Pin one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_unpin', description: 'Unpin one explicitly identified message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_fetch_channel', description: 'Fetch channel details. For Forum/Media channels, inspect available_tags and REQUIRE_TAG state before creating a post.', properties: { channelId: snowflake }, required: ['channelId'] },
-  { name: 'discord_create_forum_post', description: 'Create a post in a Forum or Media channel, not a text-channel message or general thread. channelId is the forum ID; content is the first post body. Use only sender-chosen appliedTagIds from this forum’s available_tags; do not choose tags for the sender.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true } }, required: ['channelId', 'title', 'content'] },
+  { name: 'discord_send_message', description: 'Send a message to a Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
+  { name: 'discord_fetch_message', description: 'Fetch a message from a Discord channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
+  { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
+  { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_react', description: 'Add a reaction to a message.', properties: { ...channelMessage, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, required: ['channelId', 'messageId', 'emoji'] },
+  { name: 'discord_pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_fetch_channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
+  { name: 'discord_create_forum_post', description: 'Create a Forum or Media post; channelId is the forum ID and content is the first post body. appliedTagIds must come from that forum’s available tags.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true } }, required: ['channelId', 'title', 'content'] },
   { name: 'discord_archive_thread', description: 'Archive a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_delete_thread', description: 'Delete a verified thread; channelId is its parent and messageId is the thread ID, never the parent.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_rename_post', description: 'Rename a verified post thread under a forum.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
+  { name: 'discord_delete_thread', description: 'Delete a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
   { name: 'discord_rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
-  { name: 'discord_bot_mention_toggle', description: 'Enable or disable replies to other bots that explicitly mention Butler in allowed channels. Persists across restarts.', properties: { enabled: { type: 'boolean' } }, required: ['enabled'] },
-  { name: 'discord_attach_to_reply', description: 'Queue a local file from the configured attachment directory for the final reply.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
-  { name: 'discord_send_buttons', description: 'Send persistent interactive Discord buttons whose actions are executed once on click.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
+  { name: 'discord_attach_to_reply', description: 'Queue a regular file for the final reply. Absolute paths are allowed; relative paths use the project root. filename must be a plain filename.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
+  { name: 'discord_send_buttons', description: 'Send persistent Discord buttons that execute their configured actions once when clicked.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
 ];
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
@@ -58,22 +59,14 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     if (options.context.isBot && !options.context.store?.botReplyEnabled()) throw new Error('Bot replies are disabled');
     const spec = specs.find(item => item.name === name); if (!spec) throw new Error(`Unknown Discord tool: ${name}`);
     validateArgs(spec, args);
-    if (name === 'discord_bot_mention_toggle') {
-      if (!options.context.store) throw new Error('Bot reply settings are unavailable');
-      options.context.store.setBotReplyEnabled(args.enabled as boolean);
-      return { enabled: options.context.store.botReplyEnabled() };
-    }
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : formatDiscordUrls(stringArg(args.content, 'content'));
     if (content !== undefined && content.length > 2000) throw new Error('Formatted Discord message exceeds 2000 characters');
     if (name === 'discord_attach_to_reply') {
-      if (!options.attachmentDir) throw new Error('Local Discord attachments are not configured');
-      mkdirSync(options.attachmentDir, { recursive: true });
-      const root = realpathSync(options.attachmentDir); const file = stringArg(args.file, 'file');
+      const file = stringArg(args.file, 'file');
       if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new Error('Attachment must be a local file path');
-      const absolute = resolve(root, file); const real = realpathSync(absolute);
-      if (relative(root, real).startsWith('..') || relative(root, real).startsWith('/')) throw new Error('Attachment path is outside the configured root');
+      const absolute = resolve(projectRoot, file); const real = realpathSync(absolute);
       if (!statSync(real).isFile()) throw new Error('Attachment must be a regular file');
       const name = args.filename === undefined ? basename(real) : stringArg(args.filename, 'filename');
       if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new Error('filename must be a plain filename');

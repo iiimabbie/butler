@@ -23,13 +23,14 @@ import { compactSession } from './compaction.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import { stripAnsiProgress } from './discord-ansi.js';
+import type { SessionOpeningContext } from './store.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean; isBot?: boolean };
-export type TextMessage = { authorId: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown> };
+export type TextMessage = { authorId: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
 export type RestartNotice = { channelId: string; messageId: string };
 const modelCache = new Map<string, { expiresAt: number; models: string[] }>();
@@ -44,11 +45,13 @@ export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(rout
 
 export class DiscordHandler {
   private readonly queues = new Map<string, Promise<void>>();
+  private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number }>();
   private readonly activeAsk = new Set<string>();
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource; attachments?: import('./store.js').MessageInputAttachment[] }>>>();
   private readonly workCounts = new Map<string, number>();
   private scheduler?: Scheduler;
   private readonly outputChannel: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>;
+  private readonly readOpeningMessage: (channelId: string) => Promise<SessionOpeningContext | undefined>;
   private readonly imageConfig: ButlerConfig['image'];
   private readonly scheduleTimezone: string;
   private stopping = false;
@@ -57,7 +60,7 @@ export class DiscordHandler {
   private deploySchedulerPaused = false;
   private deployCheckRunning = false;
   private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().catch(() => logSafe('Deployment handshake check failed')).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; imageConfig?: ButlerConfig['image']; scheduleTimezone?: string } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.imageConfig = options.imageConfig; this.scheduleTimezone = options.scheduleTimezone ?? 'Asia/Taipei'; this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0); }
+  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; imageConfig?: ButlerConfig['image']; scheduleTimezone?: string } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined); this.imageConfig = options.imageConfig; this.scheduleTimezone = options.scheduleTimezone ?? 'Asia/Taipei'; this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0); }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
 
@@ -122,39 +125,40 @@ export class DiscordHandler {
     const shouldAsk = () => !deploymentPassive && isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId) && !message.isWebhook && (botInput
       ? Boolean(message.mentionsBot && this.store.botReplyEnabled())
       : this.store.effectiveReplyMode(message.channelId, message.parentChannelId) !== 'mention' || Boolean(message.mentionsBot));
-    if (shouldAsk() && !botInput && mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
+    if (!shouldAsk()) return;
+    if (!botInput && mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
       const pending = this.pendingSteer.get(message.channelId) ?? [];
       pending.push(prepareDiscordMessage(message, content || '請查看附件。', this.config.attachmentDir));
       this.pendingSteer.set(message.channelId, pending);
       return;
     }
-    await this.enqueue(message.channelId, async () => {
-      if (!shouldAsk()) {
-        try {
-          const prepared = await prepareDiscordMessage(message, content || '請查看附件。', this.config.attachmentDir);
-          const state = this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId);
-          const saved = this.store.addMessage(state.sessionId, 'user', prepared.content, prepared.source, prepared.attachments);
-          if (this.hindsight) await this.hindsight.retain(this.store, state.sessionId, [saved]);
-        } catch { logSafe('Discord passive message preservation failed'); }
-        return;
-      }
-      let result = '';
+    const stopTyping = this.startTyping(message.channelId, message.sendTyping);
+    try { await this.enqueue(message.channelId, async () => {
+      if (!shouldAsk()) return;
       let sessionId: string | undefined;
       let attachmentFiles: Array<{ attachment: string; name: string }> = [];
       const attachmentToolCallIds: string[] = [];
       let progress: ProgressRenderer | undefined;
       let askSucceeded = false;
+      let deliveryAttempted = false;
+      let filesDelivered = false;
       try {
         const prepared = await prepareDiscordMessage(message, content || '請查看附件。', this.config.attachmentDir);
         const userContent = prepared.content;
         const state = this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId);
         sessionId = state.sessionId;
+        let openingContext = this.store.sessionOpeningContext(state.sessionId);
+        if (!openingContext) {
+          try { openingContext = await this.readOpeningMessage(message.channelId); if (openingContext) this.store.saveSessionOpeningContext(state.sessionId, openingContext); }
+          catch { logSafe('Discord opening message lookup failed'); }
+        }
         if (!botInput) this.activeAsk.add(message.channelId);
         progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress reply did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: logSafe });
         const toolRuntime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, isBot: botInput, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds } });
-        result = await this.runAsk(this.store, state.sessionId, userContent, {
+        await this.runAsk(this.store, state.sessionId, userContent, {
           baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: state.model,
           messageSource: prepared.source,
+          openingContext,
           initialAttachments: prepared.attachments,
           attachmentDir: this.config.attachmentDir,
           hindsight: this.hindsight,
@@ -178,11 +182,25 @@ export class DiscordHandler {
             if (!pending?.length) this.pendingSteer.delete(message.channelId);
           },
           onAskFinishing: () => this.activeAsk.delete(message.channelId),
+          onResponseReady: async text => {
+            stopTyping?.();
+            if (text.includes('[no_reply]')) {
+              if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
+              return;
+            }
+            if (text || attachmentFiles.length) {
+              deliveryAttempted = true;
+              try { await sendText(message, text, attachmentFiles, () => { filesDelivered = true; }); }
+              finally {
+                if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
+              }
+            }
+          },
         }); askSucceeded = true;
         this.activeAsk.delete(message.channelId);
       } catch (error) {
         if (attachmentToolCallIds.length) {
-          try { this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent'); } catch { logSafe('Discord attachment delivery status persistence failed'); }
+          try { this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : deliveryAttempted ? 'failed_or_unknown' : 'not_sent'); } catch { logSafe('Discord attachment delivery status persistence failed'); }
         }
         attachmentFiles = [];
         this.activeAsk.delete(message.channelId);
@@ -208,20 +226,7 @@ export class DiscordHandler {
         if (!this.pendingSteer.get(message.channelId)?.length) this.pendingSteer.delete(message.channelId);
       }
       await progress?.finish(askSucceeded ? 'completed' : 'failed');
-      if (!askSucceeded) return;
-      let filesDelivered = false;
-      try {
-        if (result !== '' || attachmentFiles.length) await sendText(message, result, attachmentFiles, () => { filesDelivered = true; });
-      } catch {
-        logSafe('Discord message reply delivery failed');
-        throw new Error('Discord reply delivery failed; outcome may be unknown');
-      } finally {
-        if (attachmentFiles.length) {
-          try { this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown'); }
-          catch { logSafe('Discord attachment delivery status persistence failed'); }
-        }
-      }
-    });
+    }); } finally { stopTyping?.(); }
   }
 
   async button(interaction: import('discord.js').ButtonInteraction): Promise<void> {
@@ -314,8 +319,11 @@ export class DiscordHandler {
       await this.enqueue(context.channelId, async () => {
         const current = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
         try {
-          const result = await compactSession(this.store, current.sessionId, { baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: current.model, reasoningEffort: this.store.channelReasoningEffort(context.channelId) });
-          if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 6 則訊息會保留。');
+          const opening = await this.readOpeningMessage(context.channelId);
+          if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，未執行壓縮。'); return; }
+          this.store.saveSessionOpeningContext(current.sessionId, opening);
+          const result = await compactSession(this.store, current.sessionId, { baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: current.model, reasoningEffort: this.store.channelReasoningEffort(context.channelId), keepRecent: 10 });
+          if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 10 則訊息會保留。');
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
         } catch (error) {
           logSafe('Discord conversation compaction failed');
@@ -354,7 +362,10 @@ export class DiscordHandler {
     }
     if (context.command === 'new') {
       await this.enqueue(context.channelId, async () => {
+        const opening = await this.readOpeningMessage(context.channelId);
+        if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
         const sessionId = this.store.newSession();
+        this.store.saveSessionOpeningContext(sessionId, opening);
         this.store.setChannelSession(context.channelId, sessionId, this.config.ownerId);
         await context.reply(`新 session：${sessionId}`);
       });
@@ -373,6 +384,27 @@ export class DiscordHandler {
   }
 
   enqueueScheduled(request: ScheduledTaskRequest): Promise<void> { return this.enqueue(request.outputChannelId, () => this.runScheduled(request)); }
+
+  private startTyping(channelId: string, sendTyping?: () => Promise<unknown>): () => void {
+    if (!sendTyping) return () => {};
+    let active = this.typing.get(channelId);
+    if (!active) {
+      const send = () => { void sendTyping().catch(() => logSafe('Discord typing indicator failed')); };
+      send();
+      active = { timer: setInterval(send, 8_000), refs: 0 };
+      this.typing.set(channelId, active);
+    }
+    active.refs++;
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      const current = this.typing.get(channelId);
+      if (!current || --current.refs > 0) return;
+      clearInterval(current.timer);
+      this.typing.delete(channelId);
+    };
+  }
 
   private scheduleTools(sourceChannelId: string, creatorId: string) { return this.store ? createScheduleToolRuntime({ store: this.store, sourceChannelId, creatorId, defaultTimezone: this.scheduleTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
   private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string) { return this.imageConfig ? createImageToolRuntime({ config: { ...this.imageConfig, model: this.store.channelImageModel(channelId) ?? this.imageConfig.model }, attachmentDir: this.config.attachmentDir, attachmentFiles }) : undefined; }
@@ -401,7 +433,7 @@ export class DiscordHandler {
     let filesDelivered = false;
     let deliveryAuditAttempted = false;
     try {
-      const result = await this.runAsk(this.store, session, request.prompt, {
+      await this.runAsk(this.store, session, request.prompt, {
         baseUrl: this.config.baseUrl,
         apiKey: this.config.apiKey,
         model: state.model,
@@ -424,18 +456,19 @@ export class DiscordHandler {
         messageSource: { channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
         onProgress: event => progress.event(event),
+        onResponseReady: async text => {
+          if (text.includes('[no_reply]')) {
+            if (attachmentToolCallIds.length) { deliveryAuditAttempted = true; this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent'); }
+            return;
+          }
+          if (!text && !attachmentFiles.length) return;
+          try { await sendText({ authorId: request.job.creatorId, channelId: request.outputChannelId, content: request.prompt, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }); }
+          finally {
+            if (attachmentToolCallIds.length) { deliveryAuditAttempted = true; this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown'); }
+          }
+        },
       });
       askSucceeded = true;
-      await sendText({
-        authorId: request.job.creatorId,
-        channelId: request.outputChannelId,
-        content: request.prompt,
-        reply: (text, options) => target.send(text, options),
-      } as TextMessage, result, attachmentFiles, () => { filesDelivered = true; });
-      if (attachmentToolCallIds.length) {
-        deliveryAuditAttempted = true;
-        this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
-      }
       await progress.finish('completed');
     } catch (error) {
       let auditError: unknown;
@@ -715,6 +748,15 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
   const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools, localTools, webTools, weatherTools, hindsight, {
     imageConfig: settings.image,
     scheduleTimezone: settings.schedule?.timezone,
+    readOpeningMessage: async channelId => {
+      const channel = await client.channels.fetch(channelId);
+      if (!channel?.isTextBased() || !('messages' in channel)) return undefined;
+      const opening = channel.isThread()
+        ? await channel.fetchStarterMessage()
+        : (await channel.messages.fetch({ after: '0', limit: 1 })).first() ?? null;
+      if (!opening) return undefined;
+      return { channelId: opening.channelId, messageId: opening.id, authorId: opening.author.id, createdAt: opening.createdAt.toISOString(), content: opening.content, attachments: [...opening.attachments.values()].map(file => ({ filename: file.name ?? 'attachment', mimeType: file.contentType ?? 'application/octet-stream', size: file.size })) };
+    },
     outputChannel: async id => {
       const target = await client.channels.fetch(id);
       if (!target || !target.isTextBased() || !('send' in target) || typeof target.send !== 'function') return undefined;
@@ -765,7 +807,7 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
       } catch {
         return { messageId: message.reference!.messageId!, channelId: message.reference!.channelId ?? message.channelId };
       }
-    } : undefined, reply: (text, options) => message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }) })
+    } : undefined, reply: (text, options) => message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
       .catch(() => undefined);
   });
   client.on('interactionCreate', interaction => {
@@ -805,6 +847,10 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
           googleAuth,
           publicOrigin,
           cookiePath,
+          channelName: async channelId => {
+            const channel = await client.channels.fetch(channelId);
+            return channel && 'name' in channel && typeof channel.name === 'string' ? channel.name : undefined;
+          },
         });
         if (closed) {
           await ui.close();

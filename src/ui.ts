@@ -9,7 +9,7 @@ import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
 const root = join(dirname(fileURLToPath(import.meta.url)), '../ui');
 const assets = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']]] as const);
 
-export function startUi(dbPath: string, port: number, options: { googleAuth?: GoogleAuth; publicOrigin?: string; cookiePath?: string } = {}): Promise<{ server: Server; close: () => Promise<void> }> {
+export function startUi(dbPath: string, port: number, options: { googleAuth?: GoogleAuth; publicOrigin?: string; cookiePath?: string; channelName?: (channelId: string) => Promise<string | undefined> } = {}): Promise<{ server: Server; close: () => Promise<void> }> {
   const publicOrigin = options.publicOrigin ?? `http://127.0.0.1:${port}`;
   const originUrl = new URL(publicOrigin);
   if (originUrl.origin !== publicOrigin || !['http:', 'https:'].includes(originUrl.protocol)) throw new Error('UI publicOrigin must be an explicit HTTP(S) origin');
@@ -59,6 +59,7 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
       if (pathname === '/api/sessions') {
         const offset = numberParam(url.searchParams.get('offset'), 0);
         const rows = db.prepare(`SELECT s.id,s.created_at,(SELECT substr(content,1,120) FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest_preview,
+          COALESCE((SELECT MAX(COALESCE(ms.event_time,m.created_at)) FROM messages m LEFT JOIN message_sources ms ON ms.message_id=m.id WHERE m.session_id=s.id),s.created_at) last_active_at,
           (SELECT channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) channel_id,
           (SELECT source_type FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) source_type,
           (SELECT owner_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) owner_id,
@@ -67,7 +68,12 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
           (SELECT CASE WHEN cs.model IS NULL THEN 1 ELSE 0 END FROM channel_state cs WHERE cs.channel_id=(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)) uses_default_model
           FROM sessions s ORDER BY s.rowid DESC LIMIT 51 OFFSET ?`).all(offset) as Record<string, unknown>[];
         const more = rows.length > 50;
-        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ items: rows.slice(0,50), offset, next_offset: more ? offset + 50 : null })); return;
+        const items = rows.slice(0, 50);
+        const channelIds = [...new Set(items.map(row => row.channel_id).filter((id): id is string => typeof id === 'string' && id.length > 0))];
+        const names = await Promise.all(channelIds.map(async id => [id, await options.channelName?.(id).catch(() => undefined)] as const));
+        const channelNames = new Map(names);
+        for (const row of items) row.channel_name = typeof row.channel_id === 'string' ? channelNames.get(row.channel_id) ?? null : null;
+        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ items, offset, next_offset: more ? offset + 50 : null })); return;
       }
       const match = pathname.match(/^\/api\/sessions\/([^/]+)\/(messages|tools)$/);
       if (match) {

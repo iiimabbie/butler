@@ -22,6 +22,8 @@ export interface StoredMessage extends Message {
   id: string; sessionId: string; createdAt: string; source: MessageSource; attachments: MessageInputAttachment[];
 }
 
+export interface SessionOpeningContext { channelId: string; messageId: string; authorId: string; createdAt: string; content: string; attachments: Array<{ filename: string; mimeType: string; size: number }> }
+
 type ScheduleDbRow = { id: string; source_channel_id: string; output_channel_id: string; creator_id: string; kind: 'cron' | 'reminder'; content: string; cron: string | null; run_at: string | null; timezone: string; enabled: number; next_run: string | null; created_at: string; updated_at: string };
 type ScheduleRunDbRow = { id: string; job_id: string; scheduled_at: string; status: 'running' | 'completed' | 'failed' | 'unknown'; claimed_at: string; finished_at: string | null; error: string | null };
 
@@ -81,6 +83,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS channel_reasoning_efforts(channel_id TEXT PRIMARY KEY, effort TEXT NOT NULL CHECK(effort IN ('none','minimal','low','medium','high','xhigh','auto')));
       CREATE TABLE IF NOT EXISTS channel_image_models(channel_id TEXT PRIMARY KEY, model TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_compact_checkpoints(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, summary TEXT NOT NULL, through_message_id TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_opening_context(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL, attachments_json TEXT NOT NULL);
     `);
     this.db.exec(`
       INSERT INTO session_sources(session_id,channel_id,source_type,owner_id,bot_id)
@@ -132,6 +135,16 @@ export class Store implements SchedulerStore {
     return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at,
       source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }) },
       attachments: (attachments.all(row.id) as Array<{ attachment_id: string; filename: string; mime_type: string; size: number; local_path: string | null; status: 'ready' | 'failed'; error: string | null }>).map(item => ({ attachmentId: item.attachment_id, filename: item.filename, mimeType: item.mime_type, size: item.size, ...(item.local_path ? { localPath: item.local_path } : {}), status: item.status, ...(item.error ? { error: item.error } : {}) })) }));
+  }
+
+  sessionOpeningContext(sessionId: string): SessionOpeningContext | undefined {
+    const row = this.db.prepare('SELECT channel_id,message_id,author_id,created_at,content,attachments_json FROM session_opening_context WHERE session_id=?').get(sessionId) as { channel_id: string; message_id: string; author_id: string; created_at: string; content: string; attachments_json: string } | undefined;
+    return row && { channelId: row.channel_id, messageId: row.message_id, authorId: row.author_id, createdAt: row.created_at, content: row.content, attachments: JSON.parse(row.attachments_json) as SessionOpeningContext['attachments'] };
+  }
+
+  saveSessionOpeningContext(sessionId: string, context: SessionOpeningContext): void {
+    this.db.prepare(`INSERT INTO session_opening_context(session_id,channel_id,message_id,author_id,created_at,content,attachments_json) VALUES(?,?,?,?,?,?,?)
+      ON CONFLICT(session_id) DO UPDATE SET channel_id=excluded.channel_id,message_id=excluded.message_id,author_id=excluded.author_id,created_at=excluded.created_at,content=excluded.content,attachments_json=excluded.attachments_json`).run(sessionId, context.channelId, context.messageId, context.authorId, context.createdAt, context.content, JSON.stringify(context.attachments));
   }
 
   compactCheckpoint(sessionId: string): { summary: string; throughMessageId: string; updatedAt: string } | undefined {
@@ -279,7 +292,7 @@ export class Store implements SchedulerStore {
   }
 
   effectiveReplyMode(channelId: string, parentChannelId?: string): 'all' | 'mention' {
-    return this.channelReplyMode(channelId) ?? (parentChannelId ? this.channelReplyMode(parentChannelId) : undefined) ?? 'all';
+    return this.channelReplyMode(channelId) ?? (parentChannelId ? this.channelReplyMode(parentChannelId) : undefined) ?? 'mention';
   }
 
   channelReplyMode(channelId: string): ChannelReplyMode | undefined {

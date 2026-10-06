@@ -1,15 +1,23 @@
 services:
   hindsight:
-    image: ghcr.io/vectorize-io/hindsight:0.10.2
+    image: butler-hindsight:0.10.2-jev20k
+    build:
+      context: .
     container_name: butler-hindsight-evaluation
     restart: unless-stopped
     env_file:
       - .env
     environment:
       HINDSIGHT_API_DATABASE_URL: 'pg0://hindsight:5432?listen_addresses=*&hba_file=/home/hindsight/.pg0/host-access.conf'
+      HINDSIGHT_API_LOG_LEVEL: info
+      HINDSIGHT_API_LOG_FORMAT: json
+      HINDSIGHT_API_RERANKER_PROVIDER: typesafe
+      HINDSIGHT_API_RERANKER_TYPESAFE_MODEL: jev-latest
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "150"
     ports:
       - "127.0.0.1:18888:8888"
       - "127.0.0.1:15432:5432"
+      - "127.0.0.1:19999:9999"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:

@@ -7,11 +7,11 @@ function definition(name: string, description: string, properties: Record<string
 }
 
 export const peopleDefinitions = [
-  definition('people_list', 'List person profiles.', { limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: integer }, []),
-  definition('people_get', 'Read a person profile by key (Discord keys use discord:<account id>).', { key: string }, ['key']),
-  definition('people_upsert', 'Create or replace a person profile. Read the complete current profile first, then supply the complete replacement, changing only explicitly requested details and preserving unrelated information. Use discord:<id> for Discord accounts; other stable keys must not imitate Discord IDs.', { key: string, content: string }, ['key', 'content']),
-  definition('people_delete', 'Delete a person profile only when explicitly requested; read it first to confirm the target.', { key: string }, ['key']),
-  definition('people_recall', 'Read the profile and recall relevant memories. Treat them as evidence and do not attribute another speaker’s statements to this person.', { key: string, query: string }, ['key', 'query']),
+  definition('people_list', 'List stored person-profile documents to find existing profiles and identity keys. offset counts profiles (default 0); limit defaults to 50, maximum 100. Use people_get with a profile key to read its complete original content.', { limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: integer }, []),
+  definition('people_get', 'Read a person-profile document, including original_text and document metadata, by stable identity key. Discord accounts use discord:<account id>; other people use a consistent key. This is the maintained profile, not the person’s complete conversation history; use people_recall to consult supporting memories. An absent profile returns a not-found error.', { key: string }, ['key']),
+  definition('people_upsert', 'Create or replace a person profile for an external person discussed in conversation evidence; the system itself is not a person-profile subject. Updates may be made autonomously. content replaces the entire profile, not selected fields, and existing content is not merged automatically. Read the existing profile when present, integrate supported changes and preserve unrelated details. Include relevant source attribution, dates and uncertainty; apply explicit corrections to the affected details and keep unresolved contradictions distinguishable. Discord accounts use discord:<account id>; use a stable key for other people.', { key: string, content: string }, ['key', 'content']),
+  definition('people_delete', 'Delete the specified person-profile document and memories extracted from that document when the current speaker explicitly requests deletion. Read the profile first to confirm its identity key. This does not erase mentions of the person in other conversation documents. Discord accounts use discord:<account id>.', { key: string }, ['key']),
+  definition('people_recall', 'Look up a person using a stable key and a specific question about the topic and relevant time period. Returns profile, recall evidence and a generated reflect answer with its supporting evidence. The profile is null when absent, but memory lookup still runs. The key and profile supply identity context to the queries, not a strict person-only retrieval filter; check who each retrieved statement is about and who said it.', { key: string, query: string }, ['key', 'query']),
 ];
 
 export type PeopleToolRuntime = {
@@ -52,8 +52,8 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
       let existing: Record<string, unknown> | null;
       try { existing = await profile(hindsight, documentId); }
       catch (error) { if (!isNotFound(error)) throw error; existing = null; }
-      const profileContext = existing ? `Person profile (${canonicalName}): ${profileText(existing)}\n` : '';
-      const contextualQuery = `${profileContext}Person identity: ${canonicalName} (${key})\nQuestion: ${query}\nUse memories only as evidence. Distinguish who said each thing; do not attribute statements by other speakers to this person.`;
+      const profileContext = existing ? `Person profile snapshot (background evidence; compare with recalled sources) for ${canonicalName}: ${profileText(existing)}\n` : '';
+      const contextualQuery = `${profileContext}Target person: ${canonicalName} (${key})\nQuestion: ${query}\nFind evidence about this identified person, distinguishing the subject of each claim from the person who said it. Preserve source attribution and relevant dates. Separate direct statements, attributed reports and assistant interpretations. Compare the profile with retrieved evidence; distinguish explicit corrections, changes over time and different contexts, and describe unresolved conflicts or missing evidence rather than guessing.`;
       const [recall, reflect] = await Promise.all([hindsight.recall(contextualQuery), hindsight.reflect(contextualQuery)]);
       return { profile: existing, recall, reflect };
     },

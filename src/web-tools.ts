@@ -5,7 +5,7 @@ const OUTPUT_LIMIT = 64 * 1024 - 256;
 export const webDefinitions = [
   {
     type: 'function', name: 'web_search',
-    description: 'Search the public web for source URLs and snippets; results may not cover the full topic.',
+    description: 'Search the public web for source URLs and snippets.',
     parameters: {
       type: 'object', properties: { query: { type: 'string', minLength: 1 }, max_results: { type: 'integer', minimum: 1, maximum: 10, default: 5 } },
       required: ['query'], additionalProperties: false,
@@ -13,7 +13,7 @@ export const webDefinitions = [
   },
   {
     type: 'function', name: 'web_fetch',
-    description: 'Extract content from one public URL through the configured web service, not a local browser. Login-required or dynamic content may be unavailable; check truncated before treating the result as complete.',
+    description: 'Extract content from one public HTTP(S) URL through the configured web service; truncated indicates incomplete content.',
     parameters: { type: 'object', properties: { url: { type: 'string', minLength: 1 } }, required: ['url'], additionalProperties: false },
   },
 ];

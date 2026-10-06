@@ -9,11 +9,11 @@ const execFile = promisify(execFileCallback);
 const string = { type: 'string' };
 const definition = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 const definitions = [
-  definition('skills_list', 'List installed skills and their metadata; instructions are not loaded automatically.', {}, []),
-  definition('skills_read', 'Read an installed skill’s SKILL.md or another file relative to its directory. Inspect relevant scripts before use; do not execute them automatically.', { name: string, path: string }, ['name']),
-  definition('skills_prepare', 'Stage a skill from a Git URL or local directory. Read SKILL.md and relevant scripts with local_read before deciding whether to install; do not run scripts automatically.', { source: string }, ['source']),
-  definition('skills_install', 'Install a selected candidate from skills_prepare into workspace/skills; existing skills are not overwritten.', { path: string, name: string }, ['path', 'name']),
-  definition('skills_remove', 'Move an installed skill to workspace/.trash after reading its SKILL.md.', { name: string }, ['name']),
+  definition('skills_list', 'List installed skills and their metadata.', {}, []),
+  definition('skills_read', 'Read a file in an installed skill directory; path defaults to SKILL.md.', { name: string, path: string }, ['name']),
+  definition('skills_prepare', 'Stage skill candidates from a Git URL or local directory.', { source: string }, ['source']),
+  definition('skills_install', 'Install a staged skill into workspace/skills; existing skills are not overwritten.', { path: string, name: string }, ['path', 'name']),
+  definition('skills_remove', 'Move an installed skill to workspace/.trash.', { name: string }, ['name']),
 ];
 
 export type SkillsToolRuntime = { definitions: typeof definitions; execute(name: string, args: Record<string, unknown>): Promise<unknown>; catalog(): Promise<string> };

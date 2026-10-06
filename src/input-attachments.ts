@@ -94,7 +94,7 @@ export function messageAttachmentContent(message: StoredMessage, attachmentDir: 
         data = readFileSync(fd).toString('base64');
       } finally { closeSync(fd); }
     } catch {
-      content.push({ type: 'input_text', text: `[附件無法安全讀取：${attachment.filename}；原檔內容未讀取，若上下文仍保留此附件，請使用 /compact 或 /new 後重新傳送原檔。]` });
+      content.push({ type: 'input_text', text: `[附件未讀取：${attachment.filename}；請用 /compact 或 /new 清除舊附件上下文後重傳原檔。]` });
       continue;
     }
     if (attachment.mimeType.startsWith('image/')) content.push({ type: 'input_image', image_url: `data:${attachment.mimeType};base64,${data}` });
@@ -109,7 +109,7 @@ function safeLocalPath(path: string | undefined, attachmentDir: string): string 
   return absolute;
 }
 function formatMessageText(message: StoredMessage): string {
-  const s = message.source; const role = message.role === 'assistant' ? '[Butler assistant]' : `[${s.isBot ? 'Discord bot' : s.authorId ? 'Discord human' : 'Unknown author'}; author=${s.authorId ?? 'unknown'}; channel=${s.channelId ?? 'unknown'}; message=${s.discordMessageId ?? 'unknown'}; time=${s.eventTime ?? message.createdAt}]`;
+  const s = message.source; const role = message.role === 'assistant' ? '' : `[${s.authorId ? `Discord account ${s.authorId}` : 'Unknown author'}; channel=${s.channelId ?? 'unknown'}; message=${s.discordMessageId ?? 'unknown'}; time=${s.eventTime ?? message.createdAt}]`;
   return `${role}\n${message.content}`;
 }
 export function redactAttachmentPayload(value: unknown): unknown {

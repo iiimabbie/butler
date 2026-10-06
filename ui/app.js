@@ -1,6 +1,7 @@
 const $ = selector => document.querySelector(selector);
 
 let selectedSession = null;
+let sessionDetails = new Map();
 let selectedKind = 'messages';
 let activeTab = 'sessions';
 let sessionOffset = 0;
@@ -33,6 +34,11 @@ function isCurrentRecord(requestId, sessionId, kind) {
   return requestId === recordRequestId && selectedSession === sessionId && selectedKind === kind;
 }
 
+function formatTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 async function loadSessions(append = false) {
   const offset = append ? sessionOffset : 0;
   const pageKey = String(offset);
@@ -47,21 +53,17 @@ async function loadSessions(append = false) {
     if (requestId !== sessionRequestId) return;
 
     const host = $('#session-list');
-    if (!append) host.replaceChildren();
+    if (!append) { host.replaceChildren(); sessionDetails = new Map(); }
     for (const session of data.items) {
+      sessionDetails.set(session.id, session);
       const button = element('button', undefined, 'session');
-      const source = session.source_type === 'owner'
-        ? `頻道共用對話 · channel ${session.channel_id} · owner ${session.owner_id}`
-        : session.source_type === 'bot'
-          ? `Discord bot · channel ${session.channel_id} · owner ${session.owner_id}${session.bot_id ? ` · bot ${session.bot_id}` : ''}`
-          : '來源未知';
-      const model = session.current_model
-        ? ` · 目前模型設定 ${session.current_model}`
-        : session.uses_default_model ? ' · 目前模型設定採預設 CPA_MODEL' : '';
+      button.classList.toggle('selected', selectedSession === session.id);
+      button.dataset.sessionId = session.id;
+      button.title = session.id;
       button.append(
-        element('strong', session.id),
-        element('small', `${session.created_at} · ${source}${model}`),
-        element('small', `最新訊息預覽：${session.latest_preview ?? '（尚無訊息）'}`),
+        element('strong', session.channel_name || (session.channel_id ? '無法取得頻道名稱' : '未知頻道')),
+        element('small', `頻道 ID：${session.channel_id ?? '未知'}`),
+        element('small', `最後活動：${formatTime(session.last_active_at)}`),
       );
       button.onclick = () => openSession(session.id);
       host.append(button);
@@ -78,8 +80,12 @@ async function loadSessions(append = false) {
 
 async function openSession(sessionId) {
   selectedSession = sessionId;
+  document.querySelectorAll('.session').forEach(button => button.classList.toggle('selected', button.dataset.sessionId === sessionId));
   recordOffset = 0;
-  $('#session-title').textContent = `Session ${sessionId}`;
+  const session = sessionDetails.get(sessionId);
+  const title = $('#session-title');
+  title.textContent = session?.channel_name || (session?.channel_id ? '無法取得頻道名稱' : '未知頻道');
+  title.title = sessionId;
   $('#records').replaceChildren();
   await loadRecords(false);
 }
@@ -95,6 +101,61 @@ function downloadBlob(contents, filename, type) {
 
 function safeFilePart(value) {
   return String(value).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100) || 'record';
+}
+
+function renderMessage(row) {
+  const card = element('article', undefined, `record message${row.role === 'assistant' ? ' assistant' : ''}`);
+  const author = row.role === 'assistant'
+    ? 'Butler'
+    : row.is_bot === 1 || row.is_bot === true
+      ? `Discord bot${row.author_id ? ` · ${row.author_id}` : ''}`
+      : row.author_id ? `Discord 使用者 · ${row.author_id}` : '未知來源';
+  const rawTime = row.event_time ?? row.created_at;
+  const header = element('header', undefined, 'message-header');
+  const time = element('time', formatTime(rawTime));
+  time.dateTime = rawTime;
+  time.title = rawTime;
+  header.append(element('strong', author), time);
+  const body = element('div', row.content ?? '（空）', 'message-body');
+  card.append(header, body);
+
+  if (row.attachments) {
+    let attachments = [];
+    try { attachments = JSON.parse(row.attachments); } catch { /* malformed metadata is not rendered */ }
+    for (const file of attachments) card.append(element('div', `附件：${file.filename} · ${file.mimeType} · ${file.size} bytes · ${file.status}`, 'attachment'));
+  }
+
+  const details = element('details', undefined, 'metadata');
+  details.append(element('summary', '技術資訊與完整訊息'));
+  const fields = [['ID', row.id], ['角色', row.role], ['作者 ID', row.author_id ?? '未知'], ['作者類型', row.is_bot === null ? '未知' : row.is_bot ? 'Discord bot' : '人類'], ['原始時間', rawTime]];
+  for (const [label, value] of fields) {
+    const line = element('div', undefined, 'metadata-line');
+    line.append(element('strong', `${label}：`), element('span', value ?? '（空）'));
+    details.append(line);
+  }
+  const download = element('button', '下載完整訊息');
+  download.onclick = () => downloadBlob(row.content, `message-${safeFilePart(row.id)}.txt`, 'text/plain;charset=utf-8');
+  details.append(download);
+  card.append(details);
+  return card;
+}
+
+function renderTool(row) {
+  const card = element('div', undefined, 'record tool-record');
+  const fields = [['ID', row.id], ['工具', row.name], ['狀態', row.status], ['建立', row.created_at], ['完成', row.finished_at ?? '尚未完成'], ['參數', row.arguments], ['結果', row.result ?? (row.status === 'pending' ? '等待中' : '無結果')]];
+  for (const [label, value] of fields) {
+    card.append(element('strong', `${label}：`));
+    card.append(element(['結果', '參數'].includes(label) ? 'pre' : 'div', value ?? '（空）'));
+  }
+  if (row.name === 'discord_attach_to_reply') {
+    card.append(element('div', row.delivery_status
+      ? `附件傳送：${row.delivery_status} · ${row.delivery_updated_at}`
+      : '附件尚無傳送狀態。'));
+  }
+  const download = element('button', '下載完整工具紀錄');
+  download.onclick = () => downloadBlob(JSON.stringify(row, null, 2), `tool-${safeFilePart(row.id)}.json`, 'application/json');
+  card.append(download);
+  return card;
 }
 
 async function loadRecords(append = false) {
@@ -115,36 +176,7 @@ async function loadRecords(append = false) {
 
     const host = $('#records');
     if (!append) host.replaceChildren();
-    for (const row of data.items) {
-      const card = element('div', undefined, 'record');
-      const fields = kind === 'messages'
-        ? [['ID', row.id], ['角色', row.role], ...(row.author_id ? [['作者 ID', row.author_id]] : []), ...(row.is_bot === null ? [] : [['作者類型', row.is_bot ? 'Discord bot' : '人類']]), ['時間', row.event_time ?? row.created_at], ['內容', row.content]]
-        : [['ID', row.id], ['工具', row.name], ['狀態', row.status], ['建立', row.created_at], ['完成', row.finished_at ?? '尚未完成'], ['參數', row.arguments], ['結果', row.result ?? (row.status === 'pending' ? '等待中' : '無結果')]];
-      for (const [label, value] of fields) {
-        card.append(element('strong', `${label}：`));
-        card.append(element(['內容', '結果', '參數'].includes(label) ? 'pre' : 'div', value ?? '（空）'));
-      }
-      if (kind === 'messages' && row.attachments) {
-        let attachments = [];
-        try { attachments = JSON.parse(row.attachments); } catch { /* malformed metadata is not rendered */ }
-        for (const file of attachments) card.append(element('div', `附件：${file.filename} · ${file.mimeType} · ${file.size} bytes · ${file.status}`));
-      }
-      if (row.name === 'discord_attach_to_reply') {
-        card.append(element('div', row.delivery_status
-          ? `附件傳送：${row.delivery_status} · ${row.delivery_updated_at}`
-          : '附件尚無傳送狀態。'));
-      }
-      const download = element('button', kind === 'messages' ? '下載完整訊息' : '下載完整工具紀錄');
-      download.onclick = () => {
-        if (kind === 'messages') {
-          downloadBlob(row.content, `message-${safeFilePart(row.id)}.txt`, 'text/plain;charset=utf-8');
-        } else {
-          downloadBlob(JSON.stringify(row, null, 2), `tool-${safeFilePart(row.id)}.json`, 'application/json');
-        }
-      };
-      card.append(download);
-      host.append(card);
-    }
+    for (const row of data.items) host.append(kind === 'messages' ? renderMessage(row) : renderTool(row));
     recordOffset = data.next_offset ?? offset;
     $('#more-records').hidden = data.next_offset === null;
     setStatus(data.items.length ? '內容已載入。' : '這裡目前沒有紀錄。');
