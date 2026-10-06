@@ -9,6 +9,7 @@
     "stop": "sh scripts/butler-service.sh stop",
     "restart": "sh scripts/butler-service.sh restart",
     "status": "sh scripts/butler-service.sh status",
+    "deploy": "node scripts/butler-deploy.mjs",
     "test": "npm run build && node --test",
     "discord": "node dist/main.js",
     "discord:managed": "sh scripts/discord-restart.sh",

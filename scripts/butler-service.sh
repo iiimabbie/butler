@@ -14,7 +14,7 @@ umask 077
 mkdir -p "$STATE"
 chmod 700 "$STATE"
 exec 9>"$LOCK_FILE"
-flock -x 9
+if [ "${BUTLER_DEPLOY_LOCKED:-}" != 1 ]; then flock -x 9; fi
 
 valid_pid() { case ${1:-} in ''|*[!0-9]*) return 1;; esac; [ "$1" -gt 1 ]; }
 managed_pid() {
@@ -114,6 +114,8 @@ case ${1:-} in
   start) start_service ;;
   stop) stop_service ;;
   restart) stop_service && start_service ;;
+  deploy-stop) [ "${BUTLER_DEPLOY_LOCKED:-}" = 1 ] || { echo 'deploy-stop is internal' >&2; exit 2; }; stop_service ;;
+  deploy-start) [ "${BUTLER_DEPLOY_LOCKED:-}" = 1 ] || { echo 'deploy-start is internal' >&2; exit 2; }; start_service ;;
   status)
     if pid=$(running_pid); then
       printf 'Butler running (PID %s)\nLog: %s\n' "$pid" "$LOG_FILE"

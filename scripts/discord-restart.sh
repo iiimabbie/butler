@@ -43,8 +43,9 @@ while :; do
     exit "$signal_status"
   fi
 
-  if [ -f "$READY_FILE" ] && [ -n "$SERVICE_READY_FILE" ]; then
-    printf 'ready\n' >"$SERVICE_READY_FILE"
+  if [ -f "$READY_FILE" ]; then
+    "$NODE" "$ROOT/scripts/butler-deploy.mjs" --record-baseline
+    if [ -n "$SERVICE_READY_FILE" ]; then printf 'ready\n' >"$SERVICE_READY_FILE"; fi
   fi
 
   if [ ! -f "$READY_FILE" ]; then

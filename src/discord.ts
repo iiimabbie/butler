@@ -1,5 +1,5 @@
 import { Client, EmbedBuilder, GatewayIntentBits, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
-import { writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { Store } from './store.js';
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
@@ -39,6 +39,7 @@ const imageModelInflight = new Map<string, Promise<string[]>>();
 const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
+function isProcessAlive(pid: number): boolean { try { process.kill(pid, 0); return (readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').some(arg => arg.endsWith('/scripts/butler-deploy.mjs')) && readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes('--locked')); } catch { return false; } }
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
@@ -51,11 +52,17 @@ export class DiscordHandler {
   private readonly imageConfig: ButlerConfig['image'];
   private readonly scheduleTimezone: string;
   private stopping = false;
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; imageConfig?: ButlerConfig['image']; scheduleTimezone?: string } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.imageConfig = options.imageConfig; this.scheduleTimezone = options.scheduleTimezone ?? 'Asia/Taipei'; }
+  private deploying = false;
+  private deployRequest?: { id: string; nonce: string; workerPid: number };
+  private deploySchedulerPaused = false;
+  private deployCheckRunning = false;
+  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().catch(() => logSafe('Deployment handshake check failed')).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
+  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; imageConfig?: ButlerConfig['image']; scheduleTimezone?: string } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.imageConfig = options.imageConfig; this.scheduleTimezone = options.scheduleTimezone ?? 'Asia/Taipei'; this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0); }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
 
   async close(): Promise<void> {
+    clearInterval(this.deployPoll);
     this.stopping = true;
     await this.scheduler?.stop();
     await Promise.allSettled([...this.queues.values()]);
@@ -64,13 +71,55 @@ export class DiscordHandler {
 
   queueStatus(channelId: string): 'idle' | 'busy' { return this.queues.has(channelId) ? 'busy' : 'idle'; }
 
+  private async publishQuiesced(): Promise<void> {
+    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.localTools?.activeCount !== 0) return;
+    const state = fileURLToPath(new URL('../.data/service/', import.meta.url));
+    const temporary = `${state}deploy-quiesced-${this.deployRequest.id}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ ...this.deployRequest, pid: process.pid }), { mode: 0o600 });
+    renameSync(temporary, `${state}deploy-quiesced.json`);
+  }
+
+  private async checkDeployRequest(): Promise<void> {
+    if (this.stopping) return;
+    const state = fileURLToPath(new URL('../.data/service/', import.meta.url));
+    const requestPath = `${state}deploy-request.json`;
+    const candidatePath = `${state}deploy-candidate-ready`;
+    const readRequest = () => {
+      try { return existsSync(requestPath) ? JSON.parse(readFileSync(requestPath, 'utf8')) as { id?: unknown; pid?: unknown; workerPid?: unknown; nonce?: unknown } : undefined; }
+      catch { return undefined; }
+    };
+    const request = readRequest();
+    const valid = (value: typeof request) => Boolean(value && typeof value.id === 'string' && /^[a-f0-9-]{20,40}$/.test(value.id) && value.pid === process.pid && typeof value.workerPid === 'number' && Number.isSafeInteger(value.workerPid) && value.workerPid > 1 && isProcessAlive(value.workerPid) && typeof value.nonce === 'string' && value.nonce === `${value.id}:${value.workerPid}` && existsSync(candidatePath) && readFileSync(candidatePath, 'utf8') === value.id);
+    if (this.deploying) {
+      if (!request || request.id !== this.deployRequest?.id || request.nonce !== this.deployRequest?.nonce || request.workerPid !== this.deployRequest?.workerPid || !valid(request)) {
+        this.deploying = false; this.deploySchedulerPaused = false; this.deployRequest = undefined;
+        await this.scheduler?.resume();
+        return;
+      }
+      await this.publishQuiesced();
+      return;
+    }
+    if (!valid(request)) {
+      if (request && typeof request.workerPid === 'number' && request.workerPid > 1 && !isProcessAlive(request.workerPid)) {
+        for (const file of [requestPath, candidatePath, `${state}deploy-quiesced.json`]) { try { unlinkSync(file); } catch {} }
+      }
+      return;
+    }
+    this.deploying = true;
+    this.deployRequest = { id: request!.id as string, nonce: request!.nonce as string, workerPid: request!.workerPid as number };
+    await this.scheduler?.pause();
+    this.deploySchedulerPaused = true;
+    await this.publishQuiesced();
+  }
+
   async message(message: TextMessage): Promise<void> {
     if (message.isSelf || this.stopping) return;
     const botInput = message.isBot === true;
     const content = (botInput ? stripAnsiProgress(message.content) : message.content).trim();
     if (!content && !message.hasAttachments) return;
     const mode = this.store.channelMode(message.channelId);
-    const shouldAsk = () => isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId) && !message.isWebhook && (botInput
+    const deploymentPassive = this.deploying;
+    const shouldAsk = () => !deploymentPassive && isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId) && !message.isWebhook && (botInput
       ? Boolean(message.mentionsBot && this.store.botReplyEnabled())
       : this.store.effectiveReplyMode(message.channelId, message.parentChannelId) !== 'mention' || Boolean(message.mentionsBot));
     if (shouldAsk() && !botInput && mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
@@ -176,6 +225,7 @@ export class DiscordHandler {
   }
 
   async button(interaction: import('discord.js').ButtonInteraction): Promise<void> {
+    if (this.deploying) { await interaction.deferUpdate().catch(() => undefined); await interaction.followUp({ content: '部署準備中，請稍後再試。', ephemeral: true, allowedMentions: ALLOWED_MENTIONS }).catch(() => undefined); return; }
     const customId = interaction.customId;
     const split = customId.indexOf(':');
     if (split < 1) return;
@@ -212,6 +262,7 @@ export class DiscordHandler {
 
   async command(context: CommandContext): Promise<void> {
     if (this.stopping) { await context.reply('Butler 正在關閉，暫時不接受新指令。'); return; }
+    if (this.deploying) { await context.reply('Butler 部署準備中，請稍後再試。'); return; }
     const state = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
     if (context.command === 'status') {
       const embed = new EmbedBuilder().setTitle('Butler status ─ Glad to be of service.').addFields(
@@ -408,6 +459,8 @@ export class DiscordHandler {
       if (remaining > 0) this.workCounts.set(channelId, remaining);
       else this.workCounts.delete(channelId);
       if (this.queues.get(channelId) === next) this.queues.delete(channelId);
+      if (this.deploying) void this.publishQuiesced();
+      if (this.queues.size === 0) this.localTools?.startQueuedDeploy();
     }).catch(() => undefined);
     return next;
   }

@@ -135,6 +135,21 @@ export class Scheduler {
     this.timer = setInterval(() => { void this.poll(); }, this.interval);
   }
 
+  async pause(): Promise<void> {
+    this.stopped = true;
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+    while (this.polling) await new Promise(resolve => setTimeout(resolve, 5));
+    await Promise.allSettled([...this.pending]);
+  }
+
+  resume(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    void this.poll();
+    this.timer = setInterval(() => { void this.poll(); }, this.interval);
+  }
+
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);

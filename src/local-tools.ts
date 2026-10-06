@@ -1,6 +1,7 @@
 import { constants } from 'node:fs';
 import { open, opendir, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { LocalProcesses, OUTPUT_PAGE_BYTES } from './local-processes.js';
 
@@ -16,24 +17,56 @@ function definition(name: string, description: string, properties: Record<string
   return { type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } };
 }
 const definitions = [
-  definition('local_read', 'Read UTF-8 text (10 MiB maximum), with zero-based line offset, line numbers and pagination, or list direct directory entries. Default 200, maximum 2000 lines; 128 KiB pages. Use next_offset/next_column for a long line. Paths are unrestricted under current OS permissions; relative paths use the Butler project root.', { path: string, ...page, column: integer }, ['path']),
-  definition('local_search', 'Literal content or filename search. mode is content (default) or filename. Default 50, maximum 200 matches per page, 128 KiB output. Does not follow recursive symlinks. Scan limit: 20,000 entries, 100 MiB text, 10 MiB per file; skipped entries and incomplete scans are reported. Offsets are zero-based matches; each page rescans current data.', { path: string, query: string, mode: { type: 'string', enum: ['content', 'filename'] }, ...page }, ['path', 'query']),
-  definition('local_write', 'Create a UTF-8 file, or overwrite only with overwrite=true. No automatic parent directory creation. Maximum 10 MiB. No path jail or sender ACL; current OS permissions apply.', { path: string, content: string, overwrite: boolean }, ['path', 'content']),
-  definition('local_edit', 'Exact UTF-8 text replacement (10 MiB maximum). old_text must be nonempty and match exactly once unless replace_all=true. Preserves all other content.', { path: string, old_text: string, new_text: string, replace_all: boolean }, ['path', 'old_text', 'new_text']),
-  definition('local_shell', 'Execute /bin/sh noninteractively with current OS permissions and inherited environment; not a sandbox. cwd defaults to Butler root. Foreground timeout defaults to 30000 ms, maximum 120000; background has no timeout unless supplied. Stops the process group on timeout, output limit (10 MiB stored), or shell exit. Foreground returns stdout/stderr and task_id for more output; background returns running, not success. Tasks survive new sessions, not service restart; no crash recovery or replay.', { command: string, cwd: string, timeout_ms: integer, background: boolean }, ['command']),
-  definition('local_process_output', 'Read a runtime task status and stdout/stderr-tagged output records. offset is zero-based record index; default 200, maximum 2000 records and 128 KiB per page. Poll from output_offset when next_offset is null but status is running. Finished output is retained until Discord closes, then removed; no cross-restart jobs.', { task_id: string, ...page }, ['task_id']),
-  definition('local_process_stop', 'Stop a task created by this runtime: process-group TERM, then KILL after 500 ms. Unknown ID errors; completed tasks report already_finished. For other existing host processes use shell. No persistent daemon or scheduling.', { task_id: string }, ['task_id']),
+  definition('butler_deploy', 'Queue deployment of the current source after this reply and queued work finish.', {}, []),
+  definition('local_read', 'Read UTF-8 text with zero-based line offset and pagination, or list direct directory entries. Use returned next_offset/next_column to continue. Do not proactively disclose credentials or secrets. Paths use host OS permissions, not a sandbox; relative paths use the Butler project root.', { path: string, ...page, column: integer }, ['path']),
+  definition('local_search', 'Search literal content or filenames. Choose content (default) or filename mode. Offsets count matches; each page rescans current data, and results indicate incomplete scans. Relative paths use the Butler project root.', { path: string, query: string, mode: { type: 'string', enum: ['content', 'filename'] }, ...page }, ['path', 'query']),
+  definition('local_write', 'Create a UTF-8 file or overwrite it with overwrite=true. Parent directories are not created; relative paths use the Butler project root.', { path: string, content: string, overwrite: boolean }, ['path', 'content']),
+  definition('local_edit', 'Replace exact UTF-8 text; old_text must match once unless replace_all=true. Other content is preserved; relative paths use the Butler project root.', { path: string, old_text: string, new_text: string, replace_all: boolean }, ['path', 'old_text', 'new_text']),
+  definition('local_shell', 'Run /bin/sh noninteractively with host OS permissions and inherited environment; it is not sandboxed. cwd defaults to the Butler project root. Do not proactively disclose credentials or secrets. Foreground runs wait for results; background returns running, not success. Use task_id with local_process_output to read results. Tasks do not survive service restart.', { command: string, cwd: string, timeout_ms: integer, background: boolean }, ['command']),
+  definition('local_process_output', 'Read task status and stdout/stderr output records. Offset counts records; continue from output_offset when next_offset is null and status is running. Tasks do not survive service restart.', { task_id: string, ...page }, ['task_id']),
+  definition('local_process_stop', 'Stop a task created by this runtime. For other existing host processes, use local_shell. Tasks do not survive service restart.', { task_id: string }, ['task_id']),
 ];
 
 export class LocalToolRuntime {
   readonly definitions = definitions;
   private readonly processes = new LocalProcesses();
   private closed = false;
+  private deployPending = false;
+  private deployPersisted = false;
+  private deployTimer?: ReturnType<typeof setTimeout>;
+  private deploymentQueueIdle: () => boolean = () => false;
   constructor(private readonly root = ROOT) {}
+  setDeploymentQueueIdleCheck(check: () => boolean) { this.deploymentQueueIdle = check; }
+  confirmDeployRequest() { if (this.deployPending) this.deployPersisted = true; }
+  cancelDeployRequest() { this.deployPending = false; this.deployPersisted = false; if (this.deployTimer) clearTimeout(this.deployTimer); this.deployTimer = undefined; }
+  startQueuedDeploy() {
+    if (!this.deployPending || !this.deployPersisted || this.closed || !this.deploymentQueueIdle()) return false;
+    if (this.processes.activeCount > 0) {
+      if (!this.deployTimer) this.deployTimer = setTimeout(() => { this.deployTimer = undefined; if (this.deploymentQueueIdle()) this.startQueuedDeploy(); }, 1000);
+      return false;
+    }
+    this.deployPending = false;
+    this.deployPersisted = false;
+    const script = join(this.root, 'scripts/butler-deploy.mjs');
+    try {
+      const child = spawn('setsid', [process.execPath, script], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
+      child.once('error', error => { void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ status: 'failed', error: error.message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined); });
+      child.unref();
+      return true;
+    } catch (error) {
+      void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ status: 'failed', error: error instanceof Error ? error.message : String(error), at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined);
+      return false;
+    }
+  }
   get activeCount() { return this.processes.activeCount; }
-  async close() { this.closed = true; await this.processes.close(); }
+  async close() { this.closed = true; this.cancelDeployRequest(); await this.processes.close(); }
   async execute(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (this.closed) throw new Error('Local runtime is closing');
+    if (name === 'butler_deploy') {
+      if (this.deployPending) throw new Error('A deployment is already queued for this service');
+      this.deployPending = true;
+      return { accepted: true, message: '已受理，將在本輪結束後部署。' };
+    }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');
       const timeout = args.timeout_ms === undefined && background ? undefined : number(args.timeout_ms, 30_000, 1, 120_000, 'timeout_ms');

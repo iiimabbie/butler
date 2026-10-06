@@ -7,11 +7,11 @@ function definition(name: string, description: string, properties: Record<string
 }
 
 export const peopleDefinitions = [
-  definition('people_list', 'List people profiles directly from Hindsight, paginated by the butler-person tag.', { limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: integer }, []),
-  definition('people_get', 'Read a person profile original text from Hindsight by key (Discord keys are discord:<account id>).', { key: string }, ['key']),
-  definition('people_upsert', 'Create or replace a person profile in Hindsight. Before updating, read the current complete original profile and provide the complete new body, preserving all unrelated existing information. Use Discord key discord:<id> for Discord accounts; other stable person keys must not imitate Discord ids.', { key: string, content: string }, ['key', 'content']),
-  definition('people_delete', 'Irreversibly delete only this person profile document and its derived units. Call only when the user explicitly requested this deletion; read the profile first to confirm the exact target.', { key: string }, ['key']),
-  definition('people_recall', 'Read the person profile, then query Hindsight for memories relevant to this person and question. Treat recalled statements as evidence; do not attribute another speaker’s statements to the person.', { key: string, query: string }, ['key', 'query']),
+  definition('people_list', 'List person profiles.', { limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: integer }, []),
+  definition('people_get', 'Read a person profile by key (Discord keys use discord:<account id>).', { key: string }, ['key']),
+  definition('people_upsert', 'Create or replace a person profile. Read the complete current profile first, then supply the complete replacement, changing only explicitly requested details and preserving unrelated information. Use discord:<id> for Discord accounts; other stable keys must not imitate Discord IDs.', { key: string, content: string }, ['key', 'content']),
+  definition('people_delete', 'Delete a person profile only when explicitly requested; read it first to confirm the target.', { key: string }, ['key']),
+  definition('people_recall', 'Read the profile and recall relevant memories. Treat them as evidence and do not attribute another speaker’s statements to this person.', { key: string, query: string }, ['key', 'query']),
 ];
 
 export type PeopleToolRuntime = {
