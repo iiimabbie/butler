@@ -19,7 +19,7 @@ export class MemoryCoordinator {
   private readonly recoveryPending = new Set<string>();
   private roundRobinAfter = '';
 
-  constructor(private readonly store: Store, private readonly hindsight: Hindsight) {}
+  constructor(private readonly store: Store, private readonly getHindsight: () => Hindsight) {}
 
   async start(): Promise<void> {
     if (this.started || this.closed) return;
@@ -171,9 +171,10 @@ export class MemoryCoordinator {
   }
 
   private async submit(batch: MemoryBatch): Promise<void> {
+    const hindsight = this.getHindsight();
     this.store.setMemorySubmitIntent(batch.operationId);
     try {
-      await this.hindsight.submitConversationBatch(JSON.parse(batch.payload));
+      await hindsight.submitConversationBatch(JSON.parse(batch.payload));
       this.store.updateMemoryBatch(batch.operationId, 'pending', {
         nextPollAt: new Date(Date.now() + POLL_DELAYS[0]).toISOString(),
       });
@@ -189,9 +190,10 @@ export class MemoryCoordinator {
   }
 
   private async poll(batch: MemoryBatch): Promise<void> {
+    const hindsight = this.getHindsight();
     const now = new Date().toISOString();
     try {
-      const result = await this.hindsight.getOperationStatus(batch.operationId);
+      const result = await hindsight.getOperationStatus(batch.operationId);
       this.recoveryPending.delete(batch.operationId);
       if (result.status === 'completed') {
         this.store.completeMemoryBatch(batch.operationId);

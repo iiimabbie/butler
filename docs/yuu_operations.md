@@ -18,6 +18,8 @@ nvm use 24.21.0
 | 建置並部署程式 | `npm run deploy` | 暫存 build；最多等 10 分鐘讓 queue 與 local jobs 收尾，備份並切換 `dist`，正常停止舊版後啟動新版並等待 ready；candidate 失敗時確認程序退出後回復一次。`package.json` 或 `package-lock.json` 與 ready baseline 不同時拒絕部署。 |
 | Discord slash command 有變更 | `npm run discord:register` | 明確同步 commands；會清除本 application 的 global commands 與 joined guild commands，再註冊完整 guild commands。 |
 
+日常編輯根目錄 `config.yaml` 後，服務會自動熱更新可熱更新欄位；改到冷欄位（Discord token/owner、paths、UI、Google、memory 啟停或目標）或同次候選混有冷熱變更時，整份候選會拒絕，請修正為純熱變更或安排重啟。無效 YAML／缺檔／設定錯誤保留最後有效版本，修正後存檔重試。
+
 日常不需要執行 slash registration。`npm run deploy` 不應自動註冊 commands；只有 slash command 變更並要同步時才執行既有的 `npm run discord:register`。舊 `npm run discord:deploy` 是 build 加註冊 commands，不是日常程式部署入口。
 
 ## Discord 的 `/restart` 與 `npm restart`
@@ -41,7 +43,7 @@ tail -n 80 .data/service/butler.log
 tail -f .data/service/butler.log
 ```
 
-第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。每次部署 log 位於 `.data/deploy/<UUID>.log`，最近一次結果位於 `.data/deploy/last-result.json`；worker 啟動錯誤資訊位於 `.data/service/deploy-start-error.json`。
+第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。每次部署 log 位於 `.data/deploy/<UUID>.log`，最近一次結果位於 `.data/deploy/last-result.json`；worker 啟動錯誤資訊位於 `.data/service/deploy-start-error.json`。
 
 ```sh
 jq . .data/deploy/last-result.json

@@ -30,6 +30,7 @@ export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string };
+export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean; isBot?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
@@ -57,8 +58,6 @@ export class DiscordHandler {
   private botIdentity?: { id: string; name: string };
   private readonly outputChannel: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>;
   private readonly readOpeningMessage: (channelId: string) => Promise<SessionOpeningContext | undefined>;
-  private readonly imageConfig: ButlerConfig['image'];
-  private readonly scheduleTimezone: string;
   private readonly memoryCoordinator?: MemoryCoordinator;
   private stopping = false;
   private deploying = false;
@@ -66,7 +65,7 @@ export class DiscordHandler {
   private deploySchedulerPaused = false;
   private deployCheckRunning = false;
   private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().catch(() => logSafe('Deployment handshake check failed')).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
-  constructor(private readonly store: Store, private readonly config: DiscordConfig, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly webTools?: WebToolRuntime, private readonly weatherTools?: WeatherToolRuntime, private readonly hindsight?: Hindsight, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; imageConfig?: ButlerConfig['image']; scheduleTimezone?: string; memoryCoordinator?: MemoryCoordinator } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined); this.imageConfig = options.imageConfig; this.scheduleTimezone = options.scheduleTimezone ?? 'Asia/Taipei'; this.memoryCoordinator = options.memoryCoordinator; this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0); }
+  constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) { this.outputChannel = options.outputChannel ?? (async () => undefined); this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined); this.memoryCoordinator = options.memoryCoordinator; this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0); }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
   setBotIdentity(id: string, name: string): void { this.botIdentity = { id, name }; }
@@ -145,7 +144,8 @@ export class DiscordHandler {
     const effectiveContent = message.content;
     const content = effectiveContent.trim();
     if (!effectiveContent.trim() && !message.hasAttachments) return;
-    if (!isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId)) return;
+    const ingressRuntime = this.getRuntime();
+    if (!isAllowedDiscordChannel(ingressRuntime.discord.channelIds, message.channelId, message.parentChannelId)) return;
     const ingress = this.reserveIngress(message.channelId);
     await ingress.ready;
     const releaseIngress = ingress.release;
@@ -163,14 +163,14 @@ export class DiscordHandler {
         eventTime: message.eventTime,
         ...(message.reference ? { replyToMessageId: message.reference.messageId, replyToChannelId: message.reference.channelId } : {}),
       };
-      const stateAtIngestion = this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId);
+      const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備尚未完成' }));
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       if (!ingestion.created) { releaseIngress(); return; }
       let stored = ingestion.message;
       let attachments: import('./store.js').MessageInputAttachment[];
       const preparation = (async () => {
-        try { attachments = await prepareAttachments(message.attachments ?? [], this.config.attachmentDir); }
+        try { attachments = await prepareAttachments(message.attachments ?? [], ingressRuntime.discord.attachmentDir); }
         catch { attachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備失敗' })); }
         this.store.updateAttachments(stored.id, attachments);
       })();
@@ -194,6 +194,8 @@ export class DiscordHandler {
       }
       const stopTyping = this.startTyping(message.channelId, message.sendTyping);
       const queued = this.enqueue(message.channelId, async () => {
+        const runtime = this.getRuntime();
+        const config = runtime.discord;
         if (!shouldAsk()) { await preparation; this.memoryCoordinator?.notifyReady(); return; }
         const preparedInput = await prepared;
         let sessionId: string | undefined = stored.sessionId;
@@ -206,7 +208,7 @@ export class DiscordHandler {
         try {
           const prepared = preparedInput;
           const userContent = prepared.content;
-          const state = { ...stateAtIngestion, model: this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId).model };
+          const state = { ...stateAtIngestion, model: this.store.channelState(message.channelId, config.defaultModel, config.ownerId).model };
           sessionId = stored.sessionId;
           let openingContext = this.store.sessionOpeningContext(state.sessionId);
           if (!openingContext) {
@@ -215,25 +217,25 @@ export class DiscordHandler {
           }
           if (!botInput) this.activeAsk.add(message.channelId);
           progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress reply did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: logSafe });
-          const toolRuntime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: this.config.ownerId, isBot: botInput, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } } });
+          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, isBot: botInput, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } } });
           await this.runAsk(this.store, state.sessionId, userContent, {
-            baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: state.model,
+            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model,
             messageSource: prepared.source,
             storedInput: stored,
             consumedSteerMessageIds: this.consumedSteerMessageIds.get(stored.sessionId),
             openingContext,
             initialAttachments: prepared.attachments,
-            attachmentDir: this.config.attachmentDir,
-            hindsight: this.hindsight,
+            attachmentDir: config.attachmentDir,
+            hindsight: runtime.hindsight,
             discordTools: toolRuntime,
             googleTools: this.googleTools,
             localTools: this.localTools,
-            webTools: this.webTools,
+            webTools: runtime.webTools,
             weatherTools: this.weatherTools,
-            peopleTools: this.hindsight ? createPeopleToolRuntime(this.hindsight) : undefined,
+            peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight) : undefined,
             skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
-            scheduleTools: this.scheduleTools(message.channelId, message.authorId),
-            imageTools: this.imageTools(attachmentFiles, message.channelId),
+            scheduleTools: this.scheduleTools(message.channelId, message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+            imageTools: this.imageTools(attachmentFiles, message.channelId, runtime.settings.image, config.attachmentDir),
             reasoningEffort: this.store.channelReasoningEffort(message.channelId),
             onProgress: event => progress?.event(event),
             workspaceDirectory: DEFAULT_WORKSPACE,
@@ -316,6 +318,7 @@ export class DiscordHandler {
     if (!button || !this.store.claimDiscordAction(customId, actionId, interaction.user.id)) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕已執行或正在處理，不會重複執行。'); return; }
     const acknowledged = interaction.deferUpdate().then(() => true, () => false);
     await this.enqueue(action.channel_id, async () => {
+      const config = this.getRuntime().discord;
       if (!await acknowledged) {
         this.store.finishDiscordAction(customId, 'failed', { actorId: interaction.user.id, error: 'ack_failed; action_not_executed' });
         return;
@@ -325,7 +328,7 @@ export class DiscordHandler {
       let actionFailed = false;
       try {
         if (this.stopping || Date.now() >= Date.parse(action.expires_at)) throw new Error('expired_or_stopping');
-        const runtime = createDiscordToolRuntime({ token: this.config.token, attachmentDir: this.config.attachmentDir, context: { channelId: action.channel_id, ownerId: this.config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: action.session_id, store: this.store, attachmentFiles: [], onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } } });
+        const runtime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: action.channel_id, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: action.session_id, store: this.store, attachmentFiles: [], onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } } });
         const actionArgs = button.actionArgs as Record<string, unknown>;
         toolId = this.store.beginTool(action.session_id, String(button.actionTool), actionArgs);
         result = await runtime.execute(String(button.actionTool), actionArgs);
@@ -337,14 +340,16 @@ export class DiscordHandler {
   }
 
   async command(context: CommandContext): Promise<void> {
+    const commandRuntime = this.getRuntime();
+    const config = commandRuntime.discord;
     if (this.stopping) { await context.reply('Butler 正在關閉，暫時不接受新指令。'); return; }
     if (this.deploying) { await context.reply('Butler 部署準備中，請稍後再試。'); return; }
-    const state = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
+    const state = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
     if (context.command === 'status') {
       const embed = new EmbedBuilder().setTitle('Butler status ─ Glad to be of service.').addFields(
         { name: '💼 Work Phase', value: state.sessionId },
         { name: '🗿 Model', value: `${state.model}（思考：${this.store.channelReasoningEffort(context.channelId) ?? '後端預設'}）` },
-        { name: 'Image model', value: this.store.channelImageModel(context.channelId) ?? this.imageConfig?.model ?? '未啟用' },
+        { name: 'Image model', value: this.store.channelImageModel(context.channelId) ?? commandRuntime.settings.image?.model ?? '未啟用' },
         { name: '🐾 msg mode', value: this.store.channelMode(context.channelId) },
         { name: 'Reply mode', value: `${this.store.channelReplyMode(context.channelId) ?? 'inherit'}（effective ${this.store.effectiveReplyMode(context.channelId, context.parentChannelId)}）` },
         { name: '🤖 Bot Reply', value: this.store.botReplyEnabled() ? 'true' : 'false' },
@@ -354,14 +359,15 @@ export class DiscordHandler {
       return;
     }
     if (context.command === 'img_model') {
-      if (!this.imageConfig) { await context.reply('圖片生成功能尚未啟用。'); return; }
       await this.enqueue(context.channelId, async () => {
+        const runtime = this.getRuntime();
+        if (!runtime.settings.image) { await context.reply('圖片生成功能尚未啟用。'); return; }
         const selected = context.model === 'default' ? undefined : context.model?.trim();
         if (context.model !== undefined) {
           if (context.model !== 'default' && !selected) { await context.reply('圖片模型 ID 不可為空。'); return; }
           this.store.setChannelImageModel(context.channelId, selected);
         }
-        await context.reply(`圖片模型：${this.store.channelImageModel(context.channelId) ?? this.imageConfig!.model}`);
+        await context.reply(`圖片模型：${this.store.channelImageModel(context.channelId) ?? runtime.settings.image!.model}`);
       });
       return;
     }
@@ -388,12 +394,14 @@ export class DiscordHandler {
     }
     if (context.command === 'compact') {
       await this.enqueue(context.channelId, async () => {
-        const current = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
+        const runtime = this.getRuntime();
+        const config = runtime.discord;
+        const current = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
         try {
           const opening = await this.readOpeningMessage(context.channelId);
           if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，未執行壓縮。'); return; }
           this.store.saveSessionOpeningContext(current.sessionId, opening);
-          const result = await compactSession(this.store, current.sessionId, { baseUrl: this.config.baseUrl, apiKey: this.config.apiKey, model: current.model, reasoningEffort: this.store.channelReasoningEffort(context.channelId), keepRecent: 10 });
+          const result = await compactSession(this.store, current.sessionId, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: current.model, reasoningEffort: this.store.channelReasoningEffort(context.channelId), keepRecent: 10 });
           if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 10 則訊息會保留。');
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
         } catch (error) {
@@ -436,13 +444,15 @@ export class DiscordHandler {
       await ingress.ready;
       try {
         await this.enqueue(context.channelId, async () => {
-          const oldState = this.store.channelState(context.channelId, this.config.defaultModel, this.config.ownerId);
+          const runtime = this.getRuntime();
+          const config = runtime.discord;
+          const oldState = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
           const opening = await this.readOpeningMessage(context.channelId);
           if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
           this.memoryCoordinator?.flushSession(context.channelId, oldState.sessionId);
           const sessionId = this.store.newSession();
           this.store.saveSessionOpeningContext(sessionId, opening);
-          this.store.setChannelSession(context.channelId, sessionId, this.config.ownerId);
+          this.store.setChannelSession(context.channelId, sessionId, config.ownerId);
           this.consumedSteerMessageIds.delete(oldState.sessionId);
           await context.reply(`新 session：${sessionId}`);
         });
@@ -495,13 +505,15 @@ export class DiscordHandler {
     return message;
   }
 
-  private scheduleTools(sourceChannelId: string, creatorId: string) { return this.store ? createScheduleToolRuntime({ store: this.store, sourceChannelId, creatorId, defaultTimezone: this.scheduleTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
-  private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string) { return this.imageConfig ? createImageToolRuntime({ config: { ...this.imageConfig, model: this.store.channelImageModel(channelId) ?? this.imageConfig.model }, attachmentDir: this.config.attachmentDir, attachmentFiles }) : undefined; }
+  private scheduleTools(sourceChannelId: string, creatorId: string, defaultTimezone: string) { return this.store ? createScheduleToolRuntime({ store: this.store, sourceChannelId, creatorId, defaultTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
+  private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string, image: ButlerConfig['image'], attachmentDir: string) { return image ? createImageToolRuntime({ config: { ...image, model: this.store.channelImageModel(channelId) ?? image.model }, attachmentDir, attachmentFiles }) : undefined; }
 
   private async runScheduled(request: ScheduledTaskRequest): Promise<void> {
+    const commandRuntime = this.getRuntime();
+    const config = commandRuntime.discord;
     const attachmentFiles: Array<{ attachment: string; name: string }> = [];
     const attachmentToolCallIds: string[] = [];
-    const state = this.store.channelState(request.job.sourceChannelId, this.config.defaultModel, this.config.ownerId);
+    const state = this.store.channelState(request.job.sourceChannelId, commandRuntime.discord.defaultModel, commandRuntime.discord.ownerId);
     const session = this.store.newSession();
     const scheduledInput = this.store.addMessageOnce(session, 'user', request.prompt, { sourceKind: 'scheduled_input', authorId: request.job.creatorId, channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt }, []);
     this.store.updateAttachments(scheduledInput.message.id, []);
@@ -527,25 +539,25 @@ export class DiscordHandler {
     let deliveryAuditAttempted = false;
     try {
       await this.runAsk(this.store, session, request.prompt, {
-        baseUrl: this.config.baseUrl,
-        apiKey: this.config.apiKey,
+        baseUrl: commandRuntime.discord.baseUrl,
+        apiKey: commandRuntime.discord.apiKey,
         model: state.model,
         storedInput,
         reasoningEffort: this.store.channelReasoningEffort(request.job.sourceChannelId),
-        hindsight: this.hindsight,
+        hindsight: commandRuntime.hindsight,
         discordTools: createDiscordToolRuntime({
-          token: this.config.token,
-          attachmentDir: this.config.attachmentDir,
-          context: { channelId: request.outputChannelId, ownerId: this.config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } },
+          token: config.token,
+          attachmentDir: config.attachmentDir,
+          context: { channelId: request.outputChannelId, ownerId: commandRuntime.discord.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } },
         }),
         googleTools: this.googleTools,
         localTools: this.localTools,
-        webTools: this.webTools,
+        webTools: commandRuntime.webTools,
         weatherTools: this.weatherTools,
-        peopleTools: this.hindsight ? createPeopleToolRuntime(this.hindsight) : undefined,
+        peopleTools: commandRuntime.hindsight ? createPeopleToolRuntime(commandRuntime.hindsight) : undefined,
         skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
-        scheduleTools: this.scheduleTools(request.job.sourceChannelId, request.job.creatorId),
-        imageTools: this.imageTools(attachmentFiles, request.job.sourceChannelId),
+        scheduleTools: this.scheduleTools(request.job.sourceChannelId, request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+        imageTools: this.imageTools(attachmentFiles, request.job.sourceChannelId, commandRuntime.settings.image, config.attachmentDir),
         workspaceDirectory: DEFAULT_WORKSPACE,
         messageSource: { sourceKind: 'scheduled_input', channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
@@ -809,7 +821,10 @@ function isAllowedDiscordChannel(rootIds: string[], channelId: string, parentCha
   return rootIds.includes(channelId) || (parentChannelId !== undefined && rootIds.includes(parentChannelId));
 }
 
-export async function startDiscord(config: DiscordConfig, store: Store, settings: ButlerConfig, dbPath: string, clientOverride?: Client, memoryCoordinator?: MemoryCoordinator, hindsightOverride?: Hindsight): Promise<void> {
+export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store, dbPath: string, clientOverride?: Client, memoryCoordinator?: MemoryCoordinator, closeConfigWatch?: () => void): Promise<void> {
+  const startup = getRuntime();
+  const config = startup.discord;
+  const settings = startup.settings;
   const readyFile = process.env.BUTLER_RESTART_READY_FILE;
   let finish!: () => void;
   const lifetime = new Promise<void>(resolve => { finish = resolve; });
@@ -823,14 +838,10 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
   } : undefined;
   const googleAuth = new GoogleAuth({ client: settings.google });
   const googleTools = settings.google ? createGoogleToolRuntime(new GoogleClient(googleAuth), config.attachmentDir) : undefined;
-  const webTools = createWebToolRuntime(settings.web);
   client = clientOverride ?? new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], rest: { retries: 0 } });
   const localTools = new LocalToolRuntime();
   const weatherTools = createWeatherToolRuntime();
-  const hindsight = hindsightOverride;
-  const handler = new DiscordHandler(store, config, ask, requestRestart, googleTools, localTools, webTools, weatherTools, hindsight, {
-    imageConfig: settings.image,
-    scheduleTimezone: settings.schedule?.timezone,
+  const handler = new DiscordHandler(store, getRuntime, ask, requestRestart, googleTools, localTools, weatherTools, {
     memoryCoordinator,
     readOpeningMessage: async channelId => {
       const channel = await client.channels.fetch(channelId);
@@ -889,7 +900,7 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
       .catch(() => undefined);
   });
   client.on('interactionCreate', interaction => {
-    if (interaction.isAutocomplete?.()) void handleAutocomplete(config, interaction, fetch, settings.image);
+    if (interaction.isAutocomplete?.()) { const runtime = getRuntime(); void handleAutocomplete(runtime.discord, interaction, fetch, runtime.settings.image); }
     else if (interaction.isButton?.()) void handler.button(interaction).catch(() => logSafe('Discord button handler failed'));
     else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(() => logSafe('Discord interaction handler failed'));
   });
@@ -903,6 +914,7 @@ export async function startDiscord(config: DiscordConfig, store: Store, settings
     if (shutdownPromise) return shutdownPromise;
     closed = true;
     shutdownPromise = (async () => {
+      closeConfigWatch?.();
       try { await handler.close(); } catch { logSafe('Local runtime shutdown failed'); }
       process.removeListener('SIGINT', onSigint);
       process.removeListener('SIGTERM', onSigterm);

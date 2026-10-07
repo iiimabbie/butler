@@ -8,12 +8,13 @@ import { Store } from '../dist/store.js';
 import { ask } from '../dist/agent.js';
 import { DiscordHandler, DISCORD_MESSAGE_LIMIT, commands, readDiscordConfig, registerDiscordCommands, splitDiscordText, handleInteraction, handleAutocomplete, modelChoices, startDiscord } from '../dist/discord.js';
 
+function runtimeFor(config) { return { settings: {}, discord: config, webTools: undefined, hindsight: undefined }; }
 function fixture(runAsk) {
   const dir = mkdtempSync(join(tmpdir(), 'butler-discord-'));
   const path = join(dir, 'data.sqlite');
   const store = new Store(path);
   const config = { token: 'fake', ownerId: 'owner', channelIds: ['allowed'], defaultModel: 'model-a', baseUrl: 'http://fake/v1' };
-  return { dir, path, store, config, handler: new DiscordHandler(store, config, runAsk) };
+  return { dir, path, store, config, handler: new DiscordHandler(store, () => runtimeFor(config), runAsk) };
 }
 function message(overrides = {}) {
   const sent = [];
@@ -303,7 +304,7 @@ test('reply is chunked under Discord limit and suppresses mentions; attachments 
   assert.equal(m.sent[0].options.allowedMentions.repliedUser, false);
   assert.ok(m.sent.at(-1).text.includes('附件尚未支援'));
   const onlyAttachment = message({ content: '', hasAttachments: true });
-  let calls = 0; const handler = new DiscordHandler(f.store, f.config, async () => { calls++; return ''; });
+  let calls = 0; const handler = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => { calls++; return ''; });
   await handler.message(onlyAttachment.input);
   assert.equal(calls, 0);
   assert.match(onlyAttachment.sent[0].text, /附件尚未支援/);
@@ -403,7 +404,7 @@ test('slash replies always suppress mentions and failed deferred replies get a s
   assert.deepEqual(successReplies[0].allowedMentions.parse, []);
   assert.equal(successReplies[0].allowedMentions.repliedUser, false);
 
-  const restartHandler = new DiscordHandler(f.store, f.config, async () => 'unused', async () => true);
+  const restartHandler = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => 'unused', async () => true);
   const restartReplies = [];
   const restart = fakeInteraction(async payload => restartReplies.push(payload), 'restart');
   restart.reply = async payload => { restartReplies.push(payload); restart.replied = true; return { id: 'interaction-restart-message' }; };
@@ -449,7 +450,7 @@ test('gateway readiness is distinct from login and termination closes client and
   const originalInfo = console.info;
   console.info = (...values) => infos.push(values.join(' '));
   try {
-    const running = startDiscord(f.config, f.store, client);
+    const running = startDiscord(() => runtimeFor(f.config), f.store, f.path, client);
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(infos.length, 0);
     client.emit('clientReady', { user: { id: 'test-bot-id' } });
@@ -483,7 +484,7 @@ test('restart readiness notice clears only after successful send and suppresses 
     async destroy() {}
   }
   const client = new FakeReadyClient();
-  const running = startDiscord(f.config, f.store, client);
+  const running = startDiscord(() => runtimeFor(f.config), f.store, f.path, client);
   await new Promise(resolve => setImmediate(resolve));
   client.emit('clientReady', { user: { id: 'test' } });
   await new Promise(resolve => setImmediate(resolve));
@@ -503,7 +504,7 @@ test('startDiscord without managed readiness rejects restart before ack or persi
   const f = fixture(async () => 'unused');
   class FakeClient extends EventEmitter { async login() {} async destroy() {} }
   const client = new FakeClient();
-  const running = startDiscord(f.config, f.store, client);
+  const running = startDiscord(() => runtimeFor(f.config), f.store, f.path, client);
   await new Promise(resolve => setImmediate(resolve));
   const replies = [];
   const interaction = {
@@ -530,7 +531,7 @@ test('failed restart readiness notice stays persisted', async () => {
   }
   const logs = []; const originalError = console.error; console.error = (...values) => logs.push(values.join(' '));
   const client = new FakeReadyClient();
-  const running = startDiscord(f.config, f.store, client);
+  const running = startDiscord(() => runtimeFor(f.config), f.store, f.path, client);
   await new Promise(resolve => setImmediate(resolve));
   client.emit('clientReady', { user: { id: 'test' } });
   await new Promise(resolve => setImmediate(resolve));
@@ -650,12 +651,12 @@ test('steer received before a failed model turn is persisted in its current sess
 
 test('/restart requires managed launcher and global idle; ack failure rolls back notice', async () => {
   const f = fixture(async () => 'done');
-  const plain = new DiscordHandler(f.store, f.config, async () => 'unused');
+  const plain = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => 'unused');
   const plainReplies = [];
   await plain.command({ ownerId: 'owner', channelId: 'allowed', command: 'restart', reply: async text => plainReplies.push(text) });
   assert.match(plainReplies[0], /受控重啟入口/);
   let restarts = 0;
-  const handler = new DiscordHandler(f.store, f.config, async () => 'unused', async () => { restarts++; return true; });
+  const handler = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => 'unused', async () => { restarts++; return true; });
   const replies = [];
   await handler.command({ ownerId: 'owner', channelId: 'allowed', command: 'restart', reply: async text => { replies.push(text); return { id: 'notice-1' }; } });
   assert.equal(restarts, 1);
@@ -663,7 +664,7 @@ test('/restart requires managed launcher and global idle; ack failure rolls back
 
   const gated = fixture(async (_s, _id, _p) => new Promise(resolve => { gatedRelease = resolve; }));
   let gatedRelease;
-  const gatedHandler = new DiscordHandler(gated.store, gated.config, async (...args) => gated.handler['runAsk'](...args), async () => { throw new Error('should not restart'); });
+  const gatedHandler = new DiscordHandler(gated.store, () => runtimeFor(gated.config), async (...args) => gated.handler['runAsk'](...args), async () => { throw new Error('should not restart'); });
   const pendingMessage = message(); const pending = gatedHandler.message(pendingMessage.input);
   await new Promise(resolve => setImmediate(resolve));
   const busyReplies = [];
@@ -671,7 +672,7 @@ test('/restart requires managed launcher and global idle; ack failure rolls back
   assert.match(busyReplies[0], /工作/);
   gatedRelease('done'); await pending;
 
-  const ackFailure = new DiscordHandler(f.store, f.config, async () => 'unused', async () => { throw new Error('unreachable'); });
+  const ackFailure = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => 'unused', async () => { throw new Error('unreachable'); });
   f.store.setRestartNotice(null);
   await ackFailure.command({ ownerId: 'owner', channelId: 'allowed', command: 'restart', reply: async () => { throw new Error('ack failed'); } });
   assert.equal(f.store.restartNotice(), undefined);
@@ -679,7 +680,7 @@ test('/restart requires managed launcher and global idle; ack failure rolls back
   const originalSetNotice = f.store.setRestartNotice.bind(f.store);
   f.store.setRestartNotice = () => { throw new Error('sqlite write failed'); };
   let forbiddenRestart = 0;
-  const writeFailure = new DiscordHandler(f.store, f.config, async () => 'unused', async () => { forbiddenRestart++; return true; });
+  const writeFailure = new DiscordHandler(f.store, () => runtimeFor(f.config), async () => 'unused', async () => { forbiddenRestart++; return true; });
   await writeFailure.command({ ownerId: 'owner', channelId: 'allowed', command: 'restart', reply: async () => ({ id: 'notice-2' }) });
   assert.equal(forbiddenRestart, 0);
   const resumedMessage = message(); await writeFailure.message(resumedMessage.input);

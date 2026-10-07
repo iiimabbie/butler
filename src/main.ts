@@ -1,4 +1,5 @@
-import { readConfig } from './config.js';
+import { readConfig, watchConfig, type ButlerConfig } from './config.js';
+import type { RuntimeBundle } from './discord.js';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { databasePath, prepareDatabaseDirectory } from './paths.js';
 import { Store } from './store.js';
@@ -6,6 +7,7 @@ import { readDiscordConfig, registerDiscordCommands, startDiscord } from './disc
 import { fileURLToPath } from 'node:url';
 import { Hindsight } from './hindsight.js';
 import { MemoryCoordinator } from './memory-coordinator.js';
+import { createWebToolRuntime } from './web-tools.js';
 
 try {
   const config = readConfig();
@@ -22,12 +24,17 @@ try {
     const dbPath = databasePath(config);
     prepareDatabaseDirectory(dbPath);
     const store = new Store(dbPath);
-    const hindsight = config.memory ? new Hindsight(config.memory) : undefined;
-    const memoryCoordinator = hindsight ? new MemoryCoordinator(store, hindsight) : undefined;
+    let current: RuntimeBundle;
+    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
+    current = buildBundle(config);
+    const getRuntime = () => current;
+    const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }) : undefined;
+    const watcher = watchConfig({ initial: config, log: message => console.error(message), onCandidate: candidate => { current = buildBundle(candidate); } });
     try {
       await memoryCoordinator?.start();
-      await startDiscord(readDiscordConfig(config), store, config, dbPath, undefined, memoryCoordinator, hindsight);
+      await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close());
     } finally {
+      watcher.close();
       await memoryCoordinator?.close();
     }
   }
