@@ -87,6 +87,24 @@ const tools = [
   { type: 'function', name: 'memory_reflect', description: 'Ask Hindsight to synthesize an answer from shared long-term memory, such as comparing past decisions, explaining changes or connecting information across conversations. Write a specific question with the relevant people, topic and time period. Returns generated text and based_on supporting evidence; use the evidence to distinguish recorded statements from the generated interpretation and assess gaps or conflicts. Use memory_recall for direct evidence lookup instead of synthesis.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
 ];
 
+function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Record<string, unknown> }): { [key: string]: unknown; parameters: Record<string, unknown> } {
+  const parameters = tool.parameters;
+  return {
+    ...tool,
+    parameters: {
+      ...parameters,
+      properties: {
+        ...(parameters.properties as Record<string, unknown>),
+        label: {
+          type: 'string',
+          description: '用使用者對話語言（預設繁體中文）寫此次操作的簡短任務標籤，例如「查找會議相關郵件」。只描述動作與對象；不要寫工具名、原始參數或密鑰、狀態符號、尚未發生的結果。',
+        },
+      },
+      required: [...((parameters.required as string[] | undefined) ?? []), 'label'],
+    },
+  };
+}
+
 export async function ask(store: Store, session: string, prompt: string, config: AgentConfig): Promise<string> {
   if (!store.hasSession(session)) throw new Error(`Unknown session: ${session}`);
   if (!config.storedInput) throw new Error('ask requires an already persisted input message');
@@ -126,7 +144,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const availableTools = [...tools.filter(tool => !String(tool.name).startsWith('memory_') || config.hindsight), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])];
+    const availableTools = [...tools.filter(tool => !String(tool.name).startsWith('memory_') || config.hindsight), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
     const memory = config.hindsight ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
@@ -154,7 +172,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (!response.ok) throw contextMessages.some(message => message.attachments.some(file => file.status === 'ready')) ? new AttachmentInputError('request_rejected', response.status) : new Error(`LLM HTTP ${response.status}: ${JSON.stringify(raw)}`);
       const body = parseResponse(raw);
       const calls = body.output.filter(isFunctionCall);
-      const commentary = calls.length === 1 ? commentaryText(body) : '';
       input.push(...body.output);
       if (calls.length === 0) {
         const text = responseText(body);
@@ -176,7 +193,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         return text;
       }
       for (const call of calls) {
-        const output = await executeCall(store, session, call, config, googleRuntime, commentary);
+        const output = await executeCall(store, session, call, config, googleRuntime);
         input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
       }
     }
@@ -187,7 +204,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
   }
 }
 
-async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, commentary = ''): Promise<unknown> {
+async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime): Promise<unknown> {
   let args: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(call.arguments);
@@ -195,7 +212,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     args = parsed;
   } catch (error) {
     const id = store.beginTool(session, call.name, { raw_arguments: call.arguments });
-    emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, description: commentary || undefined });
+    emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name });
     const result = { error: errorMessage(error) };
     store.finishTool(id, 'failed', result);
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
@@ -203,47 +220,49 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
   }
 
   const id = store.beginTool(session, call.name, args);
-  emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args, description: commentary || undefined });
+  const label = typeof args.label === 'string' ? args.label.trim() : '';
+  const { label: _label, ...runtimeArgs } = args;
+  emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args: runtimeArgs, ...(label ? { description: label } : {}) });
   let result: unknown;
   try {
     if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
       if (!config.hindsight) throw new Error('Shared memory is unavailable');
-      const query = requiredString(args.query, 'query');
+      const query = requiredString(runtimeArgs.query, 'query');
       result = call.name === 'memory_recall'
         ? await config.hindsight.recall(query)
         : await config.hindsight.reflect(query);
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new Error('Weather tools are unavailable in this entry point');
-      result = await config.weatherTools.execute(call.name, args);
+      result = await config.weatherTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('web_')) {
       if (!config.webTools) throw new Error('Web tools are unavailable in this entry point');
-      result = await config.webTools.execute(call.name, args);
+      result = await config.webTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('local_')) {
       if (!config.localTools) throw new Error('Local tools are unavailable in this entry point');
-      result = await config.localTools.execute(call.name, args);
+      result = await config.localTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('discord_')) {
       if (!config.discordTools) throw new Error('Discord tools are unavailable in this entry point');
-      result = await config.discordTools.execute(call.name, args);
+      result = await config.discordTools.execute(call.name, runtimeArgs);
       if (call.name === 'discord_attach_to_reply') config.discordTools.context.attachmentToolCallIds?.push(id);
     } else if (call.name.startsWith('google_')) {
       if (!googleRuntime) throw new Error('Google tools are unavailable until Google is connected');
-      result = await googleRuntime.execute(call.name, args);
+      result = await googleRuntime.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('people_')) {
       if (!config.peopleTools) throw new Error('People tools are unavailable in this entry point');
-      result = await config.peopleTools.execute(call.name, args);
+      result = await config.peopleTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('skills_')) {
       if (!config.skillsTools) throw new Error('Skills tools are unavailable in this entry point');
-      result = await config.skillsTools.execute(call.name, args);
+      result = await config.skillsTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('schedule_')) {
       if (!config.scheduleTools) throw new Error('Schedule tools are unavailable in this entry point');
-      result = await config.scheduleTools.execute(call.name, args);
+      result = await config.scheduleTools.execute(call.name, runtimeArgs);
     } else if (call.name === 'image_generate') {
       if (!config.imageTools) throw new Error('Image tools are unavailable in this entry point');
-      result = await config.imageTools.execute(call.name, args);
+      result = await config.imageTools.execute(call.name, runtimeArgs);
       const attachmentIds = config.discordTools?.context.attachmentToolCallIds;
       if (attachmentIds && Array.isArray(attachmentIds)) attachmentIds.push(id);
     } else {
-      result = runTool(store, session, call.name, args);
+      result = runTool(store, session, call.name, runtimeArgs);
     }
   } catch (error) {
     result = { error: errorMessage(error) };
@@ -353,13 +372,6 @@ function parseResponse(value: unknown): ResponsesBody {
 function isFunctionCall(value: unknown): value is FunctionCall {
   return isRecord(value) && value.type === 'function_call' && typeof value.name === 'string' &&
     typeof value.call_id === 'string' && typeof value.arguments === 'string';
-}
-
-function commentaryText(body: ResponsesBody): string {
-  return body.output.flatMap(item => {
-    if (!isRecord(item) || item.type !== 'message' || item.channel !== 'commentary' || !Array.isArray(item.content)) return [];
-    return item.content.flatMap(part => isRecord(part) && part.type === 'output_text' && typeof part.text === 'string' ? [part.text] : []);
-  }).join('\n');
 }
 
 function responseText(body: ResponsesBody): string {

@@ -35,7 +35,7 @@ export class Hindsight {
   async ensureBank(store: Store, session: string, onProgress?: (event: ProgressEvent) => void): Promise<void> {
     const audit = store.beginTool(session, 'hindsight_bank_setup', { bankId: this.config.bankId });
     const started = Date.now();
-    emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_bank_setup', description: '共享記憶：檢查 bank 設定' });
+    emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_bank_setup', description: '確認共享記憶服務' });
     let createdBank = false;
     try {
       const url = `${this.baseUrl()}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`;
@@ -51,15 +51,11 @@ export class Hindsight {
       } else if (!response.ok) throw new Error(`bank config returned HTTP ${response.status}`);
     } catch (error) {
       store.finishTool(audit, 'failed', { bankId: this.config.bankId, error: safeError(error) });
-      const duration = Date.now() - started;
-      emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_bank_setup', message: `bank 設定失敗（${duration}ms）` });
       emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed' });
       logMemoryPhase('bank_setup', started, 'failed');
       throw new MemoryServiceError(safeError(error));
     }
     store.finishTool(audit, 'completed', { bankId: this.config.bankId, created: createdBank });
-    const duration = Date.now() - started;
-    emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_bank_setup', message: `bank 設定完成（${duration}ms）` });
     emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'completed' });
     logMemoryPhase('bank_setup', started, 'completed');
   }
@@ -71,19 +67,17 @@ export class Hindsight {
     const request = { query, budget: this.config.recallBudget ?? 'mid', max_tokens: this.config.maxTokens ?? 1200 };
     const audit = store.beginTool(session, 'hindsight_recall', { bankId: this.config.bankId, ...request, phase: 'ask-start' });
     const recallStarted = Date.now();
-    emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_recall', description: `共享記憶 recall 查詢：「${query.slice(0, 100)}」` });
+    emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_recall', description: '查找相關的過往對話' });
     let result: unknown;
     try { result = await this.recall(query); }
     catch (error) {
       store.finishTool(audit, 'failed', { error: safeError(error) });
       logMemoryPhase('recall', recallStarted, 'failed');
-      emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_recall', message: `recall 失敗（${Date.now() - recallStarted}ms）` });
       emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'failed' });
       return memoryBlock(null, null);
     }
     store.finishTool(audit, 'completed', auditView(result));
     logMemoryPhase('recall', recallStarted, 'completed');
-    emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_recall', message: `recall 完成（${Date.now() - recallStarted}ms）` });
     emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'completed' });
     return memoryBlock(result, null);
   }
