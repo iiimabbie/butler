@@ -4,7 +4,6 @@ import { Hindsight, ConversationSubmissionError } from './hindsight.js';
 import { buildConversationPayload } from './conversation-format.js';
 
 const MAX_TURNS = 20;
-const FLUSH_MS = 15_000;
 const POLL_DELAYS = [5_000, 15_000, 30_000, 60_000] as const;
 
 type Prefix = ReturnType<Store['readyMemoryPrefixes']>[number];
@@ -75,7 +74,7 @@ export class MemoryCoordinator {
   private freezePrefixes(matches: (prefix: Prefix) => boolean, force = false): void {
     while (true) {
       const prefix = this.store.readyMemoryPrefixes().find(candidate =>
-        matches(candidate) && (force || candidate.messages.length >= MAX_TURNS || Date.parse(candidate.deadline) <= Date.now()),
+        matches(candidate) && (force || candidate.messages.length >= MAX_TURNS),
       );
       if (!prefix) return;
       const messages = prefix.messages.slice(0, MAX_TURNS);
@@ -88,7 +87,6 @@ export class MemoryCoordinator {
         documentId: prefix.documentId,
         sessionId: prefix.sessionId,
         channelId: prefix.channelId,
-        deadline: prefix.deadline,
       });
     }
   }
@@ -134,27 +132,17 @@ export class MemoryCoordinator {
   private nextDelay(): number | undefined {
     const now = Date.now();
     const prefixes = this.store.readyMemoryPrefixes();
-    const deadlines = prefixes.map(prefix =>
-      prefix.messages.length >= MAX_TURNS ? now : Date.parse(prefix.deadline),
-    );
-    if (this.activeHttp) {
-      return deadlines.length ? Math.max(0, Math.min(...deadlines) - now) : undefined;
-    }
+    const hasFullPrefix = prefixes.some(prefix => prefix.messages.length >= MAX_TURNS);
+    if (this.activeHttp) return hasFullPrefix ? 1_000 : undefined;
 
     const recovery = this.store.inFlightMemoryBatches().filter(batch => this.recoveryPending.has(batch.operationId));
-    const pollBatches = this.store.inFlightMemoryBatches()
-      .filter(batch => !this.recoveryPending.has(batch.operationId));
+    const pollBatches = this.store.inFlightMemoryBatches().filter(batch => !this.recoveryPending.has(batch.operationId));
     const candidates = this.store.frozenNeverAttempted()
       .filter(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
-    const hasRecovery = recovery.length > 0;
-    const hasDueWork = hasRecovery || candidates.length > 0 || pollBatches.some(batch => !batch.nextPollAt || Date.parse(batch.nextPollAt) <= now);
-    const times = [...deadlines];
-    if (hasRecovery) times.push(now);
-    else {
-      times.push(...pollBatches.map(batch => batch.nextPollAt ? Date.parse(batch.nextPollAt) : now));
-      if (candidates.length) times.push(now);
-    }
-    return times.length ? Math.max(0, Math.min(...times) - now) : (hasDueWork ? 0 : FLUSH_MS);
+    const times: number[] = [];
+    if (hasFullPrefix || recovery.length || candidates.length) times.push(now);
+    times.push(...pollBatches.map(batch => batch.nextPollAt ? Date.parse(batch.nextPollAt) : now));
+    return times.length ? Math.max(0, Math.min(...times) - now) : undefined;
   }
 
   private async drainOne(): Promise<void> {
