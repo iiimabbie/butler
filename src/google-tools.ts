@@ -143,7 +143,7 @@ function validate(name: string, args: Record<string, unknown>): void {
     const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number } | undefined;
     if (!rule) throw new Error('Unknown Google tool argument');
     if (rule.type === 'string') {
-      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location'].includes(key) || (key === 'due' && ['google_tasks_create', 'google_tasks_update'].includes(name));
+      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key) || (key === 'due' && ['google_tasks_create', 'google_tasks_update'].includes(name));
       if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new Error(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
     } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new Error(`${key} must be boolean`);
     else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new Error(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
