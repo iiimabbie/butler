@@ -40,11 +40,10 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
       const chunks: Buffer[] = []; let bytes = 0;
       const reader = response.body.getReader();
       try { while (true) { const { done, value } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_ATTACHMENT_BYTES || total + bytes > MAX_ATTACHMENT_BYTES) { await reader.cancel(); throw new Error('limit'); } chunks.push(Buffer.from(value)); } } finally { reader.releaseLock(); }
-      if (item.size && bytes !== item.size) throw new Error('size');
       const path = join(dir, `${randomUUID()}.bin`);
       await writeFile(path, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
       total += bytes;
-      result.push({ ...base, size: bytes, status: 'ready', localPath: path });
+      result.push({ ...base, mimeType: safeMime(response.headers.get('content-type')) ?? base.mimeType, size: bytes, status: 'ready', localPath: path });
     } catch (error) { result.push({ ...base, error: safeDownloadError(error) }); }
   }
   return result;
@@ -67,7 +66,6 @@ function cleanFilename(name: string): string { return name.replace(/[\\/\0-\x1f\
 function safeDownloadError(error: unknown): string {
   if (!(error instanceof Error)) return '下載失敗';
   if (error.message === 'limit') return '超過單檔或本回合 20 MiB 限制';
-  if (error.message === 'size') return '下載大小與 Discord 附件資料不符';
   if (error.message === 'source') return '附件來源不是允許的 Discord CDN';
   if (error.message === 'storage') return '附件無法保存到受控目錄';
   if (error.message === 'redirect') return '附件重新導向無效或超過限制';

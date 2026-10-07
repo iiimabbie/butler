@@ -218,6 +218,10 @@ export class DiscordHandler {
           if (!botInput) this.activeAsk.add(message.channelId);
           progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress reply did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: logSafe });
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, isBot: botInput, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: (channelId: string, sessionId: string) => { this.memoryCoordinator?.notifyReady(); this.memoryCoordinator?.flushSession(channelId, sessionId); } } });
+          if (message.reference?.messageId) {
+            try { await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
+            catch { logSafe('Discord referenced message could not be retrieved'); }
+          }
           await this.runAsk(this.store, state.sessionId, userContent, {
             baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model,
             messageSource: prepared.source,

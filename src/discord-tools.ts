@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
-import type { Store } from './store.js';
+import type { Store, StoredMessage } from './store.js';
 import { formatDiscordUrls } from './discord-url.js';
+import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 
 export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
@@ -15,7 +16,7 @@ const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, m
 const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
   { name: 'discord_send_message', description: 'Send a message to a Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
-  { name: 'discord_fetch_message', description: 'Fetch a message from a Discord channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'discord_fetch_message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
   { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
@@ -32,10 +33,46 @@ const specs: ToolSpec[] = [
   { name: 'discord_send_buttons', description: 'Send persistent Discord buttons that execute their configured actions once when clicked.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
 ];
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
-export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
+export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; takeInputMessages(): StoredMessage[]; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 
 export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string }): DiscordToolRuntime {
   const fetcher = options.fetcher ?? fetch;
+  const pendingInput: StoredMessage[] = [];
+  const takeInputMessages = (): StoredMessage[] => pendingInput.splice(0, pendingInput.length);
+  const addFetchFailureEvidence = (channelId: string, messageId: string): void => {
+    const now = new Date().toISOString();
+    pendingInput.push({ id: `discord:${channelId}:${messageId}`, sessionId: options.context.sessionId ?? '', role: 'user', content: '無法取得這則 Discord 原訊息，未提供原檔。原訊息時間未知，來源標頭中的時間僅為本次取得失敗的時間。', createdAt: now, source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId }, attachments: [], preparationStatus: 'ready', discordSegments: [] });
+  };
+  const fetchMessage = async (channelId: string, messageId: string): Promise<unknown> => {
+    let record: Record<string, unknown>;
+    try {
+      record = asRecord(await api('GET', `/channels/${channelId}/messages/${messageId}`));
+      if (record.id !== messageId || record.channel_id !== channelId) throw new Error('Discord returned a different message than requested');
+      if (!Array.isArray(record.attachments)) throw new Error('Discord returned invalid message attachments');
+      const rawAttachments = record.attachments.map(item => {
+        const attachment = asRecord(item);
+        if (typeof attachment.id !== 'string' || typeof attachment.url !== 'string' || typeof attachment.filename !== 'string') throw new Error('Discord returned invalid message attachment metadata');
+        return { id: attachment.id, url: attachment.url, name: attachment.filename, contentType: typeof attachment.content_type === 'string' ? attachment.content_type : null, size: typeof attachment.size === 'number' ? attachment.size : undefined } satisfies DiscordAttachmentInput;
+      });
+      if (rawAttachments.length && !options.attachmentDir) throw new Error('Attachment storage is unavailable');
+      const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir!) : [];
+      if (attachments.some(attachment => attachment.status === 'failed' && attachment.error === '附件無法保存到受控目錄')) throw new Error('Attachment storage is unavailable');
+      const author = isRecord(record.author) ? record.author : {};
+      const eventTime = typeof record.timestamp === 'string' && Number.isFinite(Date.parse(record.timestamp)) ? record.timestamp : undefined;
+      const createdAt = eventTime ?? new Date().toISOString();
+      const evidence: StoredMessage = {
+        id: `discord:${channelId}:${messageId}`, sessionId: options.context.sessionId ?? '', role: 'user',
+        content: typeof record.content === 'string' ? record.content : '', createdAt,
+        source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId, authorId: typeof author.id === 'string' ? author.id : undefined, authorName: typeof author.username === 'string' ? author.username : undefined, isBot: author.bot === true || typeof record.webhook_id === 'string', webhookId: typeof record.webhook_id === 'string' ? record.webhook_id : undefined, eventTime },
+        attachments, preparationStatus: 'ready', discordSegments: [],
+      };
+      pendingInput.push(evidence);
+      return { ...record, attachment_inputs: attachments };
+    } catch (error) {
+      addFetchFailureEvidence(channelId, messageId);
+      throw error;
+    }
+  };
   const api = async (method: string, path: string, body?: unknown): Promise<unknown> => {
     let response: Response;
     try { response = await fetcher(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
@@ -55,7 +92,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     if (requireThread) throw new Error('Target is not a thread');
     return target;
   };
-  return { definitions: discordMessageTools, context: options.context, async execute(name, args) {
+  return { definitions: discordMessageTools, context: options.context, takeInputMessages, async execute(name, args) {
     if (options.context.isBot && !options.context.store?.botReplyEnabled()) throw new Error('Bot replies are disabled');
     const spec = specs.find(item => item.name === name); if (!spec) throw new Error(`Unknown Discord tool: ${name}`);
     validateArgs(spec, args);
@@ -63,6 +100,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : formatDiscordUrls(stringArg(args.content, 'content'));
     if (content !== undefined && content.length > 2000) throw new Error('Formatted Discord message exceeds 2000 characters');
+    if (name === 'discord_fetch_message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
       const file = stringArg(args.file, 'file');
       if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new Error('Attachment must be a local file path');
