@@ -39,6 +39,13 @@ google:
 memory:
   baseUrl: http://127.0.0.1:18888
   bankId: butler-discord
+image:
+  baseUrl: https://your-cpa.example/v1
+  apiKey: IMAGE_API_KEY
+  model: gpt-image-2.5
+  protocol: images
+  timeoutMs: 120000
+  identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
 ```
 
 Quote numeric-looking Discord IDs so YAML preserves them as strings.
@@ -47,7 +54,7 @@ Quote numeric-looking Discord IDs so YAML preserves them as strings.
 
 Supplied strings must be nonempty; `discord.channelIds` is a nonempty string array, paths must be absolute, and `ui.port` is an integer from 1 to 65535. `llm.baseUrl` is an HTTP(S) URL without embedded credentials. `ui.publicOrigin` is an explicit HTTP(S) origin without a path or trailing slash, and `ui.cookiePath` is an absolute URL cookie path. A supplied `ui` section requires all three fields; omit it to disable UI. A supplied `google` section requires both client fields; omit it when unconfigured. `llm.apiKey` and `web.apiKey` are optional nonempty strings when supplied. LLM uses OpenAI Responses-compatible APIs and OpenAI-style `/models`; a compatible endpoint can be changed through configuration. A supplied `web` section requires `provider: tavily`; `web.baseUrl` is an HTTP(S) URL without embedded credentials, defaults to `https://api.tavily.com`, and is used for both `/search` and `/extract`. Different API contracts require an integration implementation, not just a different key. No legacy configuration fallback is read.
 
-Discord service startup needs `paths.database`, `paths.attachments`, `discord.token`, `discord.ownerId`, `discord.channelIds`, `llm.baseUrl`, and `llm.model`. Command registration discovers the application ID and all guilds the bot has joined from Discord; no application or guild IDs are configured manually. `memory`, `image`, and `schedule` are optional; Hindsight enables shared memory and people tools, `image` enables text-to-image generation, and `schedule.timezone` defaults to `Asia/Taipei`. `channelIds` only gates whether ordinary incoming chat messages trigger a reply; every received human, bot, and webhook message in any channel is still saved to that channel's shared session and retained in Hindsight. Slash commands, Discord tool targets, and scheduled output channels are not restricted by this list. Owner ID remains session metadata, not an entry ACL. Google/Tavily configuration is optional, and their tools are available only when configured. The UI receives the exact database path used to open Store.
+Discord service startup needs `paths.database`, `paths.attachments`, `discord.token`, `discord.ownerId`, `discord.channelIds`, `llm.baseUrl`, and `llm.model`. Command registration discovers the application ID and all guilds the bot has joined from Discord; no application or guild IDs are configured manually. `memory`, `image`, and `schedule` are optional; Hindsight enables shared memory and people tools, `image` enables text-to-image generation, and `schedule.timezone` defaults to `Asia/Taipei`. When `image.identityReferencePath` is set, both image generation tools use the configured image model and per-channel `/img_model` override; `image_generate_self` automatically attaches the fixed PNG/JPEG/WebP reference to `/images/edits`, while ordinary `image_generate` remains `/images/generations`. Generated images are first saved temporarily, then named and queued through `image_save`; the final Discord reply includes both text and the named image attachment. The path is part of the hot-reloaded `image` section. `channelIds` only gates whether ordinary incoming chat messages trigger a reply; every received human, bot, and webhook message in any channel is still saved to that channel's shared session and retained in Hindsight. Slash commands, Discord tool targets, and scheduled output channels are not restricted by this list. Owner ID remains session metadata, not an entry ACL. Google/Tavily configuration is optional, and their tools are available only when configured. The UI receives the exact database path used to open Store.
 
 ## Service operation
 

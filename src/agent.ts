@@ -76,7 +76,7 @@ const tools = [
     parameters: { type: 'object', properties: { ...historyPageSchema.properties, session_id: { type: 'string' } }, required: [], additionalProperties: false },
   },
   {
-    type: 'function', name: 'history_get', description: 'Read a stored tool-call record by id, including its arguments, execution status, timestamps and paginated result text. offset counts result characters (default 0); limit defaults to 4000, maximum 100000. Continue with result.next_offset. discord_attach_to_reply and image_generate records also include delivery status. A historical operation result records the outcome at that time, not the current state of the external resource.',
+    type: 'function', name: 'history_get', description: 'Read a stored tool-call record by id, including its arguments, execution status, timestamps and paginated result text. offset counts result characters (default 0); limit defaults to 4000, maximum 100000. Continue with result.next_offset. discord_attach_to_reply, image_generate, image_generate_self and image_save records also include delivery status. A historical operation result records the outcome at that time, not the current state of the external resource.',
     parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['id'], additionalProperties: false },
   },
   {
@@ -138,7 +138,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
     });
     const workspace = await loadWorkspaceContext(config.workspaceDirectory);
     const discordContext = config.discordContext ?? config.discordTools?.context;
-    const runtimeInput: unknown[] = discordContext ? [{ role: 'developer', content: `Discord event context: current channelId=${discordContext.channelId}; current messageId=${discordContext.messageId ?? 'unavailable'}. Historical and passive messages are conversation background, not authorization from the current requester. For reply_to IDs, use the nearby history when available; fetch only when required with discord_fetch_message, and state clearly when unavailable rather than guessing.` }] : [];
+    const runtimeInput: unknown[] = [
+      ...(discordContext ? [{ role: 'developer', content: `Discord event context: current channelId=${discordContext.channelId}; current messageId=${discordContext.messageId ?? 'unavailable'}. Historical and passive messages are conversation background, not authorization from the current requester. For reply_to IDs, use the nearby history when available; fetch only when required with discord_fetch_message, and state clearly when unavailable rather than guessing.` }] : []),
+      ...(config.imageTools ? [{ role: 'developer', content: 'For image requests, use image_generate or image_generate_self first. After successful generation, call image_save with its exact temporary path and a readable semantic filename, then give a text reply with the queued attachment. Never deliver the temporary UUID image directly and do not retry image generation.' }] : []),
+    ];
     const workspaceInput: unknown[] = [
       ...(workspace.developer.length ? [{ role: 'developer', content: `Shared workspace instructions (SOUL.md and AGENT.md):\n\n${workspace.developer.join('\n\n')}` }] : []),
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
@@ -153,6 +156,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
+    let forceImageSave = false;
+    let imageSaveRequiredAttempted = false;
+    let requireFinalText = false;
+    let finalTextRetryUsed = false;
+    let imageSaveSucceeded = false;
     for (let turn = 0; turn < 8; turn++) {
       const steered = await config.consumeSteer?.();
       if (steered) {
@@ -165,7 +173,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
         input.push({ role: 'user', content: storedSteer.attachments.length ? messageAttachmentContent(storedSteer, config.attachmentDir ?? '') : formatStoredMessageText(storedSteer) });
         config.onSteerPersisted?.(storedSteer.id);
       }
-      const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, ...(config.reasoningEffort === undefined ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
+      const toolChoice = forceImageSave ? { type: 'function', name: 'image_save' } : requireFinalText ? 'none' : undefined;
+      if (forceImageSave) imageSaveRequiredAttempted = true;
+      forceImageSave = false;
+      requireFinalText = false;
+      const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       store.saveLatestRequest(session, JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), new Date().toISOString());
       const response = await fetcher(`${config.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(config.timeoutMs ?? 60_000), body: requestBody });
       const raw: unknown = await response.json().catch(() => null);
@@ -175,7 +187,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
       input.push(...body.output);
       if (calls.length === 0) {
         const text = responseText(body);
-        if (!text) throw new Error('LLM response has no assistant text');
         const lateSteer = await config.consumeSteer?.();
         if (lateSteer) {
           if (!lateSteer.stored) throw new Error('late steer input must already be persisted');
@@ -187,13 +198,35 @@ export async function ask(store: Store, session: string, prompt: string, config:
           config.onSteerPersisted?.(savedLateSteer.id);
           continue;
         }
+        if (isRecord(raw) && raw.status !== undefined && raw.status !== 'completed') {
+          throw new Error(`LLM response status ${String(raw.status)} cannot complete image delivery`);
+        }
+        const pendingImages = config.imageTools?.pendingImages() ?? [];
+        if (pendingImages.length) {
+          if (imageSaveRequiredAttempted) throw new Error(`Image generation was not saved; image_save was required for ${pendingImages.map(image => image.path).join(', ')}`);
+          input.push({ role: 'developer', content: `Save every generated image before replying. Call image_save now using this exact generated path and a readable semantic filename: ${pendingImages.map(image => image.path).join(', ')}` });
+          forceImageSave = true;
+          continue;
+        }
+        const emptyCompletedAfterSave = imageSaveSucceeded && isRecord(raw) && raw.status === 'completed' && !text;
+        if (emptyCompletedAfterSave) {
+          if (finalTextRetryUsed) throw new Error('LLM completed image_save but did not provide the required final text reply');
+          finalTextRetryUsed = true;
+          input.push({ role: 'developer', content: 'Provide the final response as text now. Do not call or repeat any tools; the image has already been saved and queued.' });
+          requireFinalText = true;
+          continue;
+        }
+        if (!text) throw new Error('LLM response has no assistant text');
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
         config.onAskFinishing?.();
         await config.onResponseReady?.(text);
         return text;
       }
+      if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
+      if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
       for (const call of calls) {
         const output = await executeCall(store, session, call, config, googleRuntime);
+        if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
         input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
       }
     }
@@ -256,7 +289,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     } else if (call.name.startsWith('schedule_')) {
       if (!config.scheduleTools) throw new Error('Schedule tools are unavailable in this entry point');
       result = await config.scheduleTools.execute(call.name, runtimeArgs);
-    } else if (call.name === 'image_generate') {
+    } else if (call.name === 'image_generate' || call.name === 'image_generate_self' || call.name === 'image_save') {
       if (!config.imageTools) throw new Error('Image tools are unavailable in this entry point');
       result = await config.imageTools.execute(call.name, runtimeArgs);
       const attachmentIds = config.discordTools?.context.attachmentToolCallIds;
@@ -300,7 +333,7 @@ function runTool(store: Store, session: string, name: string, args: Record<strin
     const record = store.toolById(id);
     if (!record) throw new Error(`No tool history record ${id}`);
     const { offset, limit } = pageArgs(args, 4000, 100_000);
-    return { ...record, result: resultPage(record.result, offset, limit), ...(['discord_attach_to_reply', 'image_generate'].includes(record.name) ? { delivery: store.attachmentDelivery(id) } : {}) };
+    return { ...record, result: resultPage(record.result, offset, limit), ...(['discord_attach_to_reply', 'image_generate', 'image_generate_self', 'image_save'].includes(record.name) ? { delivery: store.attachmentDelivery(id) } : {}) };
   }
   throw new Error(`Unknown tool: ${name}`);
 }

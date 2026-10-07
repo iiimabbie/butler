@@ -40,12 +40,15 @@ memory:
   # maxTokens: 8000
 
 # Optional independent image generation endpoint. Only protocol: images is supported.
+# Both image tools use this endpoint/model and the per-channel /img_model override.
 image:
   baseUrl: https://your-cpa.example/v1
   apiKey: YOUR_IMAGE_API_KEY
   model: gpt-image-2.5
   protocol: images
   timeoutMs: 120000
+  # Optional absolute path; when set, image_generate_self always includes this reference.
+  identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
 
 # Optional default timezone for cron and reminder creation.
 schedule:
