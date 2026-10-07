@@ -1,6 +1,6 @@
 # Hindsight Evaluation Service
 
-Local Hindsight service for Butler shared memory and isolated evaluation. Butler uses the configured formal bank `butler-discord-shared`; the separate `butler-hindsight-synthetic-eval` bank is reserved for synthetic evaluation data. Butler remains a native Node service.
+Local Hindsight service for Butler shared memory and isolated evaluation. Butler uses the configured formal bank `butler-discord`; the separate `butler-hindsight-synthetic-eval` bank is reserved for synthetic evaluation data. Butler remains a native Node service.
 
 ## Requirements
 

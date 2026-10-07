@@ -38,7 +38,7 @@ google:
   clientSecret: DESKTOP_CLIENT_SECRET
 memory:
   baseUrl: http://127.0.0.1:18888
-  bankId: butler-discord-shared
+  bankId: butler-discord
 ```
 
 Quote numeric-looking Discord IDs so YAML preserves them as strings.

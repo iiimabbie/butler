@@ -2,10 +2,29 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import type { ProgressEvent } from './progress.js';
 
-export type MemorySource = { authorId?: string; channelId?: string; discordMessageId?: string; eventTime?: string };
+export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; size: number; status: 'ready' | 'failed' }> };
 export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number; recallBudget?: string; reflectBudget?: string; maxTokens?: number };
 type RequestTiming = { startedAt: number; timestamp: string; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };
+
+export type ConversationRetainPayload = Readonly<{
+  operation_id: string;
+  async: true;
+  items: readonly [Readonly<{
+    document_id: string;
+    update_mode: 'append';
+    timestamp: 'unset';
+    context: string;
+    metadata: Readonly<Record<string, string>>;
+    tags: readonly ['butler', 'discord'];
+    content: string;
+  }>];
+}>;
+export type OperationStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'not_found';
+export type OperationStatusResult = { status: OperationStatus; response: Record<string, unknown> | null };
+export class ConversationSubmissionError extends Error {
+  constructor(readonly classification: 'rejection' | 'unknown', message: string, readonly httpStatus?: number, readonly response?: unknown) { super(message); this.name = 'ConversationSubmissionError'; }
+}
 
 const retainMission = "Retain useful evidence for a personal assistant serving a shared Discord conversation. Preserve people's preferences, relationships and meaningful emotional context, decisions and their reasons, commitments, and ongoing work. Identify external speakers and whom each statement concerns using the supplied author identities and source context; treat system replies only as conversational context, not as a person, personal preference, or attributed statement, and do not treat system interpretations as a speaker's own words. Preserve relevant channel/message references and dates, distinguishing when something was said from when it happened. Keep direct statements, attributed reports, assistant interpretations, plans and reported outcomes distinguishable. Preserve explicit corrections and changes with their time context; retain unresolved contradictions and uncertainty rather than filling gaps. Attachment metadata describes the attachment, not its unread contents.";
 const reflectMission = "You are an evidence analyst for a personal assistant's shared Discord memory. Answer the question from relevant memories, keeping external speakers and sources distinct. Treat system replies as conversational context rather than a person or source of personal preferences; distinguish their answers, suggestions and reported outcomes from external speakers' statements. Separate directly supported statements from interpretations or recommendations, and identify the evidence supporting important conclusions. Use dates and context to distinguish explicit corrections, changes over time and different situations; a newer statement alone does not settle a contradiction. Describe unresolved conflicts and missing evidence when they affect the answer. Person profiles and synthesized observations are summaries to compare with supporting evidence, not automatic proof of every claim. Historical reports of actions describe what was reported then, not the present state of an external resource.";
@@ -48,7 +67,7 @@ export class Hindsight {
   async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void): Promise<string> {
     try { await this.ensureBank(store, session, onProgress); }
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
-    const query = `${message.role === 'assistant' ? 'System reply context' : speaker(message)}: ${message.content}`;
+    const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
     const request = { query, budget: this.config.recallBudget ?? 'mid', max_tokens: this.config.maxTokens ?? 1200 };
     const audit = store.beginTool(session, 'hindsight_recall', { bankId: this.config.bankId, ...request, phase: 'ask-start' });
     const recallStarted = Date.now();
@@ -111,41 +130,50 @@ export class Hindsight {
     return result;
   }
 
-  async retain(store: Store, session: string, messages: MemoryMessage[], onProgress?: (event: ProgressEvent) => void): Promise<void> {
-    if (!messages.length) return;
-    const items = messages.map(message => {
-      const source = message.source;
-      const time = source.eventTime ?? message.createdAt;
-      const systemReply = message.role === 'assistant';
-      const authorId = systemReply ? undefined : source.authorId;
-      const canonicalName = authorId ? `Discord account ${authorId}` : null;
-      const context = systemReply ? 'System reply context' : speaker(message);
-      const attachmentSummary = message.attachments?.length ? `\nAttachments (metadata only; content not read by memory): ${message.attachments.map(item => `${item.filename} (${item.mimeType}, ${item.size} bytes, ${item.status})`).join('; ')}` : '';
-      return { content: `${message.content}${attachmentSummary}`, context, timestamp: time, document_id: `butler:${message.id}`, metadata: { session_id: message.sessionId, sqlite_message_id: message.id, discord_message_id: source.discordMessageId ?? 'unknown', channel_id: source.channelId ?? 'unknown', ...(authorId ? { author_id: authorId } : {}), event_time: time, ...(message.attachments?.length ? { attachments: JSON.stringify(message.attachments.map(({ filename, mimeType, size, status }) => ({ filename, mimeType, size, status }))) } : {}) }, ...(canonicalName ? { entities: [{ text: canonicalName, type: 'PERSON' }], resolve_entities: false } : {}), tags: ['butler', 'discord-shared'] };
-    });
-    const audit = store.beginTool(session, 'hindsight_retain', { bankId: this.config.bankId, sqliteMessageIds: messages.map(message => message.id), itemsCount: items.length });
-    const retainStarted = Date.now();
-    emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_retain', description: `共享記憶 retain 保存 ${items.length} 則訊息` });
-    let result: unknown;
-    let requestFailed = false;
-    let requestError: unknown;
-    try { result = await this.post(`${this.bankUrl()}/memories`, { items, async: false }); }
-    catch (error) { requestFailed = true; requestError = error; }
-    if (requestFailed) {
-      store.finishTool(audit, 'failed', { status: isUnknownRetainOutcome(requestError) ? 'unknown' : 'failed', error: safeError(requestError) });
-      const status = isUnknownRetainOutcome(requestError) ? 'unknown' : 'failed';
-      logMemoryPhase('retain', retainStarted, status);
-      emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_retain', message: `retain ${status}（${Date.now() - retainStarted}ms）` });
-      emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_retain', status: 'failed' });
-      return;
+  async submitConversationBatch(payload: ConversationRetainPayload): Promise<Record<string, unknown>> {
+    const operationId = payload.operation_id;
+    let response: Response;
+    let trace: RequestTiming;
+    try {
+      ({ response, trace } = await this.request(`${this.bankUrl()}/memories`, { method: 'POST', body: JSON.stringify(payload) }, 'conversation_submit'));
+      const text = await this.readResponse(response, trace);
+      let body: unknown;
+      try { body = this.parseResponse(text, trace); }
+      catch { this.finishTrace(trace, { failedStage: 'json_parse' }); throw new ConversationSubmissionError(response.status >= 400 && response.status < 500 ? 'rejection' : 'unknown', `Invalid conversation submission JSON (HTTP ${response.status})`, response.status); }
+      const record = asRecord(body);
+      if (!response.ok) {
+        this.finishTrace(trace, { failedStage: 'http_status' });
+        throw new ConversationSubmissionError(response.status >= 400 && response.status < 500 ? 'rejection' : 'unknown', `Conversation submission returned HTTP ${response.status}`, response.status, body);
+      }
+      if (record?.success !== true || record.async !== true || record.operation_id !== operationId || record.items_count !== 1) {
+        this.finishTrace(trace, { failedStage: 'response_validation' });
+        throw new ConversationSubmissionError('unknown', 'Conversation submission response is invalid or does not match the request', response.status, body);
+      }
+      this.finishTrace(trace);
+      return record;
+    } catch (error) {
+      if (error instanceof ConversationSubmissionError) throw error;
+      throw new ConversationSubmissionError('unknown', `Conversation submission outcome unknown: ${safeError(error)}`);
     }
-    const record = asRecord(result);
-    const complete = record?.success === true && record.async === false && record.items_count === items.length;
-    const status = complete ? 'completed' : record?.async === true ? 'accepted' : 'unknown';
-    store.finishTool(audit, complete ? 'completed' : 'failed', { status, response: auditView(result) });
-    logMemoryPhase('retain', retainStarted, status);
-    emitMemoryProgress(onProgress, { type: 'tool_update', callId: audit, toolName: 'hindsight_retain', message: `retain ${status}（${Date.now() - retainStarted}ms）` });
-    emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_retain', status: complete ? 'completed' : 'failed' });
+  }
+
+  async getOperationStatus(operationId: string): Promise<OperationStatusResult> {
+    const { response, trace } = await this.request(`${this.bankUrl()}/operations/${encodeURIComponent(operationId)}`, { method: 'GET' }, 'operation_status');
+    const text = await this.readResponse(response, trace);
+    if (response.status === 404) { this.finishTrace(trace); return { status: 'not_found', response: null }; }
+    let body: unknown;
+    try { body = this.parseResponse(text, trace); }
+    catch { this.finishTrace(trace, { failedStage: 'json_parse' }); throw new Error(`Hindsight operation status returned invalid JSON (HTTP ${response.status})`); }
+    if (!response.ok) { this.finishTrace(trace, { failedStage: 'http_status' }); throw new Error(`Hindsight operation status returned HTTP ${response.status}`); }
+    const record = asRecord(body);
+    const status = record?.status;
+    if (status === 'not_found') { this.finishTrace(trace); return { status, response: record }; }
+    if ((status !== 'pending' && status !== 'processing' && status !== 'completed' && status !== 'failed' && status !== 'cancelled') || record?.operation_id !== operationId) {
+      this.finishTrace(trace, { failedStage: 'response_validation' });
+      throw new Error('Hindsight operation status response is invalid');
+    }
+    this.finishTrace(trace);
+    return { status, response: record };
   }
 
   private bankUrl(): string { return `${this.baseUrl()}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`; }
@@ -232,12 +260,11 @@ export function memoryBlock(recall: unknown, reflect: unknown): string {
 class MemoryServiceError extends Error {}
 function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch { /* progress must not affect memory behavior */ } }
 function logMemoryPhase(phase: string, started: number, status: string): void { console.info(`Hindsight ${phase} ${status} ${Date.now() - started}ms`); }
-function speaker(message: MemoryMessage): string { return message.source.authorId ? `Discord account ${message.source.authorId}` : 'Unknown author'; }
+function speaker(message: MemoryMessage): string { const id = message.source.authorId ? `dc:${message.source.authorId}` : 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }
 function asRecord(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function auditView(value: unknown): unknown { const r = asRecord(value); if (!r) return value; return { ...r, ...(typeof r.text === 'string' ? { text: r.text.slice(0, 8000) } : {}) }; }
 function safeError(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }
 function errorType(error: unknown): string { return error instanceof Error ? error.name : typeof error; }
-function isUnknownRetainOutcome(error: unknown): boolean { return error instanceof TypeError || error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError'); }
 async function readBounded(response: Response): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();

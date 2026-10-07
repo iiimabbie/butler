@@ -5,7 +5,7 @@ import { resolve, basename } from 'node:path';
 import type { Store } from './store.js';
 import { formatDiscordUrls } from './discord-url.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; sessionId?: string; store?: Store; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -89,6 +89,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       for (let i=0;i<custom.length;i+=5) components.push({ type: 1, components: custom.slice(i,i+5).map(item => ({ type: 2, style: ({primary:1,secondary:2,success:3,danger:4} as Record<string,number>)[String(item['style'])], label: item['label'], custom_id: item['custom_id'] })) });
       const sent = asRecord(await api('POST', `/channels/${channelId}/messages`, { content, components, allowed_mentions: { parse: [] } }));
       if (typeof sent.id !== 'string') throw new Error('Discord button message outcome is unknown; do not retry automatically');
+      persistDeliveredMessage(options.context, channelId!, sent, content!);
       options.context.store.bindDiscordActionMessage(actionId, sent.id);
       return { ok: true, channelId, messageId: sent.id, actionId, expiresAt, status: 'active', result: sent };
     }
@@ -135,6 +136,10 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     if(name==='discord_fetch_message')return asRecord(result);
     if(name==='discord_fetch_channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
     const record = isRecord(result) ? result : null;
+    if (name === 'discord_send_message') {
+      if (!record || typeof record.id !== 'string') throw new Error('Discord send response has no message ID; delivery cannot be recorded and outcome is unknown');
+      persistDeliveredMessage(options.context, channelId!, record, content!);
+    }
     if (name === 'discord_create_forum_post') {
       const postId = record?.id;
       const createdMessage = isRecord(record?.message) ? record.message : null;
@@ -142,10 +147,24 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       const messageId = createdMessage?.id;
       const guildId = createdChannel?.guild_id ?? record?.guild_id;
       if (typeof postId !== 'string' || !/^\d{2,32}$/.test(postId) || typeof messageId !== 'string' || !/^\d{2,32}$/.test(messageId) || typeof guildId !== 'string' || !/^\d{2,32}$/.test(guildId)) throw new Error('Discord forum post response is incomplete; outcome is unknown and must not be retried automatically');
+      persistDeliveredMessage(options.context, postId, { ...createdMessage, id: messageId }, content!);
       return { ok: true, confirmed: true, forumId: channelId, postId, url: `https://discord.com/channels/${guildId}/${postId}`, messageId, result };
     }
     return { ok: true, confirmed: true, channelId: channelId ?? null, ...(name === 'discord_send_message' ? { messageId: record?.id ?? null, result } : name === 'discord_edit_message' ? { messageId: messageId ?? null, result } : name === 'discord_rename_post' || name === 'discord_rename_forum' ? { id: record?.id ?? null, result } : { messageId: messageId ?? null, result }) };
   } };
+}
+
+function persistDeliveredMessage(context: DiscordToolContext, channelId: string, sent: Record<string, unknown>, content: string): void {
+  const messageId = sent.id;
+  const eventTime = sent.timestamp;
+  if (typeof messageId !== 'string' || !/^\d{2,32}$/.test(messageId) || typeof eventTime !== 'string' || !Number.isFinite(Date.parse(eventTime))) {
+    throw new Error('Discord message response lacks a valid message ID or timestamp; delivery cannot be recorded');
+  }
+  if (!context.store || !context.sessionId) throw new Error('Discord message was delivered but cannot be recorded without its session store');
+  const message = context.store.createOutgoing(context.sessionId, content, { sourceKind: 'butler_tool_message', authorId: context.botId, authorName: context.botName, channelId, discordMessageId: messageId, eventTime });
+  context.store.saveOutgoingSegment(message, { channelId, messageId, content, createdAt: eventTime });
+  context.store.finalizeOutgoing(message.id, content);
+  context.onMessageDelivered?.(channelId, context.sessionId);
 }
 
 function validateArgs(spec: ToolSpec,args:Record<string,unknown>):void {

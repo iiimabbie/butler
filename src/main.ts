@@ -4,6 +4,8 @@ import { databasePath, prepareDatabaseDirectory } from './paths.js';
 import { Store } from './store.js';
 import { readDiscordConfig, registerDiscordCommands, startDiscord } from './discord.js';
 import { fileURLToPath } from 'node:url';
+import { Hindsight } from './hindsight.js';
+import { MemoryCoordinator } from './memory-coordinator.js';
 
 try {
   const config = readConfig();
@@ -20,7 +22,14 @@ try {
     const dbPath = databasePath(config);
     prepareDatabaseDirectory(dbPath);
     const store = new Store(dbPath);
-    await startDiscord(readDiscordConfig(config), store, config, dbPath);
+    const hindsight = config.memory ? new Hindsight(config.memory) : undefined;
+    const memoryCoordinator = hindsight ? new MemoryCoordinator(store, hindsight) : undefined;
+    try {
+      await memoryCoordinator?.start();
+      await startDiscord(readDiscordConfig(config), store, config, dbPath, undefined, memoryCoordinator, hindsight);
+    } finally {
+      await memoryCoordinator?.close();
+    }
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);

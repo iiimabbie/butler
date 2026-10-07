@@ -81,7 +81,7 @@ export function assertAttachmentContextLimit(messages: StoredMessage[]): void {
 }
 
 export function messageAttachmentContent(message: StoredMessage, attachmentDir: string): unknown[] {
-  const content: unknown[] = [{ type: 'input_text', text: formatMessageText(message) }];
+  const content: unknown[] = [{ type: 'input_text', text: formatStoredMessageText(message) }];
   for (const attachment of message.attachments ?? []) {
     if (attachment.status !== 'ready') { content.push({ type: 'input_text', text: `[附件未能提供：${attachment.filename}；${attachment.error ?? '下載失敗'}]` }); continue; }
     let data: string;
@@ -108,9 +108,14 @@ function safeLocalPath(path: string | undefined, attachmentDir: string): string 
   if (dirname(absolute) !== root || !/^[0-9a-f-]{36}\.bin$/i.test(absolute.slice(root.length + 1))) throw new Error();
   return absolute;
 }
-function formatMessageText(message: StoredMessage): string {
-  const s = message.source; const role = message.role === 'assistant' ? '' : `[${s.authorId ? `Discord account ${s.authorId}` : 'Unknown author'}; channel=${s.channelId ?? 'unknown'}; message=${s.discordMessageId ?? 'unknown'}; time=${s.eventTime ?? message.createdAt}]`;
-  return `${role}\n${message.content}`;
+export function formatStoredMessageText(message: StoredMessage): string {
+  const source = message.source;
+  const speaker = message.role === 'assistant'
+    ? `Butler${source.authorId ? ` (${source.authorId})` : ''}`
+    : source.isBot ? `Discord bot author ${source.authorId ?? 'unknown'}` : `Discord human author ${source.authorId ?? 'unknown'}`;
+  const header = `[${speaker}; msg=${source.discordMessageId ?? 'unknown'} author=${source.authorId ?? 'unknown'} channel=${source.channelId ?? 'unknown'} time=${source.eventTime ?? message.createdAt}${source.replyToMessageId ? ` reply_to=${source.replyToMessageId}${source.replyToChannelId ? ` reply_channel=${source.replyToChannelId}` : ''}` : ''}]`;
+  const segments = message.discordSegments.map(segment => `[delivered msg=${segment.messageId} channel=${segment.channelId} time=${segment.eventTime}] ${segment.content}`);
+  return `${header}\n${message.role === 'assistant' && segments.length ? segments.join('\n') : message.content}`;
 }
 export function redactAttachmentPayload(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactAttachmentPayload);
