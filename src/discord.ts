@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { compactSession } from './compaction.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
-import { stripAnsiProgress } from './discord-ansi.js';
+import { hasAnsiProgress } from './discord-ansi.js';
 import type { SessionOpeningContext } from './store.js';
 import type { MemoryCoordinator } from './memory-coordinator.js';
 
@@ -141,10 +141,10 @@ export class DiscordHandler {
   async message(message: TextMessage): Promise<void> {
     if (message.isSelf) return;
     const botInput = message.isBot === true;
-    const rawContent = message.content;
-    const triggerContent = botInput ? stripAnsiProgress(message.content) : message.content;
-    const content = triggerContent.trim();
-    if (!rawContent.trim() && !message.hasAttachments) return;
+    if (botInput && (message.content.trimStart().startsWith('→') || hasAnsiProgress(message.content))) return;
+    const effectiveContent = message.content;
+    const content = effectiveContent.trim();
+    if (!effectiveContent.trim() && !message.hasAttachments) return;
     if (!isAllowedDiscordChannel(this.config.channelIds, message.channelId, message.parentChannelId)) return;
     const ingress = this.reserveIngress(message.channelId);
     await ingress.ready;
@@ -165,7 +165,7 @@ export class DiscordHandler {
       };
       const stateAtIngestion = this.store.channelState(message.channelId, this.config.defaultModel, this.config.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備尚未完成' }));
-      const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', rawContent, source, initialAttachments);
+      const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       if (!ingestion.created) { releaseIngress(); return; }
       let stored = ingestion.message;
       let attachments: import('./store.js').MessageInputAttachment[];
@@ -183,7 +183,7 @@ export class DiscordHandler {
       const prepared = preparation.then(() => {
         stored = this.store.messagesWithSources(stored.sessionId).find(item => item.id === stored.id)!;
         this.memoryCoordinator?.notifyReady();
-        return { content: triggerContent, source: stored.source, attachments: stored.attachments, stored };
+        return { content: effectiveContent, source: stored.source, attachments: stored.attachments, stored };
       });
       if (!botInput && mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
