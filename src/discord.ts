@@ -245,6 +245,7 @@ export class DiscordHandler {
             reasoningEffort: this.store.channelReasoningEffort(message.channelId),
             onProgress: event => progress?.event(event),
             workspaceDirectory: DEFAULT_WORKSPACE,
+            subagent: runtime.settings.subagent,
             discordContext: { channelId: message.channelId, messageId: message.messageId },
             consumeSteer: async () => this.pendingSteer.get(message.channelId)?.[0],
             onSteerPersisted: storedMessageId => {
@@ -570,6 +571,7 @@ export class DiscordHandler {
         scheduleTools: this.scheduleTools(request.job.sourceChannelId, request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
         imageTools: this.imageTools(attachmentFiles, request.job.sourceChannelId, commandRuntime.settings.image, config.attachmentDir),
         workspaceDirectory: DEFAULT_WORKSPACE,
+        subagent: commandRuntime.settings.subagent,
         messageSource: { sourceKind: 'scheduled_input', channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
         onProgress: event => progress.event(event),

@@ -74,6 +74,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS memory_batches(operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, source_message_ids TEXT NOT NULL, document_id TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, batch_order INTEGER NOT NULL, status TEXT NOT NULL, submit_intended_at TEXT, last_poll_at TEXT, next_poll_at TEXT, error TEXT, created_at TEXT NOT NULL, UNIQUE(document_id,batch_order));
       CREATE TABLE IF NOT EXISTS memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id));
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
+      CREATE TABLE IF NOT EXISTS subagent_windows(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, input_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
@@ -360,6 +361,22 @@ export class Store implements SchedulerStore {
   saveCompactCheckpoint(sessionId: string, summary: string, throughMessageId: string): void {
     this.db.prepare(`INSERT INTO session_compact_checkpoints(session_id,summary,through_message_id,updated_at) VALUES(?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET summary=excluded.summary,through_message_id=excluded.through_message_id,updated_at=excluded.updated_at`).run(sessionId, summary, throughMessageId, new Date().toISOString());
+  }
+
+  createSubagentWindow(parentSessionId: string, model: string, input: unknown[]): string {
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO subagent_windows(id,parent_session_id,model,input_json,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(id, parentSessionId, model, JSON.stringify(input), now, now);
+    return id;
+  }
+
+  getSubagentWindow(id: string, parentSessionId: string): { id: string; parent_session_id: string; model: string; input_json: string; created_at: string; updated_at: string } | undefined {
+    return this.db.prepare('SELECT * FROM subagent_windows WHERE id=? AND parent_session_id=?').get(id, parentSessionId) as ReturnType<Store['getSubagentWindow']>;
+  }
+
+  saveSubagentWindow(id: string, input: unknown[]): void {
+    const result = this.db.prepare('UPDATE subagent_windows SET input_json=?,updated_at=? WHERE id=?').run(JSON.stringify(input), new Date().toISOString(), id);
+    if (Number(result.changes) !== 1) throw new Error(`Could not persist subagent window ${id}`);
   }
 
   beginTool(session: string, name: string, args: unknown): string {

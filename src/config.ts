@@ -15,6 +15,7 @@ export type ButlerConfig = {
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
   schedule?: { timezone?: string };
+  subagent?: { model: string; maxTurns?: number; timeoutMs?: number };
 };
 
 const CONFIG_PATH = fileURLToPath(new URL('../config.yaml', import.meta.url));
@@ -25,7 +26,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
   catch { throw new Error('Butler config could not be read as YAML'); }
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'schedule'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'schedule', 'subagent'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -84,6 +85,13 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
       config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined, identityReferencePath };
     } else if (name === 'schedule') {
       config.schedule = { timezone: string('timezone') ?? 'Asia/Taipei' };
+    } else if (name === 'subagent') {
+      const model = requireSetting(string('model'), 'subagent.model');
+      const maxTurns = section.maxTurns;
+      if (maxTurns !== undefined && (!Number.isSafeInteger(maxTurns) || (maxTurns as number) < 1 || (maxTurns as number) > 100)) throw new Error('Butler config subagent.maxTurns must be an integer from 1 to 100');
+      const timeoutMs = section.timeoutMs;
+      if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300000)) throw new Error('Butler config subagent.timeoutMs must be an integer from 1 to 300000');
+      config.subagent = { model, maxTurns: (maxTurns as number | undefined) ?? 30, timeoutMs: (timeoutMs as number | undefined) ?? 120000 };
     } else {
       const port = section.port;
       if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Butler config ui.port must be an integer from 1 to 65535');

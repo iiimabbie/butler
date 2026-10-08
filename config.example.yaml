@@ -59,6 +59,12 @@ image:
   # Optional absolute path; when set, image_generate_self always includes this reference.
   identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
 
+# Optional synchronous subagent tool; uses llm.baseUrl/apiKey and this model.
+subagent:
+  model: YOUR_SUBAGENT_MODEL
+  # maxTurns: 30
+  # timeoutMs: 120000
+
 # Optional default timezone for cron and reminder creation.
 schedule:
   timezone: Asia/Taipei

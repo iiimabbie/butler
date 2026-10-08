@@ -54,11 +54,15 @@ image:
   protocol: images
   timeoutMs: 300000
   identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
+subagent:
+  model: YOUR_SUBAGENT_MODEL
+  # maxTurns: 30 (1–100)
+  # timeoutMs: 120000 (1–300000)
 ```
 
-Quote numeric-looking Discord IDs so YAML preserves them as strings.
+Quote numeric-looking Discord IDs so YAML preserves them as strings. The optional `subagent` section enables synchronous delegated work using its required model ID and the configured LLM endpoint; its independent task windows persist for follow-up using the returned `subagent_id`. It receives only the explicit task brief and can use the host local tools and configured web tools, but not conversation memory, Discord, or recursive subagents. Omit the section to disable it.
 
-日常設定變更會由服務自動熱更新：LLM 連線設定、Discord `channelIds`、`web`、`image`、memory 的 timeout/budget/token 上限及 `schedule.timezone`。`discord.token`／`ownerId`、`paths`、`ui`、`google`、memory 啟停／`baseUrl`／`bankId` 為冷設定，需重啟；同一候選若混有冷熱變更會整份拒絕。缺檔、YAML 或必要欄位錯誤時保留最後有效版本，修正後再存檔即可恢復。log 只記分類與欄位名稱，不輸出設定值。`discord.errorWebhookUrl`、`errorWebhookMentionUserId` 與 `errorWebhookThreadId` 可熱更新或移除，後續錯誤立即採用新設定。錯誤通知每則錯誤送出一張 Embed 卡片，不含工具參數／結果、聊天內容或 HTTP 回應本文；卡片描述最多 4,096 字元，過長時截斷並附完整錯誤的本機日誌位置，本機 stdout/stderr 保留完整遮罩後錯誤。配置的告警 webhook 卡片文字會由 Butler 讀入。通知失敗只記本機分類／HTTP 狀態，不阻塞聊天；致命程序錯誤不保證 webhook 送達。自動 mention 僅允許指定使用者；既有論壇貼文目的地使用 thread ID，不會建立新貼文。已排隊的工作固定使用其開始時的 runtime；模型 NULL 繼續跟隨新預設，明確模型覆寫不變。
+日常設定變更會由服務自動熱更新：LLM 連線設定、Discord `channelIds`、`web`、`image`、`subagent`、memory 的 timeout/budget/token 上限及 `schedule.timezone`。`discord.token`／`ownerId`、`paths`、`ui`、`google`、memory 啟停／`baseUrl`／`bankId` 為冷設定，需重啟；同一候選若混有冷熱變更會整份拒絕。缺檔、YAML 或必要欄位錯誤時保留最後有效版本，修正後再存檔即可恢復。log 只記分類與欄位名稱，不輸出設定值。`discord.errorWebhookUrl`、`errorWebhookMentionUserId` 與 `errorWebhookThreadId` 可熱更新或移除，後續錯誤立即採用新設定。錯誤通知每則錯誤送出一張 Embed 卡片，不含工具參數／結果、聊天內容或 HTTP 回應本文；卡片描述最多 4,096 字元，過長時截斷並附完整錯誤的本機日誌位置，本機 stdout/stderr 保留完整遮罩後錯誤。配置的告警 webhook 卡片文字會由 Butler 讀入。通知失敗只記本機分類／HTTP 狀態，不阻塞聊天；致命程序錯誤不保證 webhook 送達。自動 mention 僅允許指定使用者；既有論壇貼文目的地使用 thread ID，不會建立新貼文。已排隊的工作固定使用其開始時的 runtime；模型 NULL 繼續跟隨新預設，明確模型覆寫不變。
 
 Supplied strings must be nonempty; `discord.channelIds` is a nonempty string array, paths must be absolute, and `ui.port` is an integer from 1 to 65535. `llm.baseUrl` is an HTTP(S) URL without embedded credentials. `ui.publicOrigin` is an explicit HTTP(S) origin without a path or trailing slash, and `ui.cookiePath` is an absolute URL cookie path. A supplied `ui` section requires all three fields; omit it to disable UI. A supplied `google` section requires both client fields; omit it when unconfigured. `llm.apiKey` and `web.apiKey` are optional nonempty strings when supplied. `discord.errorWebhookUrl` is optional and must be an HTTPS Discord webhook URL without credentials, query or fragment. `discord.errorWebhookMentionUserId` and `discord.errorWebhookThreadId` are optional numeric Discord IDs; the latter targets an existing forum post. LLM uses OpenAI Responses-compatible APIs and OpenAI-style `/models`; a compatible endpoint can be changed through configuration. A supplied `web` section requires `provider: tavily`; `web.baseUrl` is an HTTP(S) URL without embedded credentials, defaults to `https://api.tavily.com`, and is used for both `/search` and `/extract`. Different API contracts require an integration implementation, not just a different key. No legacy configuration fallback is read.
 
