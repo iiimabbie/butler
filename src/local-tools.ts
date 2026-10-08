@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import { constants } from 'node:fs';
 import { open, opendir, realpath, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
@@ -18,11 +19,11 @@ function definition(name: string, description: string, properties: Record<string
 }
 const definitions = [
   definition('butler_deploy', 'Queue deployment of the current source after this reply and queued work finish.', {}, []),
-  definition('local_read', 'Read UTF-8 text with zero-based line offset and pagination, or list direct directory entries. Continue pagination with returned next_offset/next_column. Paths use host OS permissions; relative paths use the Butler project root.', { path: string, ...page, column: integer }, ['path']),
-  definition('local_search', 'Search literal content or filenames. mode selects content (default) or filename; offsets count matches. Each page rescans current data and results indicate incomplete scans. Relative paths use the Butler project root.', { path: string, query: string, mode: { type: 'string', enum: ['content', 'filename'] }, ...page }, ['path', 'query']),
-  definition('local_write', 'Create a UTF-8 file or overwrite it with overwrite=true. Parent directories are not created; relative paths use the Butler project root.', { path: string, content: string, overwrite: boolean }, ['path', 'content']),
-  definition('local_edit', 'Replace exact UTF-8 text; old_text must match once unless replace_all=true. Relative paths use the Butler project root.', { path: string, old_text: string, new_text: string, replace_all: boolean }, ['path', 'old_text', 'new_text']),
-  definition('local_shell', 'Run /bin/sh with host permissions and inherited environment; it is not sandboxed. Omit cwd or pass an empty string ("") or "." to use the Butler project root; other relative cwd paths resolve from that root. Foreground runs return results; background runs return a task ID for local_process_output. Tasks do not survive service restart.', { command: string, cwd: { type: 'string', description: 'Working directory. Omit, use "", or use "." for the Butler project root. Other relative paths resolve from that root; absolute paths are used as supplied.' }, timeout_ms: integer, background: boolean }, ['command']),
+  definition('local_read', 'Read UTF-8 text with zero-based line offset and pagination, or list direct directory entries. Continue pagination with returned next_offset/next_column. Paths use host OS permissions; relative paths use the Butler project root. These file tools never inherit local_shell.cwd or a previous shell cd; use absolute paths when working in another project.', { path: string, ...page, column: integer }, ['path']),
+  definition('local_search', 'Search literal content or filenames. mode selects content (default) or filename; offsets count matches. Each page rescans current data and results indicate incomplete scans. Relative paths use the Butler project root. These file tools never inherit local_shell.cwd or a previous shell cd; use absolute paths when working in another project.', { path: string, query: string, mode: { type: 'string', enum: ['content', 'filename'] }, ...page }, ['path', 'query']),
+  definition('local_write', 'Create a UTF-8 file or overwrite it with overwrite=true. Parent directories are not created; relative paths use the Butler project root. These file tools never inherit local_shell.cwd or a previous shell cd; use absolute paths when working in another project.', { path: string, content: string, overwrite: boolean }, ['path', 'content']),
+  definition('local_edit', 'Replace exact UTF-8 text; old_text must match once unless replace_all=true. Relative paths use the Butler project root. These file tools never inherit local_shell.cwd or a previous shell cd; use absolute paths when working in another project.', { path: string, old_text: string, new_text: string, replace_all: boolean }, ['path', 'old_text', 'new_text']),
+  definition('local_shell', 'Run /bin/sh with host permissions and inherited environment; it is not sandboxed. Omit cwd or pass an empty string ("") or "." to use the Butler project root; other relative cwd paths resolve from that root. Foreground runs return results; background runs return a task ID for local_process_output. Tasks do not survive service restart.', { command: { type: 'string', minLength: 1, description: 'Non-empty shell command without NUL; never send an empty command.' }, cwd: { type: 'string', description: 'Working directory. Omit, use "", or use "." for the Butler project root. Other relative paths resolve from that root; absolute paths are used as supplied.' }, timeout_ms: { type: 'integer', minimum: 1, maximum: 120000, description: 'Timeout in milliseconds, from 1 to 120000. Foreground default: 30000. For longer work, use background=true and omit timeout_ms (no timeout), then read local_process_output; do not send a value above 120000.' }, background: boolean }, ['command']),
   definition('local_process_output', 'Read task status and stdout/stderr records. Offset counts records; when status is running and next_offset is null, continue from output_offset. Tasks do not survive service restart.', { task_id: string, ...page }, ['task_id']),
   definition('local_process_stop', 'Stop a task created by this runtime. For other existing host processes, use local_shell. Tasks do not survive service restart.', { task_id: string }, ['task_id']),
 ];
@@ -76,8 +77,8 @@ export class LocalToolRuntime {
     if (name === 'local_process_output') return this.processes.output(text(args.task_id, 'task_id'), number(args.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset'), number(args.limit, 200, 1, 2000, 'limit'));
     if (name === 'local_process_stop') return this.processes.stop(text(args.task_id, 'task_id'));
     const path = this.path(args.path);
-    if (name === 'local_read') return read(path, args);
-    if (name === 'local_search') return search(path, args);
+    if (name === 'local_read') return inputPathRead(() => read(path, args));
+    if (name === 'local_search') return inputPathRead(() => search(path, args));
     if (name === 'local_write') {
       const content = text(args.content, 'content', true);
       checkSize(content);
@@ -85,14 +86,14 @@ export class LocalToolRuntime {
       return { path: await realpath(path), bytes_written: Buffer.byteLength(content) };
     }
     if (name === 'local_edit') {
-      const actual = await realpath(path);
-      const content = await readText(actual);
+      const actual = await inputPathRead(() => realpath(path));
+      const content = await inputPathRead(() => readText(actual));
       const old = text(args.old_text, 'old_text');
       const replacement = text(args.new_text, 'new_text', true);
       const all = bool(args.replace_all, false, 'replace_all');
       const first = content.indexOf(old);
-      if (first < 0) throw new Error('old_text did not match; file unchanged');
-      if (!all && content.indexOf(old, first + 1) >= 0) throw new Error('old_text matched more than once; specify replace_all=true; file unchanged');
+      if (first < 0) throw new ToolUsageError('old_text did not match; file unchanged');
+      if (!all && content.indexOf(old, first + 1) >= 0) throw new ToolUsageError('old_text matched more than once; specify replace_all=true; file unchanged');
       const parts = content.split(old);
       const matches = parts.length - 1;
       const edited = parts.join(replacement);
@@ -109,8 +110,8 @@ async function readText(path: string): Promise<string> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const info = await file.stat();
-    if (!info.isFile()) throw new Error('Only regular text files are supported');
-    if (info.size > TEXT_BYTES) throw new Error('Text file exceeds 10 MiB; use shell');
+    if (!info.isFile()) throw new ToolUsageError('Only regular text files are supported');
+    if (info.size > TEXT_BYTES) throw new ToolUsageError('Text file exceeds 10 MiB; use shell');
     const buffer = Buffer.alloc(Math.min(Math.max(info.size + 1, 4096), 64 * 1024));
     const chunks: Buffer[] = [];
     let length = 0;
@@ -118,13 +119,13 @@ async function readText(path: string): Promise<string> {
       const result = await file.read(buffer, 0, Math.min(buffer.length, TEXT_BYTES + 1 - length), null);
       if (!result.bytesRead) break;
       length += result.bytesRead;
-      if (length > TEXT_BYTES) throw new Error('Text file exceeds 10 MiB; use shell');
+      if (length > TEXT_BYTES) throw new ToolUsageError('Text file exceeds 10 MiB; use shell');
       chunks.push(Buffer.from(buffer.subarray(0, result.bytesRead)));
     }
     const data = Buffer.concat(chunks, length);
-    if (data.includes(0)) throw new Error('Binary files are unsupported');
+    if (data.includes(0)) throw new ToolUsageError('Binary files are unsupported');
     try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(data); }
-    catch { throw new Error('Only valid UTF-8 text is supported; binary files are unsupported'); }
+    catch { throw new ToolUsageError('Only valid UTF-8 text is supported; binary files are unsupported'); }
   } finally { await file.close(); }
 }
 async function read(path: string, args: Record<string, unknown>) {
@@ -135,7 +136,7 @@ async function read(path: string, args: Record<string, unknown>) {
   const budget = OUTPUT_PAGE_BYTES - Buffer.byteLength(JSON.stringify({ path })) - limit - 1024;
   const info = await stat(path);
   if (info.isDirectory()) {
-    if (column) throw new Error('column is only for text files');
+    if (column) throw new ToolUsageError('column is only for text files');
     const directory = await opendir(path);
     const items: Array<{ name: string; type: string }> = [];
     let index = 0;
@@ -159,7 +160,7 @@ async function read(path: string, args: Record<string, unknown>) {
   let bytes = 0;
   while (index < lines.length && items.length < limit) {
     const line = lines[index]!;
-    if (nextColumn > line.length) throw new Error('column is beyond the requested line');
+    if (nextColumn > line.length) throw new ToolUsageError('column is beyond the requested line');
     let end = line.length;
     const item = () => ({ line: index + 1, text: line.slice(nextColumn, end), column: nextColumn, continued: end < line.length });
     if (Buffer.byteLength(JSON.stringify(item())) + bytes > budget) {
@@ -187,7 +188,7 @@ async function search(path: string, args: Record<string, unknown>) {
   path = await realpath(path);
   const query = text(args.query, 'query');
   const mode = args.mode ?? 'content';
-  if (mode !== 'content' && mode !== 'filename') throw new Error('mode must be content or filename');
+  if (mode !== 'content' && mode !== 'filename') throw new ToolUsageError('mode must be content or filename');
   const offset = number(args.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
   const limit = number(args.limit, 50, 1, 200, 'limit');
   const items: Array<Record<string, unknown>> = [];
@@ -250,13 +251,24 @@ async function search(path: string, args: Record<string, unknown>) {
   const info = await stat(path);
   if (info.isDirectory()) await visit(path);
   else if (info.isFile()) { entries++; await visitFile(path); }
-  else throw new Error('Search requires a regular file or directory');
+  else throw new ToolUsageError('Search requires a regular file or directory');
   return { path, mode, items, offset, next_offset: hasMore ? offset + items.length : null, has_more: hasMore, scan_complete: reason === null && Object.values(skipped).every(value => value === 0), incomplete_reason: reason, scanned_entries: entries, scanned_bytes: scannedBytes, skipped };
 }
 function text(value: unknown, name: string, empty = false): string {
-  if (typeof value !== 'string' || (!empty && value.length === 0) || value.includes('\0')) throw new Error(`${name} must be ${empty ? 'a' : 'a non-empty'} string without NUL`);
+  if (typeof value !== 'string' || (!empty && value.length === 0) || value.includes('\0')) throw new ToolUsageError(`${name} must be ${empty ? 'a' : 'a non-empty'} string without NUL`);
   return value;
 }
-function bool(value: unknown, fallback: boolean, name: string): boolean { if (value === undefined) return fallback; if (typeof value !== 'boolean') throw new Error(`${name} must be boolean`); return value; }
-function number(value: unknown, fallback: number, min: number, max: number, name: string): number { if (value === undefined) return fallback; if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new Error(`${name} must be an integer from ${min} to ${max}`); return value as number; }
-function checkSize(content: string) { if (Buffer.byteLength(content) > TEXT_BYTES) throw new Error('Text exceeds 10 MiB; use shell'); }
+function bool(value: unknown, fallback: boolean, name: string): boolean { if (value === undefined) return fallback; if (typeof value !== 'boolean') throw new ToolUsageError(`${name} must be boolean`); return value; }
+function number(value: unknown, fallback: number, min: number, max: number, name: string): number { if (value === undefined) return fallback; if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`); return value as number; }
+function checkSize(content: string) { if (Buffer.byteLength(content) > TEXT_BYTES) throw new ToolUsageError('Text exceeds 10 MiB; use shell'); }
+
+// Scope this to reads/preflight only. Never classify a failed write as safe to replay.
+async function inputPathRead<T>(read: () => Promise<T>): Promise<T> {
+  try { return await read(); }
+  catch (error) {
+    if (error instanceof Error && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR')) {
+      throw new ToolUsageError(error.message, { cause: error });
+    }
+    throw error;
+  }
+}

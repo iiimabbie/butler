@@ -15,7 +15,7 @@ export interface Message {
 }
 
 export interface MessageSource {
-  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string;
+  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string;
 }
 
 export interface MessageInputAttachment { attachmentId: string; filename: string; mimeType: string; size: number; status: 'ready' | 'failed'; localPath?: string; error?: string; }
@@ -75,6 +75,9 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id));
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_windows(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, input_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
+      CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, question_id TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
@@ -106,6 +109,7 @@ export class Store implements SchedulerStore {
     if (!sourceColumns.has('webhook_id')) this.db.exec('ALTER TABLE message_sources ADD COLUMN webhook_id TEXT');
     if (!sourceColumns.has('source_kind')) this.db.exec('ALTER TABLE message_sources ADD COLUMN source_kind TEXT');
     if (!sourceColumns.has('author_name')) this.db.exec('ALTER TABLE message_sources ADD COLUMN author_name TEXT');
+    this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
     const segmentColumns = new Set((this.db.prepare('PRAGMA table_info(discord_outgoing_segments)').all() as Array<{ name: string }>).map(column => column.name));
     if (!segmentColumns.has('reply_to_message_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_message_id TEXT');
     if (!segmentColumns.has('reply_to_channel_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_channel_id TEXT');
@@ -155,7 +159,7 @@ export class Store implements SchedulerStore {
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,is_bot,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
         .run(message.id, source.authorId ?? null, source.isBot === undefined ? null : source.isBot ? 1 : 0, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null, source.replyToMessageId ?? null, source.replyToChannelId ?? null, source.webhookId ?? null, source.sourceKind ?? null, source.authorName ?? null);
-      this.db.prepare("INSERT INTO hindsight_pending(message_id,status,updated_at) VALUES(?,'pending',?)").run(message.id, message.createdAt);
+      if (source.sourceKind !== 'subagent_event') this.db.prepare("INSERT INTO hindsight_pending(message_id,status,updated_at) VALUES(?,'pending',?)").run(message.id, message.createdAt);
       this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'preparing',?)").run(message.id, message.createdAt);
       const insertAttachment = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,size,local_path,status,error) VALUES(?,?,?,?,?,?,?,?)');
       for (const attachment of attachments) insertAttachment.run(message.id, attachment.attachmentId, attachment.filename, attachment.mimeType, attachment.size, attachment.localPath ?? null, attachment.status, attachment.error ?? null);
@@ -363,8 +367,14 @@ export class Store implements SchedulerStore {
       ON CONFLICT(session_id) DO UPDATE SET summary=excluded.summary,through_message_id=excluded.through_message_id,updated_at=excluded.updated_at`).run(sessionId, summary, throughMessageId, new Date().toISOString());
   }
 
-  createSubagentWindow(parentSessionId: string, model: string, input: unknown[]): string {
-    const id = randomUUID();
+  createSubagentWindow(parentSessionId: string, model: string, input: unknown[], requestedId?: string): string {
+    if (requestedId !== undefined && (typeof requestedId !== 'string' || !requestedId.trim() || requestedId.includes('\0'))) throw new Error('Invalid subagent window ID');
+    const id = requestedId ?? randomUUID();
+    const existing = this.db.prepare('SELECT parent_session_id FROM subagent_windows WHERE id=?').get(id) as { parent_session_id: string } | undefined;
+    if (existing) {
+      if (existing.parent_session_id !== parentSessionId) throw new Error('Subagent window belongs to another parent session');
+      return id;
+    }
     const now = new Date().toISOString();
     this.db.prepare('INSERT INTO subagent_windows(id,parent_session_id,model,input_json,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(id, parentSessionId, model, JSON.stringify(input), now, now);
     return id;
@@ -377,6 +387,102 @@ export class Store implements SchedulerStore {
   saveSubagentWindow(id: string, input: unknown[]): void {
     const result = this.db.prepare('UPDATE subagent_windows SET input_json=?,updated_at=? WHERE id=?').run(JSON.stringify(input), new Date().toISOString(), id);
     if (Number(result.changes) !== 1) throw new Error(`Could not persist subagent window ${id}`);
+  }
+
+  enqueueSubagentMessage(id: string, message: string): string {
+    const inboxId = randomUUID();
+    this.db.prepare("INSERT INTO subagent_inbox(id,subagent_id,message,status,created_at) VALUES(?,?,?,'pending',?)").run(inboxId, id, message, new Date().toISOString());
+    return inboxId;
+  }
+
+  pendingSubagentMessages(id: string): Array<{ id: string; message: string }> {
+    return this.db.prepare("SELECT id,message FROM subagent_inbox WHERE subagent_id=? AND status='pending' ORDER BY created_at,rowid").all(id) as Array<{ id: string; message: string }>;
+  }
+
+  consumeSubagentInbox(id: string, messageIds: string[], input: unknown[]): void {
+    if (!messageIds.length) return;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const rows = messageIds.map(messageId => this.db.prepare("SELECT id,message FROM subagent_inbox WHERE id=? AND subagent_id=? AND status='pending'").get(messageId, id) as { id: string; message: string } | undefined);
+      if (rows.some(row => !row)) throw new Error('Subagent inbox changed before consumption');
+      const next = [...input, { role: 'user', content: `Parent supplemental message(s):\n${rows.map(row => row!.message).join('\n\n')}` }];
+      this.saveSubagentWindow(id, next);
+      const mark = this.db.prepare("UPDATE subagent_inbox SET status='consumed',consumed_at=? WHERE id=? AND subagent_id=? AND status='pending'");
+      for (const messageId of messageIds) mark.run(new Date().toISOString(), messageId, id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  answerSubagentQuestion(id: string, callId: string, answer: string): boolean {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = this.db.prepare('SELECT input_json FROM subagent_windows WHERE id=?').get(id) as { input_json: string } | undefined;
+      if (!row) throw new Error(`Unknown subagent window ${id}`);
+      const input = JSON.parse(row.input_json) as Array<Record<string, unknown>>;
+      const hasOutput = input.some(item => item.type === 'function_call_output' && item.call_id === callId);
+      const now = new Date().toISOString();
+      if (!hasOutput) {
+        const hasCall = input.some(item => item.type === 'function_call' && item.call_id === callId && item.name === 'subagent_parent_message');
+        if (!hasCall) throw new Error(`Parent message call ${callId} is not pending in subagent window ${id}`);
+        input.push({ type: 'function_call_output', call_id: callId, output: JSON.stringify(answer) });
+        this.db.prepare('UPDATE subagent_windows SET input_json=?,updated_at=? WHERE id=?').run(JSON.stringify(input), now, id);
+      }
+      const run = this.db.prepare('SELECT parent_session_id,snapshot_json FROM subagent_runs WHERE id=?').get(id) as { parent_session_id: string; snapshot_json: string } | undefined;
+      if (run) {
+        const snapshot = JSON.parse(run.snapshot_json) as Record<string, unknown>;
+        delete snapshot.question;
+        snapshot.status = 'running';
+        snapshot.updatedAt = now;
+        this.db.prepare("UPDATE subagent_runs SET status='running',snapshot_json=?,updated_at=? WHERE id=?").run(JSON.stringify(snapshot), now, id);
+      }
+      this.db.exec('COMMIT');
+      return !hasOutput;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  saveSubagentRun(snapshot: { id: string; parentSession: string; runId: string; status: string; updatedAt: string }): void {
+    this.db.prepare('INSERT INTO subagent_runs(id,parent_session_id,run_id,status,snapshot_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,status=excluded.status,snapshot_json=excluded.snapshot_json,updated_at=excluded.updated_at WHERE subagent_runs.parent_session_id=excluded.parent_session_id AND (subagent_runs.run_id=excluded.run_id OR excluded.status=\'queued\')')
+      .run(snapshot.id, snapshot.parentSession, snapshot.runId, snapshot.status, JSON.stringify(snapshot), snapshot.updatedAt);
+  }
+
+  allSubagentRuns(): Array<Record<string, unknown>> {
+    return (this.db.prepare('SELECT snapshot_json FROM subagent_runs ORDER BY updated_at DESC').all() as Array<{ snapshot_json: string }>).map(row => JSON.parse(row.snapshot_json) as Record<string, unknown>);
+  }
+
+  saveSubagentEvent(event: { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; questionId: string; message: string; waitForReply: boolean; kind?: string; status: string }): void {
+    const now = new Date().toISOString();
+    this.db.prepare('INSERT INTO subagent_events(id,run_id,subagent_id,parent_session_id,parent_input_id,question_id,payload_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO NOTHING')
+      .run(event.id, event.runId, event.subagentId, event.parentSession, event.parentInputId ?? null, event.questionId, JSON.stringify({ message: event.message, waitForReply: event.waitForReply, kind: event.kind }), event.status, now, now);
+  }
+
+  pendingSubagentEvents(): Array<{ id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; questionId: string; message: string; waitForReply: boolean; kind?: string; status: string }> {
+    return (this.db.prepare("SELECT id,run_id,subagent_id,parent_session_id,parent_input_id,question_id,payload_json,status FROM subagent_events WHERE status IN ('pending','failed_unknown') ORDER BY created_at,rowid").all() as Array<{ id: string; run_id: string; subagent_id: string; parent_session_id: string; parent_input_id: string | null; question_id: string; payload_json: string; status: string }>).map(row => ({ id: row.id, runId: row.run_id, subagentId: row.subagent_id, parentSession: row.parent_session_id, ...(row.parent_input_id ? { parentInputId: row.parent_input_id } : {}), questionId: row.question_id, ...JSON.parse(row.payload_json) as { message: string; waitForReply: boolean; kind?: string }, status: row.status }));
+  }
+
+  subagentEventInput(eventId: string, session: string, content: string, source: MessageSource): StoredMessage {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const event = this.db.prepare('SELECT parent_input_id FROM subagent_events WHERE id=? AND parent_session_id=?').get(eventId, session) as { parent_input_id: string | null } | undefined;
+      if (!event) throw new Error('Unknown subagent event');
+      const existing = event.parent_input_id ? this.messagesWithSources(session).find(message => message.id === event.parent_input_id) : undefined;
+      let input = existing;
+      if (!input) {
+        const id = randomUUID();
+        const now = new Date().toISOString();
+        this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(id, session, 'user', content, now);
+        this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,event_time,source_kind) VALUES(?,?,?,?,?)').run(id, source.authorId ?? null, source.channelId ?? null, now, 'subagent_event');
+        this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'ready',?)").run(id, now);
+        input = { id, sessionId: session, role: 'user', content, createdAt: now, source: { ...source, sourceKind: 'subagent_event' }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
+      }
+      this.db.prepare('UPDATE subagent_events SET parent_input_id=? WHERE id=?').run(input.id, eventId);
+      this.db.exec('COMMIT');
+      return input;
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  setSubagentEventStatus(id: string, expected: 'pending' | 'processing', status: 'processing' | 'delivered' | 'failed_unknown'): boolean {
+    const result = this.db.prepare('UPDATE subagent_events SET status=?,updated_at=? WHERE id=? AND status=?').run(status, new Date().toISOString(), id, expected);
+    return Number(result.changes) === 1;
   }
 
   beginTool(session: string, name: string, args: unknown): string {

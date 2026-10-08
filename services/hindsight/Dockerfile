@@ -16,3 +16,7 @@ PY
 
 COPY --chown=hindsight:hindsight patch-request-defaults.py /tmp/patch-request-defaults.py
 RUN python /tmp/patch-request-defaults.py && rm /tmp/patch-request-defaults.py
+
+COPY --chown=hindsight:hindsight task-recovery.py /app/api/hindsight_api/engine/task_recovery.py
+COPY --chown=hindsight:hindsight patch-task-recovery.py /tmp/patch-task-recovery.py
+RUN python /tmp/patch-task-recovery.py && rm /tmp/patch-task-recovery.py

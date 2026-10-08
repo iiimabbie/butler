@@ -13,6 +13,8 @@ export function withoutErrorLogMention<T>(callback: () => T): T {
 let queue: Promise<void> = Promise.resolve();
 let queued = 0;
 let lastSentAt = 0;
+const deduplicationWindowMs = 5 * 60 * 1000;
+const recentErrors = new Map<string, number>();
 
 export function configureErrorLogging(config: ButlerConfig): void {
   const discord = config.discord;
@@ -39,7 +41,7 @@ function truncate(value: string, limit: number): string {
   return `${value.slice(0, end)}${suffix}`;
 }
 
-export function logError(context: string, error?: unknown): void {
+export function logError(context: string, error?: unknown, options: { notify?: boolean; deduplicationKey?: string } = {}): void {
   const formatError = (value: unknown, depth = 0): string => {
     if (depth > 4) return '';
     if (value instanceof Error) {
@@ -49,12 +51,40 @@ export function logError(context: string, error?: unknown): void {
     }
     return typeof value === 'string' ? value : '';
   };
+  const formatIdentityError = (value: unknown, depth = 0): string => {
+    if (depth > 4) return '';
+    if (value instanceof Error) {
+      const own = `${value.name}:${value.message}`;
+      const cause = 'cause' in value ? formatIdentityError(value.cause, depth + 1) : '';
+      return `${own}${cause ? `\nCaused by: ${cause}` : ''}`;
+    }
+    return typeof value === 'string' ? value : '';
+  };
+  const isHttp429 = (value: unknown, depth = 0): boolean => {
+    if (depth > 4) return false;
+    if (typeof value === 'string') return /\bHTTP\s+429\b/i.test(value) || /^429\b/.test(value);
+    if (typeof value !== 'object' || value === null) return false;
+    const record = value as { status?: unknown; statusCode?: unknown; message?: unknown; cause?: unknown };
+    if (record.status === 429 || record.status === '429' || record.statusCode === 429 || record.statusCode === '429') return true;
+    if (typeof record.message === 'string' && (/\bHTTP\s+429\b/i.test(record.message) || /^429\b/.test(record.message))) return true;
+    return 'cause' in record && isHttp429(record.cause, depth + 1);
+  };
   const detail = formatError(error);
   const timestamp = new Date().toISOString();
   const line = redact(`${timestamp} ERROR ${context}${detail ? `: ${detail}` : ''}`);
   console.error(line);
   if (!webhookUrl) return;
+  // Explicit operational tool failures must not be hidden by a status in their message.
+  if (options.notify === false || (options.notify !== true && (isHttp429(context) || isHttp429(error)))) return;
+  const deduplicationKey = `${options.deduplicationKey ?? context}\n${formatIdentityError(error)}`;
+  const now = Date.now();
+  for (const [key, notifiedAt] of recentErrors) {
+    if (now - notifiedAt >= deduplicationWindowMs) recentErrors.delete(key);
+  }
+  const previousNotification = recentErrors.get(deduplicationKey);
+  if (previousNotification !== undefined && now - previousNotification < deduplicationWindowMs) return;
   if (queued >= 50) { console.error('Butler error notifier queue full; notification skipped'); return; }
+  recentErrors.set(deduplicationKey, now);
   queued++;
   const target = webhookUrl;
   const suppressed = mentionSuppression.getStore() === true;

@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import type { Hindsight } from './hindsight.js';
 
 const string = { type: 'string', minLength: 1 };
@@ -34,7 +35,7 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
       };
       const keys = allowed[name];
       if (!keys) throw new Error(`Unknown people tool: ${name}`);
-      if (Object.keys(args).some(key => !keys.includes(key))) throw new Error('Unknown people tool argument');
+      if (Object.keys(args).some(key => !keys.includes(key))) throw new ToolUsageError('Unknown people tool argument');
       if (name === 'people_list') {
         const limit = integerArg(args.limit, 50, 1, 100, 'limit');
         const offset = integerArg(args.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset');
@@ -157,17 +158,17 @@ function makeSourceQuery(key: string, query?: string): string {
   return `Butler person key: ${JSON.stringify(key)}\nCanonical identity: ${canonical}\n${evidenceInstructions}${query === undefined ? '' : `\nAdditional focus: ${query}`}`;
 }
 function text(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error(`${name} must be a non-empty string without NUL`);
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new ToolUsageError(`${name} must be a non-empty string without NUL`);
   return value.trim();
 }
 function optionalText(value: unknown, name: string): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error(`${name} must be a non-empty string without NUL when provided`);
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new ToolUsageError(`${name} must be a non-empty string without NUL when provided`);
   return value.trim();
 }
 function integerArg(value: unknown, fallback: number, min: number, max: number, name: string): number {
   if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
+  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`);
   return value as number;
 }
 function personKey(key: string): string {

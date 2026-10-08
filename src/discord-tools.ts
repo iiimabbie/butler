@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
@@ -206,32 +207,32 @@ function persistDeliveredMessage(context: DiscordToolContext, channelId: string,
 }
 
 function validateArgs(spec: ToolSpec,args:Record<string,unknown>):void {
-  for(const required of spec.required) if(!(required in args)) throw new Error(`${required} is required`);
+  for(const required of spec.required) if(!(required in args)) throw new ToolUsageError(`${required} is required`);
   validateValue({type:'object',properties:spec.properties,required:spec.required,additionalProperties:false},args,'arguments');
 }
 function validateValue(rule:Record<string,unknown>,value:unknown,path:string):void {
-  if (rule.type === 'boolean') { if (typeof value !== 'boolean') throw new Error(`${path} is invalid`); return; }
+  if (rule.type === 'boolean') { if (typeof value !== 'boolean') throw new ToolUsageError(`${path} is invalid`); return; }
   if(rule.type==='string') {
-    if(typeof value!=='string'||value.length<Number(rule.minLength??0)||value.length>Number(rule.maxLength??Infinity)||(rule.pattern&&!new RegExp(String(rule.pattern)).test(value))||(Array.isArray(rule.enum)&&!rule.enum.includes(value))) throw new Error(`${path} is invalid`);
+    if(typeof value!=='string'||value.length<Number(rule.minLength??0)||value.length>Number(rule.maxLength??Infinity)||(rule.pattern&&!new RegExp(String(rule.pattern)).test(value))||(Array.isArray(rule.enum)&&!rule.enum.includes(value))) throw new ToolUsageError(`${path} is invalid`);
     return;
   }
-  if(rule.type==='integer') { if(!Number.isSafeInteger(value)||Number(value)<Number(rule.minimum??-Infinity)||Number(value)>Number(rule.maximum??Infinity)) throw new Error(`${path} is invalid`); return; }
+  if(rule.type==='integer') { if(!Number.isSafeInteger(value)||Number(value)<Number(rule.minimum??-Infinity)||Number(value)>Number(rule.maximum??Infinity)) throw new ToolUsageError(`${path} is invalid`); return; }
   if(rule.type==='array') {
-    if(!Array.isArray(value)||value.length<Number(rule.minItems??0)||value.length>Number(rule.maxItems??Infinity)||(rule.uniqueItems===true&&new Set(value).size!==value.length)) throw new Error(`${path} is invalid`);
+    if(!Array.isArray(value)||value.length<Number(rule.minItems??0)||value.length>Number(rule.maxItems??Infinity)||(rule.uniqueItems===true&&new Set(value).size!==value.length)) throw new ToolUsageError(`${path} is invalid`);
     for(let index=0;index<value.length;index++) validateValue(rule.items as Record<string,unknown>,value[index],`${path}[${index}]`);
     return;
   }
   if(rule.type==='object') {
-    if(!isRecord(value)) throw new Error(`${path} is invalid`);
+    if(!isRecord(value)) throw new ToolUsageError(`${path} is invalid`);
     const properties=isRecord(rule.properties)?rule.properties:{};
-    if(Array.isArray(rule.required)) for(const key of rule.required) if(typeof key==='string'&&!(key in value)) throw new Error(`${path}.${key} is required`);
+    if(Array.isArray(rule.required)) for(const key of rule.required) if(typeof key==='string'&&!(key in value)) throw new ToolUsageError(`${path}.${key} is required`);
     for(const [key,item] of Object.entries(value)) {
       const child=properties[key];
-      if(!child) { if(rule.additionalProperties!==true) throw new Error(`Unexpected argument: ${path}.${key}`); continue; }
+      if(!child) { if(rule.additionalProperties!==true) throw new ToolUsageError(`Unexpected argument: ${path}.${key}`); continue; }
       validateValue(child as Record<string,unknown>,item,`${path}.${key}`);
     }
   }
 }
-function stringArg(value:unknown,name:string):string{if(typeof value!=='string'||!value.length)throw new Error(`${name} is invalid`);return value;}
+function stringArg(value:unknown,name:string):string{if(typeof value!=='string'||!value.length)throw new ToolUsageError(`${name} is invalid`);return value;}
 function asRecord(value:unknown):Record<string,unknown>{if(!isRecord(value))throw new Error('Discord returned an invalid object');return value;}
 function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==='object'&&value!==null&&!Array.isArray(value);}

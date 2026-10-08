@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import { open, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -68,7 +69,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     for (const k of ['summary', 'description', 'location']) if (a[k] !== undefined) body[k] = s(k);
     const hasTime = a.start !== undefined || a.end !== undefined || a.all_day !== undefined;
     if (create || hasTime) {
-      if (a.all_day !== undefined && (a.start === undefined || a.end === undefined)) throw new Error('Setting all_day requires both start and end');
+      if (a.all_day !== undefined && (a.start === undefined || a.end === undefined)) throw new ToolUsageError('Setting all_day requires both start and end');
       const old = !create && a.all_day === undefined ? await c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`) : undefined;
       const all = a.all_day === undefined ? Boolean(old?.start?.date) : a.all_day as boolean;
       const start = s('start', old?.start?.date ?? old?.start?.dateTime);
@@ -82,7 +83,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
         (body.end as Record<string, unknown>)[opposite] = null;
       }
     }
-    if (!Object.keys(body).length) throw new Error('At least one event field must be supplied');
+    if (!Object.keys(body).length) throw new ToolUsageError('At least one event field must be supplied');
     return c.request(create ? calendar : `${calendar}/${encodeURIComponent(s('event_id'))}`, { method: create ? 'POST' : 'PATCH', body });
   }
   if (n === 'google_calendar_delete_event') return c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`, { method: 'DELETE' });
@@ -93,7 +94,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   if (n === 'google_tasks_create' || n === 'google_tasks_update') {
     const body: Record<string, unknown> = {};
     for (const k of ['title', 'notes']) if (a[k] !== undefined) body[k] = s(k);
-    if (!Object.keys(body).length) throw new Error('At least one task field must be supplied');
+    if (!Object.keys(body).length) throw new ToolUsageError('At least one task field must be supplied');
     const create = n === 'google_tasks_create';
     return withoutTaskDue(await c.request(create ? tasks : `${tasks}/${encodeURIComponent(s('task_id'))}`, { method: create ? 'POST' : 'PATCH', body }));
   }
@@ -115,11 +116,11 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     return { file, ...(mime ? { exported_as: mime } : {}), ...(mime === 'text/csv' ? { scope_note: 'Only the first sheet is exported as CSV.' } : {}), content: result.bytes.toString('utf8') };
   }
   if (n === 'google_drive_upload') {
-    if ((a.content !== undefined) === (a.file_path !== undefined)) throw new Error('Provide exactly one of content or file_path');
+    if ((a.content !== undefined) === (a.file_path !== undefined)) throw new ToolUsageError('Provide exactly one of content or file_path');
     const bytes = a.file_path !== undefined ? await attachment(s('file_path'), attachmentDir) : Buffer.from(s('content'), 'utf8');
     if (bytes.length > GOOGLE_FILE_LIMIT) throw new Error('Upload exceeds the 10 MiB limit');
     const mime = s('mime_type', 'text/plain');
-    if (!/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(mime)) throw new Error('mime_type must be a MIME type without parameters or newlines');
+    if (!/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+$/.test(mime)) throw new ToolUsageError('mime_type must be a MIME type without parameters or newlines');
     const metadata: Record<string, unknown> = { name: s('name'), mimeType: mime };
     if (a.folder_id !== undefined) metadata.parents = [s('folder_id')];
     const boundary = `butler_${randomBytes(24).toString('hex')}`;
@@ -137,30 +138,30 @@ function withoutTaskDue(task: Record<string, unknown>): Record<string, unknown> 
 
 function validate(name: string, args: Record<string, unknown>): void {
   const schema = schemas[name];
-  if (!schema) throw new Error('Unknown Google tool');
-  for (const key of schema.required) if (args[key] === undefined) throw new Error(`${key} is required`);
+  if (!schema) throw new ToolUsageError('Unknown Google tool');
+  for (const key of schema.required) if (args[key] === undefined) throw new ToolUsageError(`${key} is required`);
   for (const [key, value] of Object.entries(args)) {
     const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number } | undefined;
-    if (!rule) throw new Error('Unknown Google tool argument');
+    if (!rule) throw new ToolUsageError('Unknown Google tool argument');
     if (rule.type === 'string') {
       const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key);
-      if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new Error(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
-    } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new Error(`${key} must be boolean`);
-    else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new Error(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
+      if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new ToolUsageError(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
+    } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} must be boolean`);
+    else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new ToolUsageError(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
   }
 }
 function dateOnly(value: string): void {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) throw new Error('Date must be a valid YYYY-MM-DD');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) throw new ToolUsageError('Date must be a valid YYYY-MM-DD');
 }
 function timed(value: string): void {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new Error('Time must be RFC3339 with a timezone offset');
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) || !Number.isFinite(Date.parse(value))) throw new ToolUsageError('Time must be RFC3339 with a timezone offset');
   dateOnly(value.slice(0, 10));
   const [hour, minute, second] = value.slice(11, 19).split(':').map(Number);
-  if (hour! > 23 || minute! > 59 || second! > 59) throw new Error('Invalid RFC3339 time');
+  if (hour! > 23 || minute! > 59 || second! > 59) throw new ToolUsageError('Invalid RFC3339 time');
 }
 function timeRange(start: string, end: string, all: boolean): void {
   if (all) { dateOnly(start); dateOnly(end); } else { timed(start); timed(end); }
-  if (Date.parse(end) <= Date.parse(start)) throw new Error('end must be after start (all-day end is exclusive)');
+  if (Date.parse(end) <= Date.parse(start)) throw new ToolUsageError('end must be after start (all-day end is exclusive)');
 }
 async function attachment(file: string, directory?: string): Promise<Buffer> {
   if (!directory) throw new Error('Attachment directory is not configured');
@@ -226,7 +227,7 @@ function attachmentMetadata(part: any): unknown[] {
   return out;
 }
 function makeMime(to: string, subject: string, body: string): string {
-  if (/[\r\n\x00]/.test(to) || /[\r\n\x00]/.test(subject) || /[,;]/.test(to)) throw new Error('Provide one recipient; recipient and subject cannot contain CR, LF or NUL');
+  if (/[\r\n\x00]/.test(to) || /[\r\n\x00]/.test(subject) || /[,;]/.test(to)) throw new ToolUsageError('Provide one recipient; recipient and subject cannot contain CR, LF or NUL');
   const encoded = Buffer.from(body, 'utf8').toString('base64').match(/.{1,76}/g)?.join('\r\n') ?? '';
   const subjectWords = [];
   let chunk = '';

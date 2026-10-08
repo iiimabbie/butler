@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import type { Store } from './store.js';
 
 export interface TranscriptEntry {
@@ -23,12 +24,12 @@ export interface TranscriptPage {
 }
 
 export function validateTranscriptDate(value: unknown): string {
-  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new Error('date must be a valid YYYY-MM-DD date');
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new ToolUsageError('date must be a valid YYYY-MM-DD date');
   const [year, month, day] = value.split('-').map(Number);
   const parsed = new Date(0);
   parsed.setUTCHours(0, 0, 0, 0);
   parsed.setUTCFullYear(year!, month! - 1, day!);
-  if (parsed.toISOString().slice(0, 10) !== value) throw new Error('date must be a valid YYYY-MM-DD date');
+  if (parsed.toISOString().slice(0, 10) !== value) throw new ToolUsageError('date must be a valid YYYY-MM-DD date');
   return value;
 }
 

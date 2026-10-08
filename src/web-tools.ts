@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 const RESPONSE_LIMIT = 5 * 1024 * 1024;
 // Leave room for the agent's tool_history_id envelope.
 const OUTPUT_LIMIT = 64 * 1024 - 256;
@@ -34,12 +35,12 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
       if (config.provider !== undefined && config.provider !== 'tavily') throw new Error('Unsupported web provider');
       if (name !== 'web_search' && name !== 'web_fetch') throw new Error('Unknown web tool');
       const allowed = name === 'web_search' ? ['query', 'max_results'] : ['url'];
-      if (Object.keys(args).some(key => !allowed.includes(key))) throw new Error('Unknown web tool argument');
+      if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown web tool argument');
       const redact = (value: string) => value.replaceAll(apiKey, '[redacted]');
       if (name === 'web_search') {
         const query = requiredString(args.query, 'query');
         const maxResults = args.max_results ?? 5;
-        if (!Number.isSafeInteger(maxResults) || (maxResults as number) < 1 || (maxResults as number) > 10) throw new Error('max_results must be an integer from 1 to 10');
+        if (!Number.isSafeInteger(maxResults) || (maxResults as number) < 1 || (maxResults as number) > 10) throw new ToolUsageError('max_results must be an integer from 1 to 10');
         const body = await request('search', { query, max_results: maxResults, search_depth: 'basic', auto_parameters: false, include_answer: false, include_raw_content: false }, apiKey, fetcher, baseUrl);
         if (!Array.isArray(body.results) || body.results.length > (maxResults as number)) throw new Error('Tavily search: invalid response');
         const results = body.results.map(item => {
@@ -50,8 +51,8 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
       }
       const url = requiredString(args.url, 'url');
       let parsed: URL;
-      try { parsed = new URL(url); } catch { throw new Error('url must be an HTTP(S) URL without credentials'); }
-      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('url must be an HTTP(S) URL without credentials');
+      try { parsed = new URL(url); } catch { throw new ToolUsageError('url must be an HTTP(S) URL without credentials'); }
+      if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new ToolUsageError('url must be an HTTP(S) URL without credentials');
       const body = await request('extract', { urls: [url], extract_depth: 'basic', timeout: 20 }, apiKey, fetcher, baseUrl);
       if (!Array.isArray(body.failed_results) || !Array.isArray(body.results)) throw new Error('Tavily extract: invalid response');
       if (body.failed_results.length) throw new Error('Tavily extract: URL extraction failed');
@@ -133,7 +134,7 @@ function boundedOutput<T extends { truncated: boolean }>(result: T, contents: { 
 }
 
 function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} must be a non-empty string`);
+  if (typeof value !== 'string' || !value.trim()) throw new ToolUsageError(`${name} must be a non-empty string`);
   return value.trim();
 }
 

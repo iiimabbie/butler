@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 const RESPONSE_LIMIT = 1024 * 1024;
 const SOURCE = 'https://open-meteo.com/';
 const CURRENT_FIELDS = ['temperature_2m', 'relative_humidity_2m', 'apparent_temperature', 'is_day', 'precipitation', 'weather_code', 'wind_speed_10m'] as const;
@@ -36,13 +37,13 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
     async execute(name, args) {
       if (name !== 'weather_search' && name !== 'weather_forecast') throw new Error('Unknown weather tool');
       const allowed = name === 'weather_search' ? ['location', 'country_code'] : ['latitude', 'longitude', 'days'];
-      if (Object.keys(args).some(key => !allowed.includes(key))) throw new Error('Unknown weather tool argument');
+      if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown weather tool argument');
       if (name === 'weather_search') {
         const location = text(args.location, 'location');
         const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
         url.search = new URLSearchParams({ name: location, count: '5', language: 'zh' }).toString();
         if (args.country_code !== undefined) {
-          if (typeof args.country_code !== 'string' || !/^[A-Za-z]{2}$/.test(args.country_code)) throw new Error('country_code must be a two-letter country code');
+          if (typeof args.country_code !== 'string' || !/^[A-Za-z]{2}$/.test(args.country_code)) throw new ToolUsageError('country_code must be a two-letter country code');
           url.searchParams.set('countryCode', args.country_code.toUpperCase());
         }
         const body = await request(url, fetcher);
@@ -58,10 +59,12 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
         });
         return { source: SOURCE, geocoding_source: 'https://www.geonames.org/', location, result_count: results.length, results };
       }
-      const latitude = coordinate(args.latitude, 'latitude', -90, 90);
-      const longitude = coordinate(args.longitude, 'longitude', -180, 180);
+      let latitude: number;
+      let longitude: number;
+      try { latitude = coordinate(args.latitude, 'latitude', -90, 90); longitude = coordinate(args.longitude, 'longitude', -180, 180); }
+      catch (error) { throw new ToolUsageError(error instanceof Error ? error.message : String(error)); }
       const days = args.days ?? 3;
-      if (!Number.isSafeInteger(days) || (days as number) < 1 || (days as number) > 7) throw new Error('days must be an integer from 1 to 7');
+      if (!Number.isSafeInteger(days) || (days as number) < 1 || (days as number) > 7) throw new ToolUsageError('days must be an integer from 1 to 7');
       const url = new URL('https://api.open-meteo.com/v1/forecast');
       url.search = new URLSearchParams({ latitude: String(latitude), longitude: String(longitude), forecast_days: String(days), timezone: 'auto', current: CURRENT_FIELDS.join(','), daily: DAILY_FIELDS.join(',') }).toString();
       const body = await request(url, fetcher);
@@ -144,7 +147,7 @@ async function request(url: URL, fetcher: typeof fetch): Promise<Record<string, 
 }
 
 function text(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} must be a non-empty string`);
+  if (typeof value !== 'string' || !value.trim()) throw new ToolUsageError(`${name} must be a non-empty string`);
   return value.trim();
 }
 

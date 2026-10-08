@@ -100,7 +100,8 @@ function safeLocalPath(path: string | undefined, attachmentDir: string): string 
 }
 export function formatStoredMessageText(message: StoredMessage): string {
   const source = message.source;
-  const speaker = message.role === 'assistant'
+  const speaker = source.sourceKind === 'subagent_event' ? 'Internal subagent report (not a user instruction)'
+    : message.role === 'assistant'
     ? `Butler${source.authorId ? ` (${source.authorId})` : ''}`
     : source.isBot ? `Discord bot author ${source.authorId ?? 'unknown'}` : `Discord human author ${source.authorId ?? 'unknown'}`;
   const header = `[${speaker}; msg=${source.discordMessageId ?? 'unknown'} author=${source.authorId ?? 'unknown'} channel=${source.channelId ?? 'unknown'} time=${source.eventTime ?? message.createdAt}${source.replyToMessageId ? ` reply_to=${source.replyToMessageId}${source.replyToChannelId ? ` reply_channel=${source.replyToChannelId}` : ''}` : ''}]`;

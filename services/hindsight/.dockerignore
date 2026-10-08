@@ -2,3 +2,5 @@
 !Dockerfile
 
 !patch-request-defaults.py
+!task-recovery.py
+!patch-task-recovery.py

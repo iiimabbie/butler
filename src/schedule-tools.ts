@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_SCHEDULE_TIMEZONE, scheduleNextRun, type CreateScheduleInput, type ScheduleJob, type SchedulerStore } from './scheduler.js';
 
@@ -40,7 +41,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
     async execute(name, args) {
       if (name === 'schedule_create') {
         const kind = args.kind;
-        if (kind !== 'cron' && kind !== 'reminder') throw new Error('kind must be cron or reminder');
+        if (kind !== 'cron' && kind !== 'reminder') throw new ToolUsageError('kind must be cron or reminder');
         const outputChannelId = stringArg(args.outputChannelId, 'outputChannelId');
         await assertOutput(outputChannelId);
         const input: CreateScheduleInput = {
@@ -53,8 +54,8 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
           ...(args.cron === undefined ? {} : { cron: stringArg(args.cron, 'cron') }),
           ...(args.runAt === undefined ? {} : { runAt: stringArg(args.runAt, 'runAt') }),
         };
-        if (kind === 'reminder' && input.cron !== undefined) throw new Error('Reminder cannot include cron');
-        if (kind === 'cron' && input.runAt !== undefined) throw new Error('Cron schedule cannot include runAt');
+        if (kind === 'reminder' && input.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
+        if (kind === 'cron' && input.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
         const timestamp = now();
         const job: ScheduleJob = { id: randomUUID(), ...input, timezone: input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, cron: input.cron ?? null, runAt: input.runAt ?? null, enabled: true, nextRun: scheduleNextRun(input, timestamp), createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString() };
         return options.store.createSchedule(job);
@@ -75,10 +76,10 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         if (args.cron !== undefined) patch.cron = stringArg(args.cron, 'cron');
         if (args.runAt !== undefined) patch.runAt = stringArg(args.runAt, 'runAt');
         if (args.timezone !== undefined) patch.timezone = stringArg(args.timezone, 'timezone');
-        if (args.enabled !== undefined) { if (typeof args.enabled !== 'boolean') throw new Error('enabled must be boolean'); patch.enabled = args.enabled; }
+        if (args.enabled !== undefined) { if (typeof args.enabled !== 'boolean') throw new ToolUsageError('enabled must be boolean'); patch.enabled = args.enabled; }
         const candidate = { ...current, ...patch };
-        if (candidate.kind === 'cron' && patch.runAt !== undefined) throw new Error('Cron schedule cannot include runAt');
-        if (candidate.kind === 'reminder' && patch.cron !== undefined) throw new Error('Reminder cannot include cron');
+        if (candidate.kind === 'cron' && patch.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
+        if (candidate.kind === 'reminder' && patch.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
         patch.nextRun = candidate.enabled ? scheduleNextRun(candidate, now()) : null;
         return options.store.updateSchedule(id, patch);
       }
@@ -88,6 +89,6 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
 }
 
 function stringArg(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error(`${name} must be a non-empty string`);
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new ToolUsageError(`${name} must be a non-empty string`);
   return value.trim();
 }
