@@ -111,7 +111,7 @@ function renderLines(steps: Step[], maxLength: number): string {
     const elapsed = step.elapsedMs === undefined ? '' : ` (${step.elapsedMs.toFixed(1)}ms)`;
     return `${marker} ${step.text}${elapsed}`;
   });
-  const collapsed = rows.length > 8 ? [`…前面還有 ${rows.length - 7} 項進度`, ...rows.slice(-7)] : rows;
+  const collapsed = rows.length > 5 ? [`…前面還有 ${rows.length - 5} 項進度`, ...rows.slice(-5)] : rows;
   let result = collapsed.join('\n');
   while (result.length > maxLength && collapsed.length > 2) {
     collapsed.splice(collapsed.length > 3 ? 1 : 0, 1);
