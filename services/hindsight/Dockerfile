@@ -13,3 +13,6 @@ assert source.count(old) == 1, f"expected exactly one constant match, found {sou
 assert source.count(old_comment) == 1, f"expected exactly one comment match, found {source.count(old_comment)}"
 path.write_text(source.replace(old, new, 1).replace(old_comment, new_comment, 1))
 PY
+
+COPY --chown=hindsight:hindsight patch-request-defaults.py /tmp/patch-request-defaults.py
+RUN python /tmp/patch-request-defaults.py && rm /tmp/patch-request-defaults.py

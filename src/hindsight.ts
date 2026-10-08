@@ -4,7 +4,7 @@ import type { ProgressEvent } from './progress.js';
 
 export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; size: number; status: 'ready' | 'failed' }> };
-export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number; recallBudget?: string; reflectBudget?: string; maxTokens?: number };
+export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number };
 type RequestTiming = { startedAt: number; timestamp: string; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };
 
 export type ConversationRetainPayload = Readonly<{
@@ -64,7 +64,7 @@ export class Hindsight {
     try { await this.ensureBank(store, session, onProgress); }
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
     const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
-    const request = { query, budget: this.config.recallBudget ?? 'mid', max_tokens: this.config.maxTokens ?? 1200 };
+    const request = { query };
     const audit = store.beginTool(session, 'hindsight_recall', { bankId: this.config.bankId, ...request, phase: 'ask-start' });
     const recallStarted = Date.now();
     emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_recall', description: '查找相關的過往對話' });
@@ -83,13 +83,13 @@ export class Hindsight {
   }
 
   async recall(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/memories/recall`, { query, budget: this.config.recallBudget ?? 'mid', max_tokens: this.config.maxTokens ?? 1200 });
+    const result = await this.post(`${this.bankUrl()}/memories/recall`, { query });
     if (!Array.isArray(asRecord(result)?.results) || (asRecord(result)!.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
     return result;
   }
 
   async reflect(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/reflect`, { query, budget: this.config.reflectBudget ?? 'mid', max_tokens: this.config.maxTokens ?? 1200, include: { facts: {} } });
+    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } });
     const record = asRecord(result);
     if (typeof record?.text !== 'string' || !(record.based_on === null || asRecord(record.based_on))) throw new Error('Hindsight reflect response is invalid');
     return result;

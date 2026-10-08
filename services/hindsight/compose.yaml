@@ -1,6 +1,6 @@
 services:
   hindsight:
-    image: butler-hindsight:0.10.2-jev20k
+    image: butler-hindsight:0.10.2-central-defaults
     build:
       context: .
     container_name: butler-hindsight-evaluation
@@ -14,6 +14,14 @@ services:
       HINDSIGHT_API_RERANKER_PROVIDER: typesafe
       HINDSIGHT_API_RERANKER_TYPESAFE_MODEL: jev-latest
       HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "50"
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_LOW: "30"
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_MID: "50"
+      HINDSIGHT_API_RERANKER_MAX_CANDIDATES_HIGH: "50"
+      # Local API-default patch: Butler omits these parameters entirely.
+      HINDSIGHT_API_REQUEST_RECALL_BUDGET: "mid"
+      HINDSIGHT_API_REQUEST_RECALL_MAX_TOKENS: "1200"
+      HINDSIGHT_API_REQUEST_REFLECT_BUDGET: "mid"
+      HINDSIGHT_API_REQUEST_REFLECT_MAX_TOKENS: "1600"
     ports:
       - "127.0.0.1:18888:8888"
       - "127.0.0.1:15432:5432"

@@ -12,7 +12,7 @@ export type ButlerConfig = {
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
   google?: GoogleClientConfig;
-  memory?: { baseUrl: string; bankId: string; timeoutMs?: number; recallBudget?: string; reflectBudget?: string; maxTokens?: number };
+  memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
   schedule?: { timezone?: string };
 };
@@ -62,9 +62,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
       validateHttpUrl(baseUrl, 'memory.baseUrl');
       const timeoutMs = section.timeoutMs;
       if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 120000)) throw new Error('Butler config memory.timeoutMs must be an integer from 1 to 120000');
-      const maxTokens = section.maxTokens;
-      if (maxTokens !== undefined && (!Number.isInteger(maxTokens) || (maxTokens as number) < 1 || (maxTokens as number) > 32000)) throw new Error('Butler config memory.maxTokens must be an integer from 1 to 32000');
-      config.memory = { baseUrl: baseUrl.replace(/\/$/, ''), bankId: requireSetting(string('bankId'), 'memory.bankId'), timeoutMs: timeoutMs as number | undefined, recallBudget: string('recallBudget'), reflectBudget: string('reflectBudget'), maxTokens: maxTokens as number | undefined };
+      config.memory = { baseUrl: baseUrl.replace(/\/$/, ''), bankId: requireSetting(string('bankId'), 'memory.bankId'), timeoutMs: timeoutMs as number | undefined };
     } else if (name === 'image') {
       const baseUrl = requireSetting(string('baseUrl'), 'image.baseUrl');
       validateHttpUrl(baseUrl, 'image.baseUrl');
