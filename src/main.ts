@@ -8,9 +8,12 @@ import { fileURLToPath } from 'node:url';
 import { Hindsight } from './hindsight.js';
 import { MemoryCoordinator } from './memory-coordinator.js';
 import { createWebToolRuntime } from './web-tools.js';
+import { configureErrorLogging, flushErrorLogs, logError } from './error-log.js';
 
 try {
   const config = readConfig();
+  configureErrorLogging(config);
+  process.on('uncaughtExceptionMonitor', error => logError('Uncaught exception monitor', error));
   if (process.argv[2] === 'register-discord-commands') {
     await registerDiscordCommands(config);
   } else {
@@ -29,7 +32,7 @@ try {
     current = buildBundle(config);
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }) : undefined;
-    const watcher = watchConfig({ initial: config, log: message => console.error(message), onCandidate: candidate => { current = buildBundle(candidate); } });
+    const watcher = watchConfig({ initial: config, log: message => message === 'Config reload applied' ? console.info(message) : logError(message), onCandidate: candidate => { const next = buildBundle(candidate); current = next; configureErrorLogging(candidate); } });
     try {
       await memoryCoordinator?.start();
       await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close());
@@ -39,6 +42,8 @@ try {
     }
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : error);
+  logError('Butler startup/runtime failed', error);
   process.exitCode = 1;
+} finally {
+  await flushErrorLogs();
 }

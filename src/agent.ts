@@ -13,6 +13,7 @@ import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
 import { Hindsight } from './hindsight.js';
 import type { MessageInputAttachment } from './store.js';
+import { logError } from './error-log.js';
 import { assertAttachmentContextLimit, AttachmentInputError, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from './input-attachments.js';
 
 export interface AgentConfig {
@@ -269,6 +270,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     const id = store.beginTool(session, call.name, { raw_arguments: call.arguments });
     emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name });
     const result = { error: errorMessage(error) };
+    logError(`Tool argument parsing failed tool=${call.name} session=${session} audit=${id}`, error);
     store.finishTool(id, 'failed', result);
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
     return { tool_history_id: id, ...result };
@@ -320,6 +322,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
       result = runTool(store, session, call.name, runtimeArgs);
     }
   } catch (error) {
+    logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error);
     result = { error: errorMessage(error) };
     store.finishTool(id, 'failed', result);
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
@@ -335,7 +338,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
 
 function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   try { config.onProgress?.(event); }
-  catch (error) { console.error('Agent progress callback failed', error); }
+  catch (error) { logError('Agent progress callback failed', error); }
 }
 
 function runTool(store: Store, session: string, name: string, args: Record<string, unknown>): unknown {

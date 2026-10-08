@@ -6,7 +6,7 @@ import type { ImageConfig } from './image-tools.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
-  discord?: { token?: string; ownerId?: string; channelIds?: string[] };
+  discord?: { token?: string; ownerId?: string; channelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
@@ -38,7 +38,13 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
     if (name === 'discord') {
       const channelIds = section.channelIds;
       if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined };
+      const errorWebhookUrl = string('errorWebhookUrl');
+      if (errorWebhookUrl !== undefined && !/^https:\/\/discord\.com\/api\/(?:v10\/)?webhooks\/\d+\/[^/?#]+$/.test(errorWebhookUrl)) throw new Error('Butler config discord.errorWebhookUrl must be a Discord webhook URL without query or fragment');
+      const errorWebhookMentionUserId = string('errorWebhookMentionUserId');
+      if (errorWebhookMentionUserId !== undefined && !/^\d+$/.test(errorWebhookMentionUserId)) throw new Error('Butler config discord.errorWebhookMentionUserId must be a numeric Discord user ID');
+      const errorWebhookThreadId = string('errorWebhookThreadId');
+      if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
+      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined, errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');

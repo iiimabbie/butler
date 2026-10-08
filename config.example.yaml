@@ -1,6 +1,12 @@
 discord:
   token: YOUR_DISCORD_BOT_TOKEN
   ownerId: "YOUR_DISCORD_ACCOUNT_ID"
+  # Optional error-only notifications; validated Discord webhook URL.
+  # errorWebhookUrl: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
+  # Optional numeric user ID to mention on error notifications.
+  # errorWebhookMentionUserId: "YOUR_DISCORD_ACCOUNT_ID"
+  # Optional existing forum post (thread) ID for error notifications.
+  # errorWebhookThreadId: "YOUR_DISCORD_THREAD_ID"
   # Root channels where Butler automatically replies; all received messages are still saved and retained. Slash commands are not restricted.
   # Discord tools and scheduled outputs use bot permissions, not this list.
   channelIds:

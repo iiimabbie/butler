@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Store, type MemoryBatch } from './store.js';
 import { Hindsight, ConversationSubmissionError } from './hindsight.js';
 import { buildConversationPayload } from './conversation-format.js';
+import { logError } from './error-log.js';
 
 const MAX_TURNS = 10;
 const POLL_DELAYS = [5_000, 15_000, 30_000, 60_000] as const;
@@ -94,7 +95,7 @@ export class MemoryCoordinator {
   private kick(): void {
     if (!this.started || this.passive || this.closed || this.activeHttp) return;
     this.activeHttp = this.drainOne().catch(error => {
-      console.error('Memory coordinator drain failed:', error);
+      logError('Memory coordinator drain failed', error);
     }).finally(() => {
       this.activeHttp = undefined;
       if (!this.passive && !this.closed) this.schedule();
@@ -114,7 +115,7 @@ export class MemoryCoordinator {
         this.freezePrefixes(() => true);
       } catch (error) {
         freezeFailed = true;
-        console.error('Memory coordinator freeze failed:', error);
+        logError('Memory coordinator freeze failed', error);
       } finally {
         if (this.activeHttp) this.schedule(freezeFailed ? 1_000 : undefined);
         else if (freezeFailed) this.schedule(1_000);
@@ -180,6 +181,7 @@ export class MemoryCoordinator {
       });
       this.pollDelays.set(batch.operationId, 0);
     } catch (error) {
+      logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error);
       const rejection = error instanceof ConversationSubmissionError && error.classification === 'rejection';
       this.store.updateMemoryBatch(batch.operationId, rejection ? 'failed' : 'unknown', {
         error: this.errorText(error),
@@ -207,12 +209,18 @@ export class MemoryCoordinator {
           nextPollAt: new Date(Date.now() + POLL_DELAYS[nextIndex]).toISOString(),
         });
       } else if (result.status === 'not_found') {
+        const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
+        const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
+        logError(`Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=not_found${reason ? ` reason=${reason}` : ''}`);
         this.store.updateMemoryBatch(batch.operationId, 'needs_clarification', {
           lastPollAt: now,
           error: 'Operation not found after persistent submit intent; automatic resubmission is unsafe.',
         });
         this.pollDelays.delete(batch.operationId);
       } else {
+        const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
+        const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
+        logError(`Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=${result.status}${reason ? ` reason=${reason}` : ''}`);
         this.store.updateMemoryBatch(batch.operationId, result.status, {
           lastPollAt: now,
           error: JSON.stringify(result.response),
@@ -220,6 +228,7 @@ export class MemoryCoordinator {
         this.pollDelays.delete(batch.operationId);
       }
     } catch (error) {
+      logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error);
       this.recoveryPending.delete(batch.operationId);
       const index = this.pollDelays.get(batch.operationId) ?? (batch.lastPollAt ? 1 : 0);
       const nextIndex = Math.min(index + 1, POLL_DELAYS.length - 1);
