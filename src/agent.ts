@@ -66,6 +66,8 @@ const historyPageSchema = {
   additionalProperties: false,
 };
 
+const WRAP_UP_REMINDER_TURN = 45;
+
 const tools = [
   {
     type: 'function', name: 'current_time', description: 'Get the current local time.',
@@ -180,7 +182,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     let requireFinalText = false;
     let finalTextRetryUsed = false;
     let imageSaveSucceeded = false;
-    for (let turn = 0; turn < 8; turn++) {
+    for (let turn = 0; ; turn++) {
       const steered = await config.consumeSteer?.();
       if (steered) {
         if (!steered.stored) throw new Error('steer input must already be persisted');
@@ -196,6 +198,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (forceImageSave) imageSaveRequiredAttempted = true;
       forceImageSave = false;
       requireFinalText = false;
+      if (turn + 1 === WRAP_UP_REMINDER_TURN) input.push({ role: 'developer', content: '請整理目前已確認的結果並準備回覆。若工作尚未完成，請誠實說明還沒看完，並列出目前已確認的內容與尚待查核或未完成的部分；不要聲稱已完成。' });
       const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       store.saveLatestRequest(session, JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), new Date().toISOString());
       const response = await fetcher(`${config.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(config.timeoutMs ?? 60_000), body: requestBody });
@@ -250,7 +253,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
         appendDiscordInput();
       }
     }
-    throw new Error('LLM tool loop exceeded 8 turns');
   } finally {
     config.onAskFinishing?.();
     // Conversation handoff is owned by the persistent memory drain, not ask lifecycle.
