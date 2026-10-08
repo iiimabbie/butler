@@ -16,8 +16,8 @@ const schemas: Record<string, { description: string; properties: Record<string, 
   google_calendar_update_event: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
   google_calendar_delete_event: { description: 'Delete a calendar event. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
   google_tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
-  google_tasks_create: { description: 'Create a task. Defaults to @default.', properties: { title: str, notes: str, due: { ...str, description: 'Optional due date (YYYY-MM-DD or RFC3339); time is discarded. Empty is treated as omitted.' }, task_list_id: str }, required: ['title'] },
-  google_tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, due: { ...str, description: 'Optional due date (YYYY-MM-DD or RFC3339); time is discarded. Omitted or empty leaves the date unchanged.' }, task_list_id: str }, required: ['task_id'] },
+  google_tasks_create: { description: 'Create a task. Defaults to @default.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
+  google_tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, task_list_id: str }, required: ['task_id'] },
   google_tasks_complete: { description: 'Mark a task completed; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_tasks_delete: { description: 'Delete a task; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_drive_search: { description: 'Search Drive by filename substring, excluding trash.', properties: { query: str, max_results: count(100, 10), page_token: str }, required: ['query'] },
@@ -88,22 +88,16 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   if (n === 'google_calendar_delete_event') return c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`, { method: 'DELETE' });
   if (n === 'google_tasks_list') {
     const r = await c.request(tasks, { query: { showCompleted: a.show_completed as boolean ?? false, showHidden: a.show_completed as boolean ?? false, maxResults: number('max_results', 20), pageToken: s('page_token') || undefined } });
-    return { items: r.items ?? [], next_page_token: r.nextPageToken ?? null };
+    return { items: (r.items ?? []).map(withoutTaskDue), next_page_token: r.nextPageToken ?? null };
   }
   if (n === 'google_tasks_create' || n === 'google_tasks_update') {
     const body: Record<string, unknown> = {};
     for (const k of ['title', 'notes']) if (a[k] !== undefined) body[k] = s(k);
-    if (a.due !== undefined && s('due') !== '') {
-      const due = s('due');
-      if (due.length !== 10) timed(due);
-      dateOnly(due.slice(0, 10));
-      body.due = `${due.slice(0, 10)}T00:00:00.000Z`;
-    }
     if (!Object.keys(body).length) throw new Error('At least one task field must be supplied');
     const create = n === 'google_tasks_create';
-    return c.request(create ? tasks : `${tasks}/${encodeURIComponent(s('task_id'))}`, { method: create ? 'POST' : 'PATCH', body });
+    return withoutTaskDue(await c.request(create ? tasks : `${tasks}/${encodeURIComponent(s('task_id'))}`, { method: create ? 'POST' : 'PATCH', body }));
   }
-  if (n === 'google_tasks_complete') return c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'PATCH', body: { status: 'completed' } });
+  if (n === 'google_tasks_complete') return withoutTaskDue(await c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'PATCH', body: { status: 'completed' } }));
   if (n === 'google_tasks_delete') return c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'DELETE' });
   if (n === 'google_drive_search') {
     const q = `name contains '${s('query').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' and trashed = false`;
@@ -135,6 +129,12 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   throw new Error('Unknown Google tool');
 }
 
+// Todos do not use due dates; leave existing Google data unchanged and omit it from tool results.
+function withoutTaskDue(task: Record<string, unknown>): Record<string, unknown> {
+  const { due: _due, ...result } = task;
+  return result;
+}
+
 function validate(name: string, args: Record<string, unknown>): void {
   const schema = schemas[name];
   if (!schema) throw new Error('Unknown Google tool');
@@ -143,7 +143,7 @@ function validate(name: string, args: Record<string, unknown>): void {
     const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number } | undefined;
     if (!rule) throw new Error('Unknown Google tool argument');
     if (rule.type === 'string') {
-      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key) || (key === 'due' && ['google_tasks_create', 'google_tasks_update'].includes(name));
+      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key);
       if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new Error(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
     } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new Error(`${key} must be boolean`);
     else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new Error(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
