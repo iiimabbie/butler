@@ -95,33 +95,74 @@ export class Hindsight {
     return result;
   }
 
-  async listPersonDocuments(limit: number, offset: number): Promise<unknown> {
-    return this.get(`${this.bankUrl()}/documents?${new URLSearchParams({ tags: 'butler-person', limit: String(limit), offset: String(offset) })}`);
+  async getKnowledgeTree(): Promise<Record<string, unknown>[]> {
+    const result = await this.get(`${this.bankUrl()}/knowledge-base/tree`);
+    const roots = asRecord(result)?.roots;
+    if (!Array.isArray(roots)) throw new Error('Hindsight knowledge tree response is invalid');
+    const validate = (nodes: unknown[]): Record<string, unknown>[] => nodes.map(node => {
+      const record = asRecord(node);
+      if (!record || typeof record.id !== 'string' || (record.kind !== 'folder' && record.kind !== 'page') || typeof record.name !== 'string' || (record.children !== undefined && !Array.isArray(record.children))) throw new Error('Hindsight knowledge tree response is invalid');
+      if (record.kind === 'page' && (typeof record.mental_model_id !== 'string' || !(record.description === null || typeof record.description === 'string'))) throw new Error('Hindsight knowledge tree page response is invalid');
+      if (record.children !== undefined) record.children = validate(record.children as unknown[]);
+      return record;
+    });
+    return validate(roots);
   }
 
-  async getDocument(documentId: string): Promise<unknown> {
-    return this.get(`${this.bankUrl()}/documents/${encodeURIComponent(documentId)}`);
+  async getKnowledgePage(pageId: string): Promise<Record<string, unknown>> {
+    const result = await this.get(`${this.bankUrl()}/knowledge-base/pages/${encodeURIComponent(pageId)}`);
+    const page = asRecord(result);
+    if (!page || page.id !== pageId || typeof page.name !== 'string' || !(page.body === null || typeof page.body === 'string') || typeof page.markdown !== 'string' || typeof page.description !== 'string') throw new Error('Hindsight knowledge page response is invalid');
+    return page;
   }
 
-  async retainPersonProfile(key: string, content: string, canonicalName: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/memories`, { async: false, items: [{ content, context: `Person profile for ${canonicalName} (${key})`, document_id: `butler-person:${key}`, update_mode: 'replace', tags: ['butler-person'], entities: [{ text: canonicalName, type: 'PERSON' }], resolve_entities: false, metadata: { person_key: key, canonical_name: canonicalName, document_type: 'person_profile' } }] });
-    const record = asRecord(result);
-    if (record?.success !== true || record.async !== false || record.items_count !== 1) throw new Error('Hindsight profile retain response is invalid or incomplete');
-    return result;
-  }
-
-  async deleteDocument(documentId: string): Promise<unknown> {
-    const { response, trace } = await this.request(`${this.bankUrl()}/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' }, 'document_delete');
-    const body = await this.readResponse(response, trace);
-    if (!response.ok) { this.finishTrace(trace, { failedStage: 'http_status' }); throw new Error(`Hindsight returned HTTP ${response.status}`); }
+  async createKnowledgePage(data: { name: string; source_query: string; tags: string[]; trigger: Record<string, unknown> }): Promise<Record<string, unknown>> {
     let result: unknown;
-    try { result = this.parseResponse(body, trace); } catch { throw new Error(`Hindsight document delete response is invalid JSON (HTTP ${response.status}); outcome unknown`); }
+    try { result = await this.post(`${this.bankUrl()}/knowledge-base/pages`, data); }
+    catch (error) {
+      if (error instanceof Error && /HTTP 4\d\d/.test(error.message)) throw error;
+      throw new Error(`Hindsight knowledge page create outcome unknown: ${safeError(error)}`);
+    }
+    const page = asRecord(result);
+    if (!page || typeof page.page_id !== 'string' || typeof page.mental_model_id !== 'string' || typeof page.operation_id !== 'string') throw new Error('Hindsight knowledge page create response is invalid; outcome unknown');
+    return page;
+  }
+
+  async updateKnowledgePage(pageId: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
+    let request: { response: Response; trace: RequestTiming };
+    try { request = await this.request(`${this.bankUrl()}/knowledge-base/nodes/${encodeURIComponent(pageId)}`, { method: 'PATCH', body: JSON.stringify(data) }, 'knowledge_page_update'); }
+    catch (error) { throw new Error(`Hindsight knowledge page update outcome unknown: ${safeError(error)}`); }
+    return this.readMutation<Record<string, unknown>>(request.response, request.trace, 'Hindsight knowledge page update', value => value.id === pageId && value.kind === 'page' && typeof value.name === 'string' && typeof value.mental_model_id === 'string');
+  }
+
+  async refreshKnowledgePage(mentalModelId: string): Promise<{ operation_id: string; status: 'queued' }> {
+    let result: unknown;
+    try { result = await this.post(`${this.bankUrl()}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`, {}); }
+    catch (error) { throw new Error(`Hindsight knowledge page refresh outcome unknown: ${safeError(error)}`); }
+    const refresh = asRecord(result);
+    if (!refresh || typeof refresh.operation_id !== 'string' || refresh.status !== 'queued') throw new Error('Hindsight knowledge page refresh response is invalid; outcome unknown');
+    return { operation_id: refresh.operation_id, status: 'queued' };
+  }
+
+  async deleteKnowledgePage(pageId: string): Promise<{ status: 'deleted' }> {
+    let request: { response: Response; trace: RequestTiming };
+    try { request = await this.request(`${this.bankUrl()}/knowledge-base/nodes/${encodeURIComponent(pageId)}`, { method: 'DELETE' }, 'knowledge_page_delete'); }
+    catch (error) { throw new Error(`Hindsight knowledge page delete outcome unknown: ${safeError(error)}`); }
+    await this.readMutation<Record<string, unknown>>(request.response, request.trace, 'Hindsight knowledge page delete', value => value.status === 'deleted');
+    return { status: 'deleted' };
+  }
+
+  private async readMutation<T extends Record<string, unknown>>(response: Response, trace: RequestTiming, label: string, valid: (value: Record<string, unknown>) => boolean): Promise<T> {
+    let body: string;
+    try { body = await this.readResponse(response, trace); }
+    catch (error) { throw new Error(`${label} outcome unknown while reading response: ${safeError(error)}`); }
+    if (!response.ok) { this.finishTrace(trace, { failedStage: 'http_status' }); throw new Error(`${label} returned HTTP ${response.status}${response.status >= 500 ? '; outcome unknown' : ''}`); }
+    let result: unknown;
+    try { result = this.parseResponse(body, trace); } catch { throw new Error(`${label} response is invalid JSON (HTTP ${response.status}); outcome unknown`); }
     this.finishTrace(trace);
     const record = asRecord(result);
-    if (record?.success !== true || record.document_id !== documentId || !Number.isSafeInteger(record.memory_units_deleted) || (record.memory_units_deleted as number) < 0) {
-      throw new Error('Hindsight document delete response is invalid or incomplete; outcome unknown');
-    }
-    return result;
+    if (!record || !valid(record)) throw new Error(`${label} response is invalid or incomplete; outcome unknown`);
+    return record as T;
   }
 
   async submitConversationBatch(payload: ConversationRetainPayload): Promise<Record<string, unknown>> {
