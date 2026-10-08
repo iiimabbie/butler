@@ -22,7 +22,7 @@ const definitions = [
   definition('local_search', 'Search literal content or filenames. mode selects content (default) or filename; offsets count matches. Each page rescans current data and results indicate incomplete scans. Relative paths use the Butler project root.', { path: string, query: string, mode: { type: 'string', enum: ['content', 'filename'] }, ...page }, ['path', 'query']),
   definition('local_write', 'Create a UTF-8 file or overwrite it with overwrite=true. Parent directories are not created; relative paths use the Butler project root.', { path: string, content: string, overwrite: boolean }, ['path', 'content']),
   definition('local_edit', 'Replace exact UTF-8 text; old_text must match once unless replace_all=true. Relative paths use the Butler project root.', { path: string, old_text: string, new_text: string, replace_all: boolean }, ['path', 'old_text', 'new_text']),
-  definition('local_shell', 'Run /bin/sh with host permissions and inherited environment; it is not sandboxed. cwd defaults to the Butler project root. Foreground runs return results; background runs return a task ID for local_process_output. Tasks do not survive service restart.', { command: string, cwd: string, timeout_ms: integer, background: boolean }, ['command']),
+  definition('local_shell', 'Run /bin/sh with host permissions and inherited environment; it is not sandboxed. Omit cwd or pass an empty string ("") or "." to use the Butler project root; other relative cwd paths resolve from that root. Foreground runs return results; background runs return a task ID for local_process_output. Tasks do not survive service restart.', { command: string, cwd: { type: 'string', description: 'Working directory. Omit, use "", or use "." for the Butler project root. Other relative paths resolve from that root; absolute paths are used as supplied.' }, timeout_ms: integer, background: boolean }, ['command']),
   definition('local_process_output', 'Read task status and stdout/stderr records. Offset counts records; when status is running and next_offset is null, continue from output_offset. Tasks do not survive service restart.', { task_id: string, ...page }, ['task_id']),
   definition('local_process_stop', 'Stop a task created by this runtime. For other existing host processes, use local_shell. Tasks do not survive service restart.', { task_id: string }, ['task_id']),
 ];
@@ -70,7 +70,8 @@ export class LocalToolRuntime {
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');
       const timeout = args.timeout_ms === undefined && background ? undefined : number(args.timeout_ms, 30_000, 1, 120_000, 'timeout_ms');
-      return this.processes.shell(text(args.command, 'command'), args.cwd === undefined ? this.root : this.path(args.cwd), timeout, background);
+      const cwd = args.cwd === undefined || args.cwd === '' ? this.root : resolve(this.root, text(args.cwd, 'cwd'));
+      return this.processes.shell(text(args.command, 'command'), cwd, timeout, background);
     }
     if (name === 'local_process_output') return this.processes.output(text(args.task_id, 'task_id'), number(args.offset, 0, 0, Number.MAX_SAFE_INTEGER, 'offset'), number(args.limit, 200, 1, 2000, 'limit'));
     if (name === 'local_process_stop') return this.processes.stop(text(args.task_id, 'task_id'));
