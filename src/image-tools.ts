@@ -1,7 +1,8 @@
 import { constants as fsConstants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, writeFile, copyFile, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { open, mkdir, writeFile, copyFile, unlink, realpath } from 'node:fs/promises';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface ImageConfig {
   baseUrl: string;
@@ -25,10 +26,12 @@ export interface ImageToolRuntime {
 
 const RESPONSE_LIMIT = 20 * 1024 * 1024;
 const REFERENCE_LIMIT = 20 * 1024 * 1024;
+const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const WORKSPACE_ROOT = resolve(PROJECT_ROOT, 'workspace');
 const generationDefinition = {
   type: 'function',
   name: 'image_generate',
-  description: 'Generate an image from a text prompt and save it temporarily. Then call image_save with the returned exact path and a readable semantic filename before replying with text and the queued attachment. For an image of yourself, use image_generate_self.',
+  description: 'Generate an image from a text prompt and save it temporarily. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then call image_save with the returned exact path and destination, and reply with text and the queued attachment. For an image of yourself, use image_generate_self.',
   parameters: {
     type: 'object',
     properties: { prompt: { type: 'string', minLength: 1, maxLength: 10_000 } },
@@ -39,7 +42,7 @@ const generationDefinition = {
 const selfDefinition = {
   type: 'function',
   name: 'image_generate_self',
-  description: 'Generate a new image of yourself. Write a detailed prompt describing the scene, action, and clothing; the tool automatically attaches your fixed reference photo, so do not look up or provide its path. The result must be a newly generated image, never the original photo. Save it with image_save before replying with text and the queued attachment.',
+  description: 'Generate a new image of yourself. Write a detailed prompt describing the scene, action, and clothing; the tool automatically attaches your fixed reference photo, so do not look up or provide its path. The result must be a newly generated image, never the original photo. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then save with image_save using its exact path and destination before replying with text and the queued attachment.',
   parameters: {
     type: 'object',
     properties: { prompt: { type: 'string', minLength: 1, maxLength: 10_000 } },
@@ -49,8 +52,8 @@ const selfDefinition = {
 };
 const saveDefinition = {
   type: 'function', name: 'image_save',
-  description: 'Save a newly generated temporary image using a readable semantic filename. After saving, reply with text and the queued attachment.',
-  parameters: { type: 'object', properties: { path: { type: 'string', minLength: 1 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['path', 'filename'], additionalProperties: false },
+  description: 'Save a newly generated temporary image to the model-chosen workspace destination. Before calling, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Prefer a suitable existing category subdirectory under workspace/picture/; use the picture root only when no category fits. Choose a semantic filename and workspace destination; workspace/picture/ is recommended, not the only allowed location. After saving, reply with text and the queued attachment.',
+  parameters: { type: 'object', properties: { path: { type: 'string', minLength: 1 }, destination: { type: 'string', minLength: 1 } }, required: ['path', 'destination'], additionalProperties: false },
 };
 
 export function createImageToolRuntime(options: {
@@ -69,14 +72,25 @@ export function createImageToolRuntime(options: {
     pendingImages: () => [...pending].map(([path, image]) => ({ path, filename: image.filename })),
     async execute(name, args) {
       if (name === 'image_save') {
-        if (Object.keys(args).some(key => key !== 'path' && key !== 'filename') || typeof args.path !== 'string' || typeof args.filename !== 'string') throw new Error('image_save requires only path and filename');
+        if (Object.keys(args).some(key => key !== 'path' && key !== 'destination') || typeof args.path !== 'string' || typeof args.destination !== 'string') throw new Error('image_save requires only path and destination');
         const image = pending.get(args.path);
         if (!image) throw new Error('image_save path must be an unsaved image generated by this runtime');
-        const filename = args.filename;
-        if (!filename || filename.length > 120 || filename === '.' || filename === '..' || /[\/\\\0-\x1f\x7f]/.test(filename) || !filename.toLowerCase().endsWith(`.${image.filename.split('.').at(-1)}`) || filename === image.filename) throw new Error('image_save filename must be a plain semantic filename with the generated image extension');
-        const destination = join(options.attachmentDir, filename);
+        const requestedDestination = args.destination;
+        if (!requestedDestination || /[\\\\\0-\x1f\x7f]/.test(requestedDestination)) throw new Error('image_save destination must not contain control characters, backslashes, or null bytes');
+        const filename = requestedDestination.split(/[\\/]/).at(-1) ?? '';
+        if (!filename || filename === '.' || filename === '..' || !filename.toLowerCase().endsWith(`.${image.filename.split('.').at(-1)}`) || filename === image.filename) throw new Error('image_save destination must have a semantic filename with the generated image extension');
+        const destination = resolve(isAbsolute(requestedDestination) ? requestedDestination : join(PROJECT_ROOT, requestedDestination));
+        const workspaceRelative = relative(WORKSPACE_ROOT, destination);
+        if (workspaceRelative === '..' || workspaceRelative.startsWith(`..${sep}`) || isAbsolute(workspaceRelative)) throw new Error('image_save destination must be inside workspace');
+        let realWorkspace: string;
+        let realParent: string;
+        try {
+          [realWorkspace, realParent] = await Promise.all([realpath(WORKSPACE_ROOT), realpath(dirname(destination))]);
+        } catch { throw new Error('image_save destination parent directory must already exist inside workspace'); }
+        const realRelative = relative(realWorkspace, realParent);
+        if (realRelative === '..' || realRelative.startsWith(`..${sep}`) || isAbsolute(realRelative)) throw new Error('image_save destination must be inside workspace');
         try { await copyFile(args.path, destination, fsConstants.COPYFILE_EXCL); }
-        catch { throw new Error('image_save could not create the named attachment without overwriting; generated image remains pending'); }
+        catch { throw new Error('image_save could not create the destination without overwriting; generated image remains pending'); }
         try { await unlink(args.path); }
         catch { throw new Error('image_save copied the named file but could not remove the temporary image; generated image remains pending and was not queued'); }
         pending.delete(args.path);
@@ -100,7 +114,7 @@ export function createImageToolRuntime(options: {
               ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
             },
             body: JSON.stringify({ model: config.model, prompt: args.prompt, n: 1, response_format: 'b64_json' }),
-            signal: AbortSignal.timeout(config.timeoutMs ?? 120_000),
+            signal: AbortSignal.timeout(config.timeoutMs ?? 300_000),
           });
         } else {
           const reference = await readIdentityReference(config.identityReferencePath!);
@@ -114,7 +128,7 @@ export function createImageToolRuntime(options: {
             method: 'POST',
             headers: { ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}) },
             body: form,
-            signal: AbortSignal.timeout(config.timeoutMs ?? 120_000),
+            signal: AbortSignal.timeout(config.timeoutMs ?? 300_000),
           });
         }
       } catch (error) {
@@ -122,7 +136,7 @@ export function createImageToolRuntime(options: {
         throw new Error('Image generation request outcome is unknown; do not retry automatically');
       }
 
-      const bytes = await readGeneratedImage(response);
+      const bytes = await readGeneratedImage(response, [config.apiKey, args.prompt]);
       const image = detectImage(bytes);
       if (!image) throw new Error('Image generation returned unrecognized image data; outcome is unknown and must not be retried automatically');
       const filename = `${randomUUID()}.${image.extension}`;
@@ -134,7 +148,7 @@ export function createImageToolRuntime(options: {
         throw new Error('Generated image could not be saved as an attachment; generation outcome is unknown and must not be retried automatically');
       }
       pending.set(path, { filename, mime: image.mime });
-      return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'Call image_save with this exact path and a readable semantic filename, then reply with text and the queued attachment.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
+      return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'First use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a workspace destination and semantic filename, preferring a suitable existing picture category subdirectory; use workspace/picture/ root only when no category fits. This is a recommendation, not a restriction. Then call image_save with this exact path and destination, and reply with text and the queued attachment.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
     },
   };
 }
@@ -158,10 +172,10 @@ async function readIdentityReference(path: string): Promise<{ bytes: Buffer; ext
   }
 }
 
-async function readGeneratedImage(response: Response): Promise<Buffer> {
+async function readGeneratedImage(response: Response, sensitive: Array<string | undefined>): Promise<Buffer> {
   try {
     const body = await readBoundedBody(response, RESPONSE_LIMIT);
-    if (!response.ok) throw new Error(`Image generation service returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(formatImageServiceError(response, body, sensitive));
     const payload: unknown = JSON.parse(body.toString('utf8'));
     if (!isRecord(payload) || !Array.isArray(payload.data) || !isRecord(payload.data[0]) || typeof payload.data[0].b64_json !== 'string') {
       throw new Error('Image generation returned no b64_json image; outcome is unknown and must not be retried automatically');
@@ -209,4 +223,32 @@ function detectImage(bytes: Buffer): { extension: 'png' | 'jpg' | 'webp'; mime: 
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+// Preserve bounded upstream diagnostics in the existing tool-error log.
+function formatImageServiceError(response: Response, body: Buffer, sensitive: Array<string | undefined>): string {
+  let detail: string;
+  try {
+    const payload: unknown = JSON.parse(body.toString('utf8'));
+    const error = isRecord(payload) && isRecord(payload.error) ? payload.error : payload;
+    if (isRecord(error)) {
+      detail = ['type', 'code', 'param', 'message']
+        .filter(key => typeof error[key] === 'string' || typeof error[key] === 'number')
+        .map(key => `${key}=${String(error[key])}`).join('; ');
+    } else detail = typeof error === 'string' ? error : '';
+  } catch { detail = body.toString('utf8'); }
+  const requestId = response.headers.get('x-request-id') ?? response.headers.get('request-id');
+  let diagnostic = `${requestId ? `request_id=${requestId}; ` : ''}${detail}`;
+  for (const value of sensitive) {
+    if (value) diagnostic = diagnostic.split(value).join('[redacted]');
+  }
+  diagnostic = diagnostic
+    .replace(/Bearer\s+[^\s"'<>;,]+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:sk|sess)-[a-zA-Z0-9_-]+/g, '[redacted]')
+    .replace(/(?:api[_-]?key|authorization|token|password)\s*[=:]\s*["']?[^\s"'<>;,]+/gi, '[redacted credential]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[redacted URL]')
+    .replace(/[A-Za-z0-9+/=_-]{100,}/g, '[redacted payload]')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .slice(0, 2000);
+  return `Image generation service returned HTTP ${response.status}${diagnostic ? `: ${diagnostic}` : ''}`;
 }

@@ -52,7 +52,7 @@ image:
   apiKey: YOUR_IMAGE_API_KEY
   model: gpt-image-2.5
   protocol: images
-  timeoutMs: 120000
+  timeoutMs: 300000
   # Optional absolute path; when set, image_generate_self always includes this reference.
   identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
 

@@ -74,7 +74,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
       validateHttpUrl(baseUrl, 'image.baseUrl');
       if (section.protocol !== 'images') throw new Error('Butler config image.protocol must be images');
       const timeoutMs = section.timeoutMs;
-      if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 120000)) throw new Error('Butler config image.timeoutMs must be an integer from 1 to 120000');
+      if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300000)) throw new Error('Butler config image.timeoutMs must be an integer from 1 to 300000');
       const identityReferencePath = string('identityReferencePath');
       if (identityReferencePath !== undefined && !isAbsolute(identityReferencePath)) throw new Error('Butler config image.identityReferencePath must be an absolute path');
       config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined, identityReferencePath };
