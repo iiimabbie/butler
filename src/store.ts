@@ -222,7 +222,7 @@ export class Store implements SchedulerStore {
   }
 
   createMemoryBatch(input: { operationId?: string; payload: string; sourceMessageIds: string[]; documentId: string; sessionId: string; channelId: string }): MemoryBatch {
-    if (!input.sourceMessageIds.length || input.sourceMessageIds.length > 20) throw new Error('A memory batch must contain 1–20 source turns');
+    if (!input.sourceMessageIds.length || input.sourceMessageIds.length > 10) throw new Error('A memory batch must contain 1–10 source turns');
     const operationId = input.operationId ?? randomUUID();
     this.db.exec('BEGIN IMMEDIATE');
     try {
@@ -260,7 +260,7 @@ export class Store implements SchedulerStore {
         if (!pending || pending.status !== 'pending') continue;
         if (this.db.prepare('SELECT message_id FROM memory_batch_sources WHERE message_id=?').get(m.id)) continue;
         if (pending.preparation !== 'ready') break;
-        messages.push(m); if (messages.length >= 20) break;
+        messages.push(m); if (messages.length >= 10) break;
       }
       if (!messages.length) return [];
       return [{ documentId: `butler:discord:${channel_id}:${session_id}`, sessionId: session_id, channelId: channel_id, messages }];

@@ -3,7 +3,7 @@ import { Store, type MemoryBatch } from './store.js';
 import { Hindsight, ConversationSubmissionError } from './hindsight.js';
 import { buildConversationPayload } from './conversation-format.js';
 
-const MAX_TURNS = 20;
+const MAX_TURNS = 10;
 const POLL_DELAYS = [5_000, 15_000, 30_000, 60_000] as const;
 
 type Prefix = ReturnType<Store['readyMemoryPrefixes']>[number];
