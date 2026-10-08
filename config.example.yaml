@@ -16,6 +16,9 @@ llm:
   baseUrl: https://your-cpa.example/v1
   apiKey: YOUR_CPA_API_KEY
   model: YOUR_CHAT_MODEL
+  maxContextTokens: 150000
+  modelContextTokens:
+    gpt-6.1-sol: 272000
 
 web:
   provider: tavily

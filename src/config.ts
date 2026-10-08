@@ -7,7 +7,7 @@ import type { ImageConfig } from './image-tools.js';
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
   discord?: { token?: string; ownerId?: string; channelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
-  llm?: { baseUrl?: string; apiKey?: string; model?: string };
+  llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
@@ -48,7 +48,11 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
-      config.llm = { baseUrl, apiKey: string('apiKey'), model: string('model') };
+      const maxContextTokens = section.maxContextTokens;
+      if (maxContextTokens !== undefined && (!Number.isSafeInteger(maxContextTokens) || (maxContextTokens as number) <= 0)) throw new Error('Butler config llm.maxContextTokens must be a positive integer');
+      const modelContextTokens = section.modelContextTokens;
+      if (modelContextTokens !== undefined && (!isRecord(modelContextTokens) || Object.entries(modelContextTokens).some(([model, limit]) => !model.trim() || !Number.isSafeInteger(limit) || (limit as number) <= 0))) throw new Error('Butler config llm.modelContextTokens must map model IDs to positive integers');
+      config.llm = { baseUrl, apiKey: string('apiKey'), model: string('model'), maxContextTokens: (maxContextTokens as number | undefined) ?? 150000, modelContextTokens: (modelContextTokens as Record<string, number> | undefined) ?? {} };
     } else if (name === 'web') {
       if (section.provider !== 'tavily') throw new Error('Butler config web.provider must be tavily');
       const baseUrl = string('baseUrl');

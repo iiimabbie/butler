@@ -30,7 +30,7 @@ import { logError, withoutErrorLogMention } from './error-log.js';
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string };
+export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean; isBot?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
@@ -224,7 +224,7 @@ export class DiscordHandler {
             catch (error) { logSafe('Discord referenced message could not be retrieved', error); }
           }
           await this.runAsk(this.store, state.sessionId, userContent, {
-            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model,
+            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
             transcriptTimezone: runtime.settings.schedule?.timezone,
             messageSource: prepared.source,
             storedInput: stored,
@@ -360,6 +360,7 @@ export class DiscordHandler {
         { name: 'Reply mode', value: `${this.store.channelReplyMode(context.channelId) ?? 'inherit'}（effective ${this.store.effectiveReplyMode(context.channelId, context.parentChannelId)}）` },
         { name: '🤖 Bot Reply', value: this.store.botReplyEnabled() ? 'true' : 'false' },
         { name: '⚙️ Processing Status', value: this.queueStatus(context.channelId) === 'busy' ? 'Busy' : 'Idle' },
+        { name: 'Context usage', value: formatContextUsage(this.store.contextUsage(state.sessionId), state.model, config) },
       ).toJSON();
       await context.reply('', { embed });
       return;
@@ -407,6 +408,7 @@ export class DiscordHandler {
           const opening = await this.readOpeningMessage(context.channelId);
           if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，未執行壓縮。'); return; }
           this.store.saveSessionOpeningContext(current.sessionId, opening);
+          this.store.clearContextUsage(current.sessionId);
           const result = await compactSession(this.store, current.sessionId, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: current.model, reasoningEffort: this.store.channelReasoningEffort(context.channelId), keepRecent: 10 });
           if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 10 則訊息會保留。');
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
@@ -548,6 +550,8 @@ export class DiscordHandler {
         baseUrl: commandRuntime.discord.baseUrl,
         apiKey: commandRuntime.discord.apiKey,
         model: state.model,
+        maxContextTokens: config.maxContextTokens,
+        modelContextTokens: config.modelContextTokens,
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
         reasoningEffort: this.store.channelReasoningEffort(request.job.sourceChannelId),
@@ -676,6 +680,8 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     baseUrl: requireSetting(config.llm?.baseUrl, 'llm.baseUrl'),
     apiKey: config.llm?.apiKey,
     attachmentDir: requireSetting(config.paths?.attachments, 'paths.attachments'),
+    maxContextTokens: config.llm?.maxContextTokens ?? 150000,
+    modelContextTokens: config.llm?.modelContextTokens ?? {},
   };
 }
 
@@ -973,6 +979,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     if (uiStartupFailed) throw new Error('UI startup failed; Discord was not connected', { cause: error });
     throw new Error('Discord login failed', { cause: error });
   }
+}
+
+function formatContextUsage(sample: ReturnType<Store['contextUsage']>, model: string, config: DiscordConfig): string {
+  if (!sample) return '尚無 Responses usage 實測';
+  const limit = sample.contextLimit;
+  const pct = `${Math.round(sample.inputTokens / limit * 1000) / 10}%`;
+  const currentLimit = config.modelContextTokens[model] ?? config.maxContextTokens;
+  const stale = sample.model !== model || sample.baseUrl !== config.baseUrl || currentLimit !== sample.contextLimit ? '；舊模型／入口／上限，不能作為目前百分比' : '';
+  return `${sample.inputTokens} input / ${sample.outputTokens} output；${sample.model}；${sample.limitSource} ${limit} tokens；${pct}；${sample.sampledAt}；Responses usage${stale}`;
 }
 
 function logSafe(context: string, error?: unknown): void {

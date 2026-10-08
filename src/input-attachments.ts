@@ -6,11 +6,10 @@ import type { MessageInputAttachment, StoredMessage } from './store.js';
 
 export type DiscordAttachmentInput = { id: string; url: string; name: string; contentType?: string | null; size?: number };
 export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
-export type AttachmentInputErrorCode = 'context_limit' | 'request_rejected';
+export type AttachmentInputErrorCode = 'request_rejected';
 export class AttachmentInputError extends Error {
-  constructor(readonly code: AttachmentInputErrorCode, readonly status?: number) {
-    super(code === 'context_limit' ? '目前上下文原檔總量超過 20 MiB，請使用 /compact 或 /new 後重試。'
-      : `原檔請求被目前模型／入口拒絕，沒有轉文字或換模型（HTTP ${status ?? 'unknown'}）。`);
+  constructor(readonly code: AttachmentInputErrorCode, readonly status?: number, options?: ErrorOptions) {
+    super(`原檔請求被目前模型／入口拒絕，沒有轉文字或換模型（HTTP ${status ?? 'unknown'}）。`, options);
     this.name = 'AttachmentInputError';
   }
 }
@@ -24,7 +23,6 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
   let directoryError = false;
   try { dir = join(resolve(attachmentDir), 'incoming'); mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700); if (!statSync(dir).isDirectory()) throw new Error(); }
   catch { directoryError = true; }
-  let total = 0;
   const result: InputAttachment[] = [];
   for (const item of items) {
     const mimeType = safeMime(item.contentType) ?? MIME_EXTENSIONS[extension(item.name)] ?? 'application/octet-stream';
@@ -32,17 +30,16 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
     try {
       if (directoryError || !dir) throw new Error('storage');
       validateUrl(item.url);
-      if (base.size > MAX_ATTACHMENT_BYTES || total + base.size > MAX_ATTACHMENT_BYTES) throw new Error('limit');
+      if (base.size > MAX_ATTACHMENT_BYTES) throw new Error('limit');
       const response = await download(item.url);
       if (!response.ok || !response.body) throw new Error('http');
       const declared = Number(response.headers.get('content-length'));
       if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES) throw new Error('limit');
       const chunks: Buffer[] = []; let bytes = 0;
       const reader = response.body.getReader();
-      try { while (true) { const { done, value } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_ATTACHMENT_BYTES || total + bytes > MAX_ATTACHMENT_BYTES) { await reader.cancel(); throw new Error('limit'); } chunks.push(Buffer.from(value)); } } finally { reader.releaseLock(); }
+      try { while (true) { const { done, value } = await reader.read(); if (done) break; bytes += value.byteLength; if (bytes > MAX_ATTACHMENT_BYTES) { await reader.cancel(); throw new Error('limit'); } chunks.push(Buffer.from(value)); } } finally { reader.releaseLock(); }
       const path = join(dir, `${randomUUID()}.bin`);
       await writeFile(path, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
-      total += bytes;
       result.push({ ...base, mimeType: safeMime(response.headers.get('content-type')) ?? base.mimeType, size: bytes, status: 'ready', localPath: path });
     } catch (error) { result.push({ ...base, error: safeDownloadError(error) }); }
   }
@@ -65,17 +62,12 @@ function extension(name: string): string { const dot = name.lastIndexOf('.'); re
 function cleanFilename(name: string): string { return name.replace(/[\\/\0-\x1f\x7f]/g, '_').slice(0, 240) || 'attachment'; }
 function safeDownloadError(error: unknown): string {
   if (!(error instanceof Error)) return '下載失敗';
-  if (error.message === 'limit') return '超過單檔或本回合 20 MiB 限制';
+  if (error.message === 'limit') return '超過單檔 20 MiB 限制';
   if (error.message === 'source') return '附件來源不是允許的 Discord CDN';
   if (error.message === 'storage') return '附件無法保存到受控目錄';
   if (error.message === 'redirect') return '附件重新導向無效或超過限制';
   if (error.name === 'TimeoutError' || error.name === 'AbortError') return '附件下載逾時';
   return '附件下載失敗';
-}
-
-export function assertAttachmentContextLimit(messages: StoredMessage[]): void {
-  const total = messages.flatMap(message => message.attachments ?? []).filter(file => file.status === 'ready').reduce((sum, file) => sum + file.size, 0);
-  if (total > MAX_ATTACHMENT_BYTES) throw new AttachmentInputError('context_limit');
 }
 
 export function messageAttachmentContent(message: StoredMessage, attachmentDir: string): unknown[] {
@@ -92,7 +84,7 @@ export function messageAttachmentContent(message: StoredMessage, attachmentDir: 
         data = readFileSync(fd).toString('base64');
       } finally { closeSync(fd); }
     } catch {
-      content.push({ type: 'input_text', text: `[附件未讀取：${attachment.filename}；請用 /compact 或 /new 清除舊附件上下文後重傳原檔。]` });
+      content.push({ type: 'input_text', text: `[附件未讀取：${attachment.filename}；原檔無法讀取，請重新提供。]` });
       continue;
     }
     if (attachment.mimeType.startsWith('image/')) content.push({ type: 'input_image', image_url: `data:${attachment.mimeType};base64,${data}` });
