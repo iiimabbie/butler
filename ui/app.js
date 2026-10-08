@@ -5,6 +5,7 @@ let sessionDetails = new Map();
 let selectedKind = 'messages';
 let activeTab = 'sessions';
 let sessionOffset = 0;
+let sessionState = 'active';
 let recordOffset = 0;
 let rawRequestBody = null;
 let sessionRequestId = 0;
@@ -41,15 +42,15 @@ function formatTime(value) {
 
 async function loadSessions(append = false) {
   const offset = append ? sessionOffset : 0;
-  const pageKey = String(offset);
+  const pageKey = `${sessionState}:${offset}`;
   if (append && pendingSessionPages.has(pageKey)) return;
   const requestId = ++sessionRequestId;
   if (append) pendingSessionPages.add(pageKey);
   else sessionOffset = 0;
 
   try {
-    setStatus('載入 Session…');
-    const data = await getJson(`api/sessions?offset=${offset}`);
+    setStatus(`載入${sessionState === 'active' ? '目前' : '封存'} Session…`);
+    const data = await getJson(`api/sessions?state=${sessionState}&offset=${offset}`);
     if (requestId !== sessionRequestId) return;
 
     const host = $('#session-list');
@@ -70,7 +71,7 @@ async function loadSessions(append = false) {
     }
     sessionOffset = data.next_offset ?? offset;
     $('#more-sessions').hidden = data.next_offset === null;
-    setStatus(data.items.length ? 'Session 已載入。' : '目前沒有 Session。');
+    setStatus(data.items.length ? 'Session 已載入。' : sessionState === 'active' ? '目前沒有使用中的 Session。' : '目前沒有封存 Session。');
   } catch (error) {
     if (requestId === sessionRequestId) setStatus(`載入 Session 失敗：${error.message}`);
   } finally {
@@ -219,6 +220,31 @@ document.querySelectorAll('[data-tab]').forEach(button => {
       latestRequestId++;
       setStatus('就緒。');
     }
+  };
+});
+
+document.querySelectorAll('[data-session-state]').forEach(button => {
+  button.onclick = () => {
+    const nextState = button.dataset.sessionState;
+    if (nextState === sessionState) return;
+    sessionState = nextState;
+    selectedSession = null;
+    sessionOffset = 0;
+    recordOffset = 0;
+    sessionDetails = new Map();
+    $('#session-list').replaceChildren();
+    $('#more-sessions').hidden = true;
+    recordRequestId++;
+    $('#session-title').textContent = '選擇一個 Session';
+    $('#session-title').removeAttribute('title');
+    $('#records').replaceChildren();
+    $('#more-records').hidden = true;
+    document.querySelectorAll('[data-session-state]').forEach(tab => {
+      const selected = tab === button;
+      tab.classList.toggle('selected', selected);
+      tab.setAttribute('aria-pressed', String(selected));
+    });
+    void loadSessions(false);
   };
 });
 

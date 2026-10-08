@@ -225,6 +225,7 @@ export class DiscordHandler {
           }
           await this.runAsk(this.store, state.sessionId, userContent, {
             baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model,
+            transcriptTimezone: runtime.settings.schedule?.timezone,
             messageSource: prepared.source,
             storedInput: stored,
             consumedSteerMessageIds: this.consumedSteerMessageIds.get(stored.sessionId),
@@ -547,6 +548,7 @@ export class DiscordHandler {
         baseUrl: commandRuntime.discord.baseUrl,
         apiKey: commandRuntime.discord.apiKey,
         model: state.model,
+        transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
         reasoningEffort: this.store.channelReasoningEffort(request.job.sourceChannelId),
         hindsight: commandRuntime.hindsight,

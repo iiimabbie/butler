@@ -58,6 +58,11 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
       if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, headers).end(); return; }
       if (pathname === '/api/sessions') {
         const offset = numberParam(url.searchParams.get('offset'), 0);
+        const state = url.searchParams.get('state') ?? 'active';
+        if (state !== 'active' && state !== 'archived') throw new URIError('invalid session state');
+        const stateFilter = state === 'active'
+          ? 'EXISTS (SELECT 1 FROM channel_state cs WHERE cs.session_id=s.id)'
+          : 'NOT EXISTS (SELECT 1 FROM channel_state cs WHERE cs.session_id=s.id)';
         const rows = db.prepare(`SELECT s.id,s.created_at,(SELECT substr(content,1,120) FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest_preview,
           COALESCE((SELECT MAX(COALESCE(ms.event_time,m.created_at)) FROM messages m LEFT JOIN message_sources ms ON ms.message_id=m.id WHERE m.session_id=s.id),s.created_at) last_active_at,
           (SELECT channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) channel_id,
@@ -66,7 +71,7 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
           (SELECT NULLIF(bot_id,'') FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) bot_id,
           (SELECT cs.model FROM channel_state cs WHERE cs.channel_id=(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)) current_model,
           (SELECT CASE WHEN cs.model IS NULL THEN 1 ELSE 0 END FROM channel_state cs WHERE cs.channel_id=(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)) uses_default_model
-          FROM sessions s ORDER BY s.rowid DESC LIMIT 51 OFFSET ?`).all(offset) as Record<string, unknown>[];
+          FROM sessions s WHERE ${stateFilter} ORDER BY s.rowid DESC LIMIT 51 OFFSET ?`).all(offset) as Record<string, unknown>[];
         const more = rows.length > 50;
         const items = rows.slice(0, 50);
         const channelIds = [...new Set(items.map(row => row.channel_id).filter((id): id is string => typeof id === 'string' && id.length > 0))];

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
+import type { TranscriptEntry } from './journal-transcript.js';
 
 export type ChannelReplyMode = 'all' | 'mention';
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'auto';
@@ -291,6 +292,29 @@ export class Store implements SchedulerStore {
 
   messages(session: string): Message[] {
     return this.db.prepare('SELECT role,content FROM messages WHERE session_id=? ORDER BY rowid').all(session) as unknown as Message[];
+  }
+
+  transcriptCandidates(start: string, end: string): TranscriptEntry[] {
+    return this.db.prepare(`
+      SELECT m.id,m.session_id AS sessionId,COALESCE(s.channel_id,'') AS channelId,
+        COALESCE(s.discord_message_id,'') AS discordMessageId,COALESCE(s.author_id,'') AS authorId,
+        COALESCE(s.author_name,s.author_id,'未知作者') AS authorName,
+        COALESCE(s.event_time,m.created_at) AS timestamp,m.content
+      FROM messages m JOIN message_sources s ON s.message_id=m.id
+      WHERE m.role='user' AND s.source_kind='discord_external'
+        AND julianday(COALESCE(s.event_time,m.created_at)) >= julianday(?)
+        AND julianday(COALESCE(s.event_time,m.created_at)) < julianday(?)
+        AND s.discord_message_id IS NOT NULL
+      UNION ALL
+      SELECT m.id,m.session_id AS sessionId,seg.channel_id AS channelId,
+        seg.discord_message_id AS discordMessageId,COALESCE(s.author_id,'') AS authorId,
+        COALESCE(s.author_name,s.author_id,'Butler') AS authorName,seg.created_at AS timestamp,seg.content
+      FROM messages m JOIN message_sources s ON s.message_id=m.id
+        JOIN discord_outgoing_segments seg ON seg.message_id=m.id
+      WHERE m.role='assistant' AND s.source_kind IN ('butler_reply','butler_tool_message')
+        AND julianday(seg.created_at) >= julianday(?) AND julianday(seg.created_at) < julianday(?)
+      ORDER BY timestamp,sessionId,discordMessageId
+    `).all(start, end, start, end) as unknown as TranscriptEntry[];
   }
 
   messagesWithSources(session: string): StoredMessage[] {

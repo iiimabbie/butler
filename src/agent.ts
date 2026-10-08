@@ -15,10 +15,13 @@ import { Hindsight } from './hindsight.js';
 import type { MessageInputAttachment } from './store.js';
 import { logError } from './error-log.js';
 import { assertAttachmentContextLimit, AttachmentInputError, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from './input-attachments.js';
+import { DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
+import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
 
 export interface AgentConfig {
   baseUrl: string;
   apiKey?: string;
+  transcriptTimezone?: string;
   model: string;
   fetcher?: typeof fetch;
   timeoutMs?: number;
@@ -67,6 +70,13 @@ const historyPageSchema = {
   additionalProperties: false,
 };
 
+const transcriptPageSchema = {
+  type: 'object',
+  properties: { date: { type: 'string', description: '完整日期 YYYY-MM-DD' }, offset: { type: 'integer' }, limit: { type: 'integer' } },
+  required: ['date'],
+  additionalProperties: false,
+};
+
 const WRAP_UP_REMINDER_TURN = 45;
 
 const tools = [
@@ -86,6 +96,7 @@ const tools = [
     type: 'function', name: 'history_search', description: 'Search stored tool-call records across sessions by tool name, arguments or result text using SQLite LIKE matching (% matches any sequence; _ matches one character). This searches operation records, not conversation messages or semantic memory. Results are newest first; offset counts records (default 0), limit defaults to 20, maximum 100. Results include 500-character previews; use the page next_offset for more records and history_get for complete result content.',
     parameters: { type: 'object', properties: { query: { type: 'string' }, ...historyPageSchema.properties }, required: ['query'], additionalProperties: false },
   },
+  { type: 'function', name: 'journal_transcript_by_date', description: 'Read Butler-recorded pure Discord conversation text for a complete YYYY-MM-DD date across all current and archived sessions, including human and third-party bot messages and Butler text actually delivered to Discord. The date uses the configured schedule timezone. This reads conversation, not tool calls/results or long-term memory; internal scheduled inputs are excluded. Results can change as later messages arrive. offset is a character offset (default 0), limit defaults to 4000 and maximum 100000; continue from next_offset until null. Records include only content Butler has captured.', parameters: { ...transcriptPageSchema, properties: { ...transcriptPageSchema.properties, date: { type: 'string', description: '完整日期 YYYY-MM-DD' } } } },
   { type: 'function', name: 'memory_recall', description: 'Retrieve relevant memories from shared long-term conversation history across sessions. Use to remember past conversations, preferences, relationships, decisions, experiences, and ongoing activities. Include relevant people, topics, Discord account IDs, or time context in the query when useful. Returns matching memory records rather than a complete conversation log. Use remembered information naturally without unnecessary evidence disclaimers. An empty result does not establish that something never happened.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'memory_reflect', description: 'Synthesize useful answers from shared long-term memories, including personal preferences, relationships, past decisions, changing circumstances, and connections across conversations. Ask a specific question identifying relevant people, topics, and dates when useful. Returns a generated synthesis with supporting memory references. Answer naturally and prioritize useful information over repetitive evidence qualifications. Preserve meaningful uncertainty, corrections, and contradictions without inventing missing facts. Use memory_recall when individual memory records are needed.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
 ];
@@ -319,7 +330,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
       const attachmentIds = config.discordTools?.context.attachmentToolCallIds;
       if (attachmentIds && Array.isArray(attachmentIds)) attachmentIds.push(id);
     } else {
-      result = runTool(store, session, call.name, runtimeArgs);
+      result = runTool(store, session, call.name, runtimeArgs, config.transcriptTimezone ?? DEFAULT_SCHEDULE_TIMEZONE);
     }
   } catch (error) {
     logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error);
@@ -341,8 +352,13 @@ function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   catch (error) { logError('Agent progress callback failed', error); }
 }
 
-function runTool(store: Store, session: string, name: string, args: Record<string, unknown>): unknown {
+function runTool(store: Store, session: string, name: string, args: Record<string, unknown>, transcriptTimezone: string): unknown {
   if (name === 'current_time') return { iso: new Date().toISOString(), local: new Date().toString() };
+  if (name === 'journal_transcript_by_date') {
+    const date = validateTranscriptDate(args.date);
+    const { offset, limit } = pageArgs(args, 4000, 100_000);
+    return formatTranscript(store, date, transcriptTimezone, offset, limit);
+  }
   if (name === 'history_list') {
     const sessionId = args.session_id === undefined ? session : requiredString(args.session_id, 'session_id');
     const { offset, limit } = pageArgs(args);
