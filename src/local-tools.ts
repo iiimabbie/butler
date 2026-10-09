@@ -82,7 +82,21 @@ export class LocalToolRuntime {
     if (name === 'local_write') {
       const content = text(args.content, 'content', true);
       checkSize(content);
-      await writeFile(path, content, { encoding: 'utf8', flag: bool(args.overwrite, false, 'overwrite') ? 'w' : 'wx' });
+      const overwrite = bool(args.overwrite, false, 'overwrite');
+      // Classify only safe open rejections: no file was opened or mutated.
+      // Write/close failures must remain operational errors, regardless of their code.
+      const file = await open(path, overwrite ? 'w' : 'wx').catch((error: unknown) => {
+        const code = (error as NodeJS.ErrnoException)?.code;
+        if (!overwrite && code === 'EEXIST') {
+          throw new ToolUsageError('File already exists (EEXIST); file unchanged. Read it first, then use local_edit or explicitly set overwrite=true if replacement is intended.', { cause: error });
+        }
+        if (code === 'ENOENT' || code === 'ENOTDIR') {
+          throw new ToolUsageError(`Cannot open file (${code}); file unchanged. Check the target path and ensure its parent directories exist and are directories before retrying. local_write does not create parent directories.`, { cause: error });
+        }
+        throw error;
+      });
+      try { await file.writeFile(content, 'utf8'); }
+      finally { await file.close(); }
       return { path: await realpath(path), bytes_written: Buffer.byteLength(content) };
     }
     if (name === 'local_edit') {
