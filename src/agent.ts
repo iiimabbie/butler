@@ -1,4 +1,5 @@
 import { ToolUsageError } from './tool-errors.js';
+import { requestModel } from './model-request.js';
 import type { Store, ToolRecord } from './store.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type { DiscordToolRuntime } from './discord-tools.js';
@@ -320,8 +321,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${config.modelContextTokens?.[config.model] ? 'model limit' : 'configured budget'}; stopping before request.`);
       const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       store.saveLatestRequest(session, JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), new Date().toISOString());
-      const response = await fetcher(`${config.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(config.timeoutMs ?? 60_000), body: requestBody });
-      const raw: unknown = await response.json().catch(() => null);
+      const { response, raw } = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher });
       if (!response.ok) {
         const serviceError = isRecord(raw) ? raw.error : undefined;
         const details = typeof serviceError === 'string' ? serviceError : isRecord(serviceError) ? ['type', 'code', 'message'].filter(key => typeof serviceError[key] === 'string').map(key => `${key}=${serviceError[key]}`).join(' ') : '';
