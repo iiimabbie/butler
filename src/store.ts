@@ -413,7 +413,7 @@ export class Store implements SchedulerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  answerSubagentQuestion(id: string, callId: string, answer: string): boolean {
+  answerSubagentQuestion(id: string, callId: string, answer: string, stopRequested?: { reason: string; requestedAt: string }): boolean {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const row = this.db.prepare('SELECT input_json FROM subagent_windows WHERE id=?').get(id) as { input_json: string } | undefined;
@@ -431,9 +431,10 @@ export class Store implements SchedulerStore {
       if (run) {
         const snapshot = JSON.parse(run.snapshot_json) as Record<string, unknown>;
         delete snapshot.question;
-        snapshot.status = 'running';
+        if (stopRequested) snapshot.stopRequested = stopRequested;
+        snapshot.status = snapshot.stopRequested ? 'stopping' : 'running';
         snapshot.updatedAt = now;
-        this.db.prepare("UPDATE subagent_runs SET status='running',snapshot_json=?,updated_at=? WHERE id=?").run(JSON.stringify(snapshot), now, id);
+        this.db.prepare('UPDATE subagent_runs SET status=?,snapshot_json=?,updated_at=? WHERE id=?').run(snapshot.status as string, JSON.stringify(snapshot), now, id);
       }
       this.db.exec('COMMIT');
       return !hasOutput;

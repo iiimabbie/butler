@@ -79,7 +79,7 @@ export class DiscordHandler {
       persistMessage: (id, message) => this.store.enqueueSubagentMessage(id, message),
       loadMessages: id => this.store.pendingSubagentMessages(id),
       consumeMessages: (id, messages, input) => this.store.consumeSubagentInbox(id, messages, input),
-      persistAnswer: (id, callId, answer) => { this.store.answerSubagentQuestion(id, callId, answer); },
+      persistAnswer: (id, callId, answer, stopRequested) => { this.store.answerSubagentQuestion(id, callId, answer, stopRequested); },
       onIdle: () => { if (this.deploying) void this.publishQuiesced(); else if (!this.stopping) this.localTools?.startQueuedDeploy(); },
     }, this.store.allSubagentRuns() as unknown as import('./subagent-coordinator.js').SubagentSnapshot[], this.store.pendingSubagentEvents() as unknown as SubagentEvent[]);
     this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0 && this.subagentCoordinator.prepareQueuedDeploy());
