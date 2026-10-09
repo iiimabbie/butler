@@ -286,7 +286,8 @@ export class DiscordHandler {
             onAskFinishing: () => this.activeAsk.delete(message.channelId),
             onResponseReady: async text => {
               stopTyping?.();
-              if (text.includes('[no_reply]')) {
+              if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
+                console.info(`Discord reply discarded ${JSON.stringify({ entry: 'normal', channelId: message.channelId, sessionId: state.sessionId, messageId: message.messageId, inputId: stored.id, reason: 'unquoted_no_reply_marker', text })}`);
                 if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
                 return;
               }
@@ -605,7 +606,8 @@ export class DiscordHandler {
         discordContext: { channelId: request.outputChannelId },
         onProgress: event => progress.event(event),
         onResponseReady: async text => {
-          if (text.includes('[no_reply]')) {
+          if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
+            console.info(`Discord reply discarded ${JSON.stringify({ entry: 'scheduled', channelId: request.outputChannelId, sessionId: session, inputId: storedInput.id, reason: 'unquoted_no_reply_marker', text })}`);
             if (attachmentToolCallIds.length) { deliveryAuditAttempted = true; this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent'); }
             return;
           }
@@ -683,7 +685,8 @@ export class DiscordHandler {
           subagentCoordinator: this.subagentCoordinator, subagentOrigin: origin, subagentEvent: true,
           discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: origin.outputChannelId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
           onResponseReady: async text => {
-            if (text.includes('[no_reply]') || (!text && !attachmentFiles.length)) {
+            if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
+              if (text) console.info(`Discord reply discarded ${JSON.stringify({ entry: 'subagent_event', channelId: origin.outputChannelId, sessionId: event.parentSession, inputId: storedInput.id, eventId: event.id, reason: 'unquoted_no_reply_marker', text })}`);
               if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
               return;
             }
