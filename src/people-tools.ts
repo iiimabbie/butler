@@ -48,13 +48,13 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
       const key = personKey(text(args.key, 'key'));
       if (name === 'people_get') {
         const page = await getPerson(hindsight, key);
-        if (!page) throw new Error(`Person page not found for key ${key}`);
+        if (!page) throw new ToolUsageError(`Person page not found for key ${key}`);
         return page;
       }
       if (name === 'people_upsert') return upsertPerson(hindsight, key, optionalText(args.name, 'name'), optionalText(args.query, 'query'));
       if (name === 'people_delete') {
         const page = await uniquePerson(hindsight, key);
-        if (!page) throw new Error(`Person page not found for key ${key}`);
+        if (!page) throw new ToolUsageError(`Person page not found for key ${key}`);
         if (page.children?.length) throw new Error(`Person page ${page.id} has children and cannot be deleted`);
         if (!page.mental_model_id) throw new Error(`Person page ${page.id} has no backing model`);
         return hindsight.deleteKnowledgePage(page.id);
