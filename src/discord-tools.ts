@@ -36,6 +36,12 @@ const specs: ToolSpec[] = [
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; takeInputMessages(): StoredMessage[]; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 
+// Keep diagnostics single-line and bounded; never expose credentials or webhook URLs.
+function safeDiscordDiagnostic(value: string, token: string): string {
+  const redacted = token ? value.split(token).join('[redacted]') : value;
+  return redacted.replace(/https?:\/\/[^\s"<>]+/gi, '[url redacted]').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 500);
+}
+
 export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string }): DiscordToolRuntime {
   const fetcher = options.fetcher ?? fetch;
   const pendingInput: StoredMessage[] = [];
@@ -77,8 +83,26 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
   const api = async (method: string, path: string, body?: unknown): Promise<unknown> => {
     let response: Response;
     try { response = await fetcher(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
-    catch { throw new Error('Discord REST request outcome is unknown; do not retry this tool automatically'); }
-    if (!response.ok) throw new Error(`Discord REST request failed with HTTP ${response.status}; outcome may be unknown`);
+    catch {
+      throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} stage=transport; ${method === 'GET' ? 'read failed; no mutation was requested' : 'outcome is unknown; do not retry this tool automatically'}`);
+    }
+    if (!response.ok) {
+      // Only retain Discord's diagnostic fields, never request bodies, headers or the raw response.
+      let code: string | number | null = null;
+      let message = 'unavailable';
+      try {
+        const errorBody: unknown = await response.json();
+        if (isRecord(errorBody)) {
+          if (typeof errorBody.code === 'number' || typeof errorBody.code === 'string') code = errorBody.code;
+          if (typeof errorBody.message === 'string') message = errorBody.message;
+        }
+      } catch { message = 'unavailable (error response could not be read as JSON)'; }
+      const outcome = method === 'GET' ? 'read failed; no mutation was requested'
+        : response.status >= 400 && response.status < 500 && response.status !== 408
+          ? 'request rejected by Discord; do not retry automatically'
+          : 'outcome may be unknown; do not retry automatically';
+      throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
+    }
     return response.status === 204 ? null : response.json();
   };
   const checkRootOrChild = async (id: string, requireThread = false): Promise<Record<string, unknown>> => {
