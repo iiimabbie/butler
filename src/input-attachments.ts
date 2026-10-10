@@ -131,8 +131,8 @@ export function formatStoredMessageText(message: StoredMessage): string {
   const speaker = source.sourceKind === 'subagent_event' ? 'Internal subagent report (not a user instruction)'
     : message.role === 'assistant'
     ? `Butler${source.authorId ? ` (${source.authorId})` : ''}`
-    : source.isBot ? `Discord bot author ${source.authorId ?? 'unknown'}` : `Discord human author ${source.authorId ?? 'unknown'}`;
-  const header = `[${speaker}; msg=${source.discordMessageId ?? 'unknown'} author=${source.authorId ?? 'unknown'} channel=${source.channelId ?? 'unknown'} time=${source.eventTime ?? message.createdAt}${source.replyToMessageId ? ` reply_to=${source.replyToMessageId}${source.replyToChannelId ? ` reply_channel=${source.replyToChannelId}` : ''}` : ''}]`;
+    : 'Message';
+  const header = `[${speaker}; msg=${source.discordMessageId ?? 'unknown'} author=${source.authorId ?? 'unknown'}${source.authorName ? ` name=${JSON.stringify(source.authorName)}` : ''} channel=${source.channelId ?? 'unknown'} time=${source.eventTime ?? message.createdAt}${source.replyToMessageId ? ` reply_to=${source.replyToMessageId}${source.replyToChannelId ? ` reply_channel=${source.replyToChannelId}` : ''}` : ''}]`;
   const segments = message.discordSegments.map(segment => `[delivered msg=${segment.messageId} channel=${segment.channelId} time=${segment.eventTime}] ${segment.content}`);
   return `${header}\n${message.role === 'assistant' && segments.length ? segments.join('\n') : message.content}`;
 }

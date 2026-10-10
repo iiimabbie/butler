@@ -31,7 +31,7 @@ try {
     const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
     const getRuntime = () => current;
-    const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }) : undefined;
+    const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
     const watcher = watchConfig({ initial: config, log: message => message === 'Config reload applied' ? console.info(message) : logError(message), onCandidate: candidate => { const next = buildBundle(candidate); current = next; configureErrorLogging(candidate); } });
     try {
       await memoryCoordinator?.start();

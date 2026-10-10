@@ -1,3 +1,5 @@
+import { preserveOptionalToolArguments } from './tool-schema.js';
+import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { ToolUsageError } from './tool-errors.js';
 import { requestModel } from './model-request.js';
 import type { Store, ToolRecord } from './store.js';
@@ -93,6 +95,7 @@ const transcriptPageSchema = {
 const WRAP_UP_REMINDER_TURN = 45;
 
 const tools = [
+  memoryTagsDefinition,
   {
     type: 'function', name: 'current_time', description: 'Get the current local time.',
     parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -117,7 +120,7 @@ const tools = [
 function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Record<string, unknown> }): { [key: string]: unknown; parameters: Record<string, unknown> } {
   const parameters = tool.parameters;
   return {
-    ...tool,
+    ...preserveOptionalToolArguments(tool),
     parameters: {
       ...parameters,
       properties: {
@@ -456,6 +459,9 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
       const task = { task: 'Continue the existing task', context: 'Use the persisted window.', constraints: 'Do not repeat completed actions.', expected_output: 'Return the continuation result.' };
       const resume = subagentExecutor(store, session, runtimeArgs.subagent_id, task, config);
       result = config.subagentCoordinator.message(runtimeArgs.subagent_id, session, runtimeArgs.message, typeof runtimeArgs.question_id === 'string' ? runtimeArgs.question_id : undefined, resume);
+    } else if (call.name === 'memory_tags_list') {
+      if (!config.hindsight) throw new Error('Shared memory is unavailable');
+      result = await listMemoryTagsTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
       if (!config.hindsight) throw new Error('Shared memory is unavailable');
       const query = requiredString(runtimeArgs.query, 'query');

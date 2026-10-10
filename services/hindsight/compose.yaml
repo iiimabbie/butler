@@ -11,6 +11,10 @@ services:
       HINDSIGHT_API_DATABASE_URL: 'pg0://hindsight:5432?listen_addresses=*&hba_file=/home/hindsight/.pg0/host-access.conf'
       HINDSIGHT_API_LOG_LEVEL: info
       HINDSIGHT_API_LOG_FORMAT: json
+      # Shared reasoning default; stages inherit unless explicitly overridden.
+      HINDSIGHT_API_LLM_REASONING_EFFORT: "high"
+      # Single output-language setting for all Hindsight-generated artifacts.
+      HINDSIGHT_API_LLM_OUTPUT_LANGUAGE: "Traditional Chinese (Taiwan)"
       HINDSIGHT_API_RERANKER_PROVIDER: typesafe
       HINDSIGHT_API_RERANKER_TYPESAFE_MODEL: jev-latest
       HINDSIGHT_API_RERANKER_MAX_CANDIDATES: "50"

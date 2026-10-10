@@ -33,7 +33,7 @@ const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試�
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hindsight?: Hindsight };
-export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean; isBot?: boolean };
+export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
 export type RestartNotice = { channelId: string; messageId: string };
@@ -165,8 +165,8 @@ export class DiscordHandler {
 
   async message(message: TextMessage): Promise<void> {
     if (message.isSelf) return;
+    if (message.content.trimStart().startsWith('→') || hasAnsiProgress(message.content)) return;
     const botInput = message.isBot === true || Boolean(message.isWebhook);
-    if (botInput && (message.content.trimStart().startsWith('→') || hasAnsiProgress(message.content))) return;
     const effectiveContent = message.content;
     const content = effectiveContent.trim();
     if (!effectiveContent.trim() && !message.hasAttachments) return;
@@ -182,7 +182,6 @@ export class DiscordHandler {
         sourceKind: 'discord_external' as const,
         authorId: message.authorId,
         authorName: message.authorName,
-        isBot: botInput || Boolean(message.isWebhook),
         webhookId: message.isWebhook ? message.webhookId : undefined,
         channelId: message.channelId,
         discordMessageId: message.messageId,
@@ -211,7 +210,7 @@ export class DiscordHandler {
         this.memoryCoordinator?.notifyReady();
         return { content: effectiveContent, source: stored.source, attachments: stored.attachments, stored };
       });
-      if (!botInput && mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
+      if (mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
@@ -241,9 +240,9 @@ export class DiscordHandler {
             try { openingContext = await this.readOpeningMessage(message.channelId); if (openingContext) this.store.saveSessionOpeningContext(state.sessionId, openingContext); }
             catch (error) { logSafe('Discord opening message lookup failed', error); }
           }
-          if (!botInput) this.activeAsk.add(message.channelId);
+          this.activeAsk.add(message.channelId);
           progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress reply did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: logSafe });
-          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, isBot: botInput, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
+          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
             catch (error) { logSafe('Discord referenced message could not be retrieved', error); }

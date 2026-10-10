@@ -10,11 +10,12 @@
     "restart": "sh scripts/butler-service.sh restart",
     "status": "sh scripts/butler-service.sh status",
     "deploy": "node scripts/butler-deploy.mjs",
-    "test": "npm run build && node --test",
+    "test": "npm run typecheck",
     "discord": "node dist/main.js",
     "discord:managed": "sh scripts/discord-restart.sh",
     "discord:register": "node dist/main.js register-discord-commands",
-    "discord:deploy": "npm run build && npm run discord:register"
+    "discord:deploy": "npm run build && npm run discord:register",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

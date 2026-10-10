@@ -7,7 +7,7 @@ import type { Store, StoredMessage } from './store.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; isBot?: boolean; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -70,7 +70,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       const evidence: StoredMessage = {
         id: `discord:${channelId}:${messageId}`, sessionId: options.context.sessionId ?? '', role: 'user',
         content: typeof record.content === 'string' ? record.content : '', createdAt,
-        source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId, authorId: typeof author.id === 'string' ? author.id : undefined, authorName: typeof author.username === 'string' ? author.username : undefined, isBot: author.bot === true || typeof record.webhook_id === 'string', webhookId: typeof record.webhook_id === 'string' ? record.webhook_id : undefined, eventTime },
+        source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId, authorId: typeof author.id === 'string' ? author.id : undefined, authorName: typeof author.username === 'string' ? author.username : undefined, webhookId: typeof record.webhook_id === 'string' ? record.webhook_id : undefined, eventTime },
         attachments, preparationStatus: 'ready', discordSegments: [],
       };
       pendingInput.push(evidence);
@@ -103,7 +103,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
           : 'outcome may be unknown; do not retry automatically';
       throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
     }
-    return response.status === 204 ? null : response.json();
+    return response.status === 204 ? null : withoutAuthorClassification(await response.json());
   };
   const checkRootOrChild = async (id: string, requireThread = false): Promise<Record<string, unknown>> => {
     const target = asRecord(await api('GET', `/channels/${id}`));
@@ -118,7 +118,6 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     return target;
   };
   return { definitions: discordMessageTools, context: options.context, takeInputMessages, async execute(name, args) {
-    if (options.context.isBot && !options.context.store?.botReplyEnabled()) throw new Error('Bot replies are disabled');
     const spec = specs.find(item => item.name === name); if (!spec) throw new Error(`Unknown Discord tool: ${name}`);
     validateArgs(spec, args);
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
@@ -260,3 +259,15 @@ function validateValue(rule:Record<string,unknown>,value:unknown,path:string):vo
 function stringArg(value:unknown,name:string):string{if(typeof value!=='string'||!value.length)throw new ToolUsageError(`${name} is invalid`);return value;}
 function asRecord(value:unknown):Record<string,unknown>{if(!isRecord(value))throw new Error('Discord returned an invalid object');return value;}
 function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==='object'&&value!==null&&!Array.isArray(value);}
+
+function withoutAuthorClassification(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutAuthorClassification);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+    if (key === 'author' && isRecord(item)) {
+      const { bot: _bot, ...author } = item;
+      return [key, withoutAuthorClassification(author)];
+    }
+    return [key, withoutAuthorClassification(item)];
+  }));
+}

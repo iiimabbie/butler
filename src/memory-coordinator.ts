@@ -3,8 +3,9 @@ import { Store, type MemoryBatch } from './store.js';
 import { Hindsight, ConversationSubmissionError } from './hindsight.js';
 import { buildConversationPayload } from './conversation-format.js';
 import { logError } from './error-log.js';
+import { nextCronRun, DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
 
-const MAX_TURNS = 10;
+const MAX_TURNS = 25;
 const POLL_DELAYS = [5_000, 15_000, 30_000, 60_000] as const;
 
 type Prefix = ReturnType<Store['readyMemoryPrefixes']>[number];
@@ -20,11 +21,14 @@ export class MemoryCoordinator {
   private readonly recoveryPending = new Set<string>();
   private roundRobinAfter = '';
 
-  constructor(private readonly store: Store, private readonly getHindsight: () => Hindsight) {}
+  private midnightAt = 0;
+
+  constructor(private readonly store: Store, private readonly getHindsight: () => Hindsight, private readonly getTimezone: () => string = () => DEFAULT_SCHEDULE_TIMEZONE) {}
 
   async start(): Promise<void> {
     if (this.started || this.closed) return;
     this.store.recoverMessagePreparations();
+    this.midnightAt = nextCronRun('0 0 * * *', this.getTimezone()).getTime();
     this.started = true;
     this.passive = false;
     for (const batch of this.store.inFlightMemoryBatches()) {
@@ -112,7 +116,9 @@ export class MemoryCoordinator {
       this.timer = undefined;
       let freezeFailed = false;
       try {
-        this.freezePrefixes(() => true);
+        const midnightDue = Date.now() >= this.midnightAt;
+        this.freezePrefixes(() => true, midnightDue);
+        if (midnightDue) this.midnightAt = nextCronRun('0 0 * * *', this.getTimezone()).getTime();
       } catch (error) {
         freezeFailed = true;
         logError('Memory coordinator freeze failed', error);
@@ -134,13 +140,14 @@ export class MemoryCoordinator {
     const now = Date.now();
     const prefixes = this.store.readyMemoryPrefixes();
     const hasFullPrefix = prefixes.some(prefix => prefix.messages.length >= MAX_TURNS);
-    if (this.activeHttp) return hasFullPrefix ? 1_000 : undefined;
+    const midnightDelay = Math.max(0, this.midnightAt - now);
+    if (this.activeHttp) return hasFullPrefix ? Math.min(1_000, midnightDelay) : midnightDelay;
 
     const recovery = this.store.inFlightMemoryBatches().filter(batch => this.recoveryPending.has(batch.operationId));
     const pollBatches = this.store.inFlightMemoryBatches().filter(batch => !this.recoveryPending.has(batch.operationId));
     const candidates = this.store.frozenNeverAttempted()
       .filter(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
-    const times: number[] = [];
+    const times: number[] = [this.midnightAt];
     if (hasFullPrefix || recovery.length || candidates.length) times.push(now);
     times.push(...pollBatches.map(batch => batch.nextPollAt ? Date.parse(batch.nextPollAt) : now));
     return times.length ? Math.max(0, Math.min(...times) - now) : undefined;

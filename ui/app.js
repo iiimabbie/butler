@@ -108,9 +108,7 @@ function renderMessage(row) {
   const card = element('article', undefined, `record message${row.role === 'assistant' ? ' assistant' : ''}`);
   const author = row.role === 'assistant'
     ? 'Butler'
-    : row.is_bot === 1 || row.is_bot === true
-      ? `Discord bot${row.author_id ? ` · ${row.author_id}` : ''}`
-      : row.author_id ? `Discord 使用者 · ${row.author_id}` : '未知來源';
+    : row.author_name ? `${row.author_name}${row.author_id ? ` · ${row.author_id}` : ''}` : row.author_id ? `作者 · ${row.author_id}` : '未知來源';
   const rawTime = row.event_time ?? row.created_at;
   const header = element('header', undefined, 'message-header');
   const time = element('time', formatTime(rawTime));
@@ -128,7 +126,7 @@ function renderMessage(row) {
 
   const details = element('details', undefined, 'metadata');
   details.append(element('summary', '技術資訊與完整訊息'));
-  const fields = [['ID', row.id], ['角色', row.role], ['作者 ID', row.author_id ?? '未知'], ['作者類型', row.is_bot === null ? '未知' : row.is_bot ? 'Discord bot' : '人類'], ['原始時間', rawTime]];
+  const fields = [['ID', row.id], ['角色', row.role], ['作者 ID', row.author_id ?? '未知'], ['作者名稱', row.author_name ?? '未知'], ['原始時間', rawTime]];
   for (const [label, value] of fields) {
     const line = element('div', undefined, 'metadata-line');
     line.append(element('strong', `${label}：`), element('span', value ?? '（空）'));
