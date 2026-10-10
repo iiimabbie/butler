@@ -6,4 +6,5 @@ dist/
 *.sqlite-wal
 /workspace/
 /config.yaml
+/backups/
 .codegraph/
