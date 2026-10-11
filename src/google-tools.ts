@@ -16,8 +16,9 @@ const schemas: Record<string, { description: string; properties: Record<string, 
   google_calendar_create_event: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str }, required: ['summary', 'start', 'end'] },
   google_calendar_update_event: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
   google_calendar_delete_event: { description: 'Delete a calendar event. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
+  google_tasks_lists: { description: "List the authenticated user's Google Tasks task lists (the lists themselves, not the tasks inside a list). Returns each list's name and ID; use page_token to fetch another page.", properties: { max_results: count(1000, 20), page_token: str }, required: [] },
   google_tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
-  google_tasks_create: { description: 'Create a task. Defaults to @default.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
+  google_tasks_create: { description: 'Create a task. Before adding, use google_tasks_lists to get available list names and IDs; choose the suitable list based on the task content and purpose, prioritizing any list explicitly specified by the user. If the right list is reasonably clear, decide without asking; ask only when a material classification ambiguity cannot be resolved. Set task_list_id to the chosen list ID. If omitted, the existing @default behavior is retained.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
   google_tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, task_list_id: str }, required: ['task_id'] },
   google_tasks_complete: { description: 'Mark a task completed; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_tasks_delete: { description: 'Delete a task; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
@@ -87,6 +88,10 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     return c.request(create ? calendar : `${calendar}/${encodeURIComponent(s('event_id'))}`, { method: create ? 'POST' : 'PATCH', body });
   }
   if (n === 'google_calendar_delete_event') return c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`, { method: 'DELETE' });
+  if (n === 'google_tasks_lists') {
+    const r = await c.request('/tasks/v1/users/@me/lists', { query: { maxResults: number('max_results', 20), pageToken: s('page_token') || undefined } });
+    return { items: (r.items ?? []).map((list: Record<string, unknown>) => ({ id: list.id, name: list.title })), next_page_token: r.nextPageToken ?? null };
+  }
   if (n === 'google_tasks_list') {
     const r = await c.request(tasks, { query: { showCompleted: a.show_completed as boolean ?? false, showHidden: a.show_completed as boolean ?? false, maxResults: number('max_results', 20), pageToken: s('page_token') || undefined } });
     return { items: (r.items ?? []).map(withoutTaskDue), next_page_token: r.nextPageToken ?? null };
