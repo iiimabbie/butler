@@ -14,7 +14,8 @@ type ToolSpec = { name: string; description: string; properties: Record<string, 
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
-const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true }, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, additionalProperties: false };
+const emojisSchema = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 64 } };
+const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true }, emojis: emojisSchema }, additionalProperties: false };
 const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
   { name: 'discord_send_message', description: 'Send a message to a Discord channel.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
@@ -22,7 +23,7 @@ const specs: ToolSpec[] = [
   { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
   { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_react', description: 'Add a reaction to a message.', properties: { ...channelMessage, emoji: { type: 'string', minLength: 1, maxLength: 64 } }, required: ['channelId', 'messageId', 'emoji'] },
+  { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
   { name: 'discord_pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_fetch_channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
@@ -143,6 +144,20 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : formatDiscordUrls(stringArg(args.content, 'content'));
     if (content !== undefined && content.length > 2000) throw new Error('Formatted Discord message exceeds 2000 characters');
+    if (name === 'discord_react') {
+      const emojis = args.emojis as string[];
+      const added: string[] = [];
+      for (const emoji of emojis) {
+        try {
+          await api('PUT', `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
+          added.push(emoji);
+        } catch (error) {
+          const original = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to add reaction ${JSON.stringify(emoji)}; confirmed added: ${JSON.stringify(added)}. Successfully added reactions will not be rolled back; remaining reactions were not executed. The outcome for the current reaction may be unknown; do not retry automatically. Original error: ${original}`);
+        }
+      }
+      return { ok: true, channelId, messageId, emojis: added };
+    }
     if (name === 'discord_fetch_message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
       const file = stringArg(args.file, 'file');
@@ -208,7 +223,6 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         case 'discord_fetch_channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
         case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content,allowed_mentions:{parse:[]}};break;
         case 'discord_delete_message':method='DELETE';path=`${base}/messages/${messageId}`;break;
-        case 'discord_react':method='PUT';path=`${base}/messages/${messageId}/reactions/${encodeURIComponent(args.emoji as string)}/@me`;break;
         case 'discord_pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;
         case 'discord_unpin':method='DELETE';path=`${base}/messages/pins/${messageId}`;break;
       }
