@@ -358,7 +358,7 @@ class RecallQueryError extends Error {
 }
 function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch (error) { logError('Hindsight progress callback failed', error); /* progress must not affect memory behavior */ } }
 function logMemoryPhase(phase: string, started: number, status: string): void { console.info(`Hindsight ${phase} ${status} ${Date.now() - started}ms`); }
-function speaker(message: MemoryMessage): string { const id = message.source.authorId ? `dc:${message.source.authorId}` : 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }
+function speaker(message: MemoryMessage): string { const id = message.source.authorId ?? 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }
 function asRecord(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function auditView(value: unknown): unknown { const r = asRecord(value); if (!r) return value; return { ...r, ...(typeof r.text === 'string' ? { text: r.text.slice(0, 8000) } : {}) }; }
 function safeError(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }

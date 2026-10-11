@@ -54,10 +54,16 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
   const fetchMessage = async (channelId: string, messageId: string): Promise<unknown> => {
     let record: Record<string, unknown>;
     try {
-      record = asRecord(await api('GET', `/channels/${channelId}/messages/${messageId}`));
+      record = asRecord(await api('GET', `/channels/${channelId}/messages/${messageId}`, undefined, false));
       if (record.id !== messageId || record.channel_id !== channelId) throw new Error('Discord returned a different message than requested');
-      if (!Array.isArray(record.attachments)) throw new Error('Discord returned invalid message attachments');
-      const rawAttachments = record.attachments.map(item => {
+      const reference = isRecord(record.message_reference) ? record.message_reference : undefined;
+      const isForward = reference?.type === 1;
+      const snapshots = Array.isArray(record.message_snapshots) ? record.message_snapshots : [];
+      const snapshotEnvelope = isForward && isRecord(snapshots[0]) ? snapshots[0] : undefined;
+      const snapshot = snapshotEnvelope && isRecord(snapshotEnvelope.message) ? snapshotEnvelope.message : undefined;
+      const attachmentSource = snapshot ? snapshot.attachments : record.attachments;
+      if (!Array.isArray(attachmentSource)) throw new Error('Discord returned invalid message attachment metadata');
+      const rawAttachments = attachmentSource.map(item => {
         const attachment = asRecord(item);
         if (typeof attachment.id !== 'string' || typeof attachment.url !== 'string' || typeof attachment.filename !== 'string') throw new Error('Discord returned invalid message attachment metadata');
         return { id: attachment.id, url: attachment.url, name: attachment.filename, contentType: typeof attachment.content_type === 'string' ? attachment.content_type : null, size: typeof attachment.size === 'number' ? attachment.size : undefined } satisfies DiscordAttachmentInput;
@@ -66,22 +72,32 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir!, options.transcription) : [];
       if (attachments.some(attachment => attachment.status === 'failed' && attachment.error === '附件無法保存到受控目錄')) throw new Error('Attachment storage is unavailable');
       const author = isRecord(record.author) ? record.author : {};
+      const isBot = typeof author.bot === 'boolean' ? author.bot : undefined;
       const eventTime = typeof record.timestamp === 'string' && Number.isFinite(Date.parse(record.timestamp)) ? record.timestamp : undefined;
+      const snapshotTime = typeof snapshot?.timestamp === 'string' && Number.isFinite(Date.parse(snapshot.timestamp)) ? snapshot.timestamp : undefined;
       const createdAt = eventTime ?? new Date().toISOString();
+      const snapshotAuthor = snapshot && isRecord(snapshot.author) ? snapshot.author : undefined;
+      const forwardedMessage = isForward ? { ...(typeof reference?.message_id === 'string' ? { discordMessageId: reference.message_id } : {}), ...(typeof reference?.channel_id === 'string' ? { channelId: reference.channel_id } : {}), ...(snapshotTime ? { eventTime: snapshotTime } : {}), ...(typeof snapshot?.content === 'string' && snapshot.content ? { content: snapshot.content } : {}), ...(typeof snapshotAuthor?.id === 'string' ? { authorId: snapshotAuthor.id } : {}), ...(typeof snapshotAuthor?.username === 'string' ? { authorName: snapshotAuthor.username } : {}) } : undefined;
       const evidence: StoredMessage = {
         id: `discord:${channelId}:${messageId}`, sessionId: options.context.sessionId ?? '', role: 'user',
-        content: typeof record.content === 'string' ? record.content : '', createdAt,
-        source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId, authorId: typeof author.id === 'string' ? author.id : undefined, authorName: typeof author.username === 'string' ? author.username : undefined, webhookId: typeof record.webhook_id === 'string' ? record.webhook_id : undefined, eventTime },
+        content: isForward ? `[轉發訊息]\n${typeof snapshot?.content === 'string' ? snapshot.content : ''}` : typeof record.content === 'string' ? record.content : '', createdAt,
+        source: { sourceKind: 'discord_external', channelId, discordMessageId: messageId, ...(isBot === undefined ? {} : { isBot }), ...(forwardedMessage ? { forwardedMessage } : {}), ...(!isForward && isRecord(record.message_reference) && typeof record.message_reference.message_id === 'string' ? { replyToMessageId: record.message_reference.message_id, replyToChannelId: typeof record.message_reference.channel_id === 'string' ? record.message_reference.channel_id : channelId } : {}), authorId: typeof author.id === 'string' ? author.id : undefined, authorName: typeof author.username === 'string' ? author.username : undefined, webhookId: typeof record.webhook_id === 'string' ? record.webhook_id : undefined, eventTime },
         attachments, preparationStatus: 'ready', discordSegments: [],
       };
-      pendingInput.push(evidence);
-      return { ...record, attachment_inputs: attachments };
+      if (options.context.store && options.context.sessionId) {
+        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, evidence.source, attachments);
+        if (persisted.created) options.context.store.updateAttachments(persisted.message.id, attachments);
+        const storedEvidence = options.context.store.messagesWithSources(options.context.sessionId).find(item => item.id === persisted.message.id) ?? evidence;
+        pendingInput.push(storedEvidence);
+        options.context.onMessageDelivered?.(channelId, options.context.sessionId);
+      } else pendingInput.push(evidence);
+      return withoutAuthorClassification({ ...record, attachment_inputs: attachments });
     } catch (error) {
       addFetchFailureEvidence(channelId, messageId);
       throw error;
     }
   };
-  const api = async (method: string, path: string, body?: unknown): Promise<unknown> => {
+  const api = async (method: string, path: string, body?: unknown, sanitize = true): Promise<unknown> => {
     let response: Response;
     try { response = await fetcher(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
     catch {
@@ -104,7 +120,9 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
           : 'outcome may be unknown; do not retry automatically';
       throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
     }
-    return response.status === 204 ? null : withoutAuthorClassification(await response.json());
+    if (response.status === 204) return null;
+    const raw = await response.json();
+    return sanitize ? withoutAuthorClassification(raw) : raw;
   };
   const checkRootOrChild = async (id: string, requireThread = false): Promise<Record<string, unknown>> => {
     const target = asRecord(await api('GET', `/channels/${id}`));

@@ -1,4 +1,4 @@
-import { Client, EmbedBuilder, GatewayIntentBits, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { Store } from './store.js';
 import { ask } from './agent.js';
@@ -34,7 +34,7 @@ const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
-export type TextMessage = { authorId: string; authorName?: string; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
+export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
 export type RestartNotice = { channelId: string; messageId: string };
 const modelCache = new Map<string, { expiresAt: number; models: string[] }>();
@@ -182,11 +182,13 @@ export class DiscordHandler {
         sourceKind: 'discord_external' as const,
         authorId: message.authorId,
         authorName: message.authorName,
+        ...(message.isBot === undefined ? {} : { isBot: message.isBot }),
         webhookId: message.isWebhook ? message.webhookId : undefined,
         channelId: message.channelId,
         discordMessageId: message.messageId,
         eventTime: message.eventTime,
         ...(message.reference ? { replyToMessageId: message.reference.messageId, replyToChannelId: message.reference.channelId } : {}),
+        ...(message.forwardedMessage ? { forwardedMessage: message.forwardedMessage } : {}),
       };
       const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備尚未完成' }));
@@ -1026,10 +1028,14 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     const errorWebhookUrl = getRuntime().settings.discord?.errorWebhookUrl;
     const errorWebhookId = errorWebhookUrl ? new URL(errorWebhookUrl).pathname.split('/').at(-2) : undefined;
     const isErrorWebhook = Boolean(message.webhookId && message.webhookId === errorWebhookId);
-    const content = isErrorWebhook
+    const forwardedSnapshot = message.reference?.type === MessageReferenceType.Forward ? message.messageSnapshots.first() : undefined;
+    const forwardedMessage = message.reference?.type === MessageReferenceType.Forward ? { ...(message.reference.messageId ? { discordMessageId: message.reference.messageId } : {}), ...(message.reference.channelId ? { channelId: message.reference.channelId } : {}), ...(forwardedSnapshot?.createdAt ? { eventTime: forwardedSnapshot.createdAt.toISOString() } : {}), ...(forwardedSnapshot?.content ? { content: forwardedSnapshot.content } : {}) } : undefined;
+    const forwardedAttachments = forwardedSnapshot ? [...forwardedSnapshot.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size })) : [];
+    const content = forwardedMessage ? `[轉發訊息]\n${forwardedSnapshot?.content ?? ''}` : isErrorWebhook
       ? [message.content, ...message.embeds.flatMap(embed => [embed.title, embed.description, ...embed.fields.flatMap(field => [field.name, field.value]), embed.footer?.text])].filter(value => Boolean(value?.trim())).join('\n')
       : message.content;
-    const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content, hasAttachments: message.attachments.size > 0, attachments: [...message.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size })), isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
+    const attachments = forwardedMessage ? forwardedAttachments : [...message.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size }));
+    const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, forwardedMessage, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content, hasAttachments: attachments.length > 0, attachments, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId && !forwardedMessage ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
       .catch(error => logSafe(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error));
     if (isErrorWebhook) void withoutErrorLogMention(handle);
     else void handle();
