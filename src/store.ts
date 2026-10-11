@@ -16,7 +16,7 @@ export interface Message {
 
 export interface ForwardedMessage { authorId?: string; authorName?: string; channelId?: string; discordMessageId?: string; eventTime?: string; content?: string; }
 export interface MessageSource {
-  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
+  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
 }
 
 export interface MessageInputAttachment { attachmentId: string; filename: string; mimeType: string; size: number; status: 'ready' | 'failed'; localPath?: string; origin?: 'discord_attachment' | 'butler_generated'; memoryDocumentId?: string; transcript?: string; transcriptionError?: string; error?: string; }
@@ -82,6 +82,9 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, question_id TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deployment_requests(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, requester_id TEXT, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','interrupted','needs_reconciliation')), result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_idx ON deployment_requests((1)) WHERE status IN ('queued','running','needs_reconciliation');
+      CREATE TABLE IF NOT EXISTS deployment_result_events(id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE REFERENCES deployment_requests(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown','needs_reconciliation')), parent_input_id TEXT, delivery_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
@@ -121,6 +124,7 @@ export class Store implements SchedulerStore {
     if (!sourceColumns.has('author_name')) this.db.exec('ALTER TABLE message_sources ADD COLUMN author_name TEXT');
     if (!sourceColumns.has('forwarded_message_json')) this.db.exec('ALTER TABLE message_sources ADD COLUMN forwarded_message_json TEXT');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
+    this.db.exec("UPDATE deployment_result_events SET status='needs_reconciliation',updated_at=datetime('now') WHERE status='processing'");
     const segmentColumns = new Set((this.db.prepare('PRAGMA table_info(discord_outgoing_segments)').all() as Array<{ name: string }>).map(column => column.name));
     if (!segmentColumns.has('reply_to_message_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_message_id TEXT');
     if (!segmentColumns.has('reply_to_channel_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_channel_id TEXT');
@@ -516,6 +520,56 @@ export class Store implements SchedulerStore {
   setSubagentEventStatus(id: string, expected: 'pending' | 'processing', status: 'processing' | 'delivered' | 'failed_unknown'): boolean {
     const result = this.db.prepare('UPDATE subagent_events SET status=?,updated_at=? WHERE id=? AND status=?').run(status, new Date().toISOString(), id, expected);
     return Number(result.changes) === 1;
+  }
+
+  createDeploymentRequest(input: { id: string; parentSession: string; channelId: string; messageId?: string; requesterId?: string }): boolean {
+    const now = new Date().toISOString();
+    const result = this.db.prepare("INSERT OR IGNORE INTO deployment_requests(id,parent_session_id,channel_id,message_id,requester_id,status,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)").run(input.id,input.parentSession,input.channelId,input.messageId ?? null,input.requesterId ?? null,now,now);
+    return Number(result.changes) === 1;
+  }
+  deploymentRequest(id: string): Record<string, unknown> | undefined { return this.db.prepare('SELECT * FROM deployment_requests WHERE id=?').get(id) as Record<string, unknown> | undefined; }
+  activeDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status IN ('queued','running','needs_reconciliation') ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
+  queuedDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status='queued' ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
+  recoverRunningDeployments(): void {
+    this.db.exec('BEGIN IMMEDIATE'); try {
+      const rows=this.db.prepare("SELECT id FROM deployment_requests WHERE status='running'").all() as Array<{id:string}>;
+      const now=new Date().toISOString();
+      for (const row of rows) {
+        this.db.prepare("UPDATE deployment_requests SET status='needs_reconciliation',result_json=?,updated_at=? WHERE id=?").run(JSON.stringify({status:'needs_reconciliation',reason:'Service restarted while deployment was running; automatic replay refused'}),now,row.id);
+        this.db.prepare("INSERT OR IGNORE INTO deployment_result_events(id,deployment_id,status,created_at,updated_at) VALUES(?,?,'pending',?,?)").run(randomUUID(),row.id,now,now);
+      }
+      this.db.exec('COMMIT');
+    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  claimDeploymentRequest(id: string): boolean { return Number(this.db.prepare("UPDATE deployment_requests SET status='running',updated_at=? WHERE id=? AND status='queued'").run(new Date().toISOString(),id).changes)===1; }
+  setDeploymentStatus(id: string, status: 'queued'|'running'|'completed'|'failed'|'interrupted'|'needs_reconciliation', result?: unknown): void {
+    this.db.prepare('UPDATE deployment_requests SET status=?,result_json=COALESCE(?,result_json),updated_at=? WHERE id=?').run(status,result === undefined ? null : JSON.stringify(result),new Date().toISOString(),id);
+  }
+  completeDeployment(id: string, status: 'completed'|'failed'|'interrupted'|'needs_reconciliation', result: unknown): void {
+    this.db.exec('BEGIN IMMEDIATE'); try {
+      const now = new Date().toISOString();
+      this.db.prepare('UPDATE deployment_requests SET status=?,result_json=?,updated_at=? WHERE id=?').run(status,JSON.stringify(result),now,id);
+      this.db.prepare("INSERT OR IGNORE INTO deployment_result_events(id,deployment_id,status,created_at,updated_at) VALUES(?,?,'pending',?,?)").run(randomUUID(),id,now,now);
+      this.db.exec('COMMIT');
+    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  pendingDeploymentEvents(): Array<Record<string, unknown>> { return this.db.prepare("SELECT e.*,r.parent_session_id,r.channel_id,r.message_id,r.requester_id,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.status IN ('pending','failed_unknown') AND (e.next_attempt_at IS NULL OR e.next_attempt_at<=?) ORDER BY e.created_at").all(new Date().toISOString()) as Array<Record<string, unknown>>; }
+  claimDeploymentEvent(id: string): boolean { return Number(this.db.prepare("UPDATE deployment_result_events SET status='processing',attempts=attempts+1,updated_at=? WHERE id=? AND status IN ('pending','failed_unknown')").run(new Date().toISOString(),id).changes)===1; }
+  setDeploymentEvent(id: string,status:'pending'|'processing'|'delivered'|'failed_unknown'|'needs_reconciliation', inputId?:string, messageId?:string, nextAttemptAt?:string): void { this.db.prepare('UPDATE deployment_result_events SET status=?,parent_input_id=COALESCE(?,parent_input_id),delivery_message_id=COALESCE(?,delivery_message_id),next_attempt_at=?,updated_at=? WHERE id=?').run(status,inputId??null,messageId??null,nextAttemptAt??null,new Date().toISOString(),id); }
+
+  deploymentEventInput(eventId: string, session: string, content: string, source: MessageSource): StoredMessage {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const event = this.db.prepare('SELECT parent_input_id FROM deployment_result_events WHERE id=? AND deployment_id IN (SELECT id FROM deployment_requests WHERE parent_session_id=?)').get(eventId,session) as {parent_input_id:string|null}|undefined;
+      if (!event) throw new Error('Unknown deployment result event');
+      if (event.parent_input_id) { const message=this.messagesWithSourcesForId(event.parent_input_id); this.db.exec('COMMIT'); return message; }
+      const id=randomUUID(), now=new Date().toISOString();
+      this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(id,session,'user',content,now);
+      this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,event_time,source_kind) VALUES(?,?,?,?,?)').run(id,source.authorId??null,source.channelId??null,now,'deployment_result');
+      this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'ready',?)").run(id,now);
+      this.db.prepare('UPDATE deployment_result_events SET parent_input_id=? WHERE id=?').run(id,eventId);
+      const message=this.messagesWithSourcesForId(id); this.db.exec('COMMIT'); return message;
+    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
   }
 
   beginTool(session: string, name: string, args: unknown): string {

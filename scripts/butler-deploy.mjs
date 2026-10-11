@@ -2,16 +2,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const root = path.resolve(process.env.BUTLER_DEPLOY_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const data = path.join(root, '.data');
 const state = path.join(data, 'service');
 const deployDir = path.join(data, 'deploy');
 const lockFile = path.join(state, 'lock');
-const requestId = process.argv[2] === '--locked' ? process.argv[3] : randomUUID();
+const requestId = process.argv[2] === '--locked' ? process.argv[3] : (process.argv[2] || randomUUID());
 const logFile = path.join(deployDir, `${requestId}.log`);
-const resultFile = path.join(deployDir, 'last-result.json');
+const resultFile = path.join(deployDir, `${requestId}-result.json`);
+const lastResultFile = path.join(deployDir, 'last-result.json');
 const node = process.env.BUTLER_NODE || process.execPath;
 const service = path.join(root, 'scripts/butler-service.sh');
 const packageLock = path.join(root, 'package-lock.json');
@@ -48,6 +49,7 @@ let candidateInstalled = false;
 let oldStopped = false;
 let stopAttempted = false;
 let candidateStartAttempted = false;
+let rollbackStatus = 'not_needed';
 let originalDigest;
 let lockDigest;
 let packageDigest;
@@ -71,6 +73,8 @@ try {
   await command([node, path.join(root, 'node_modules/typescript/bin/tsc'), '--outDir', temp]);
   sourceFiles = await listBuildInputs();
   if (await digest(sourceFiles) !== originalDigest || createHash('sha256').update(await fs.readFile(packageLock)).digest('hex') !== lockDigest || createHash('sha256').update(await fs.readFile(path.join(root, 'package.json'))).digest('hex') !== packageDigest) throw new Error('Build inputs changed during build; deploy cancelled');
+  const buildManifest = { buildId: id, buildDigest: originalDigest, createdAt: new Date().toISOString() };
+  await writeAtomic(path.join(temp, 'build-manifest.json'), JSON.stringify(buildManifest));
   const nonce = `${id}:${process.pid}`;
   const appPid = Number(String(await fs.readFile(path.join(state, 'app.pid'), 'utf8')).trim());
   if (!Number.isSafeInteger(appPid) || appPid <= 1) throw new Error('Running bot PID is unavailable; deploy refused');
@@ -79,9 +83,11 @@ try {
   await writeAtomic(path.join(state, 'deploy-candidate-ready'), id);
   await log(`Waiting for bot quiescence request ${id}`);
   let ready = false;
-  for (let n = 0; n < 600; n++) {
+  const quiescePolls = Number(process.env.BUTLER_DEPLOY_QUIESCE_POLLS ?? 600);
+  const quiesceDelayMs = Number(process.env.BUTLER_DEPLOY_QUIESCE_DELAY_MS ?? 1000);
+  for (let n = 0; n < quiescePolls; n++) {
     try { const marker = JSON.parse(await fs.readFile(path.join(state, 'deploy-quiesced.json'), 'utf8')); if (marker.id === id && marker.nonce === nonce && marker.pid === appPid) { ready = true; break; } } catch {}
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, quiesceDelayMs));
   }
   if (!ready) throw new Error('Bot did not quiesce within 10 minutes; deployment cancelled');
   sourceFiles = await listBuildInputs();
@@ -99,19 +105,25 @@ try {
   await fs.rm(path.join(state, 'deploy-candidate-ready'), { force: true });
   await fs.rm(path.join(state, 'deploy-request.json'), { force: true });
   candidateStartAttempted = true;
-  await command(['sh', service, 'deploy-start']);
+  await command(['sh', service, 'deploy-start'], { BUTLER_BUILD_ID: id, BUTLER_BUILD_DIGEST: originalDigest });
+  const readyEvidence = JSON.parse(await fs.readFile(path.join(state, 'butler.ready'), 'utf8'));
+  if (readyEvidence.ready !== true || readyEvidence.buildId !== id || readyEvidence.buildDigest !== originalDigest) throw new Error('New service ready evidence did not match the requested build ID and digest');
   await writeAtomic(path.join(deployDir, 'baseline.json'), JSON.stringify({ lockDigest, packageDigest, buildDigest: originalDigest, updatedAt: new Date().toISOString() }));
   await fs.rm(path.join(state, 'deploy-quiesced.json'), { force: true });
-  await fs.writeFile(resultFile, JSON.stringify({ id, status: 'completed', at: new Date().toISOString(), log: logFile }), { mode: 0o600 });
+  const result = JSON.stringify({ id, status: 'completed', at: new Date().toISOString(), buildDigest: originalDigest, log: logFile });
+  await writeAtomic(resultFile, result);
+  await writeAtomic(lastResultFile, result);
   await log('Deployment completed and ready');
 } catch (error) {
   if (oldDistMoved && await exists(backup)) {
     if (!candidateInstalled) {
       await fs.rename(backup, candidate);
+      rollbackStatus = 'restored';
       oldDistMoved = false;
     } else if (!stopAttempted) {
       if (candidateInstalled) await fs.rm(candidate, { recursive: true, force: true });
       await fs.rename(backup, candidate);
+      rollbackStatus = 'restored';
       oldDistMoved = false;
       candidateInstalled = false;
     } else if (!oldStopped) {
@@ -127,8 +139,8 @@ try {
         await fs.rename(backup, candidate);
         oldDistMoved = false;
         candidateInstalled = false;
-        try { await command(['sh', service, 'deploy-start']); }
-        catch (restoreError) { await log(`Rollback start failed: ${restoreError.message}`); }
+        try { await command(['sh', service, 'deploy-start']); rollbackStatus = 'restored_and_started'; }
+        catch (restoreError) { rollbackStatus = 'restored_start_failed'; await log(`Rollback start failed: ${restoreError.message}`); }
       }
     }
   }
@@ -137,10 +149,34 @@ try {
   await fs.rm(path.join(state, 'deploy-candidate-ready'), { force: true });
   await fs.rm(path.join(state, 'deploy-quiesced.json'), { force: true });
   await log(`Deployment failed: ${error.message}`);
-  await fs.writeFile(resultFile, JSON.stringify({ id, status: 'failed', error: error.message, at: new Date().toISOString(), log: logFile }), { mode: 0o600 });
+  const resultRecord = { id, status: 'failed', phase: candidateStartAttempted ? 'candidate_start' : stopAttempted ? 'service_stop_or_start' : candidateInstalled ? 'install' : 'build_or_quiesce', error: error.message, rollback: oldDistMoved ? 'incomplete_or_refused' : rollbackStatus, at: new Date().toISOString(), log: logFile,
+    alert_status: oldDistMoved || rollbackStatus === 'restored_start_failed' ? 'pending' : 'not_required' };
+  await writeAtomic(resultFile, JSON.stringify(resultRecord));
+  await writeAtomic(lastResultFile, JSON.stringify(resultRecord));
+  if (resultRecord.alert_status === 'pending') await sendEmergencyFailureAlert(resultRecord);
   process.exitCode = 1;
 }
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
+async function sendEmergencyFailureAlert(result) {
+  // Record intent before notifying; a crash after webhook acceptance must not cause a blind resend.
+  result.alert_status = 'attempted_unknown';
+  await writeAtomic(resultFile, JSON.stringify(result));
+  await writeAtomic(lastResultFile, JSON.stringify(result));
+  try {
+    const configModule = await import(pathToFileURL(path.join(root, 'dist/config.js')).href).catch(() => import(pathToFileURL(path.join(deployDir, 'previous-dist/config.js')).href));
+    const loggerModule = await import(pathToFileURL(path.join(root, 'dist/log.js')).href).catch(() => import(pathToFileURL(path.join(deployDir, 'previous-dist/log.js')).href));
+    const { readConfig } = configModule, logger = loggerModule;
+    logger.configureLogging(readConfig());
+    let settle;
+    const delivered = new Promise(resolve => { settle = resolve; });
+    logger.logError('Deployment failed; service unavailable', undefined, { deduplicationKey: `deployment-unavailable:${result.id}`, fields: { deployment_id: result.id, status: 'failed', phase: result.phase }, onNotifySettled: settle });
+    await logger.flushLogs();
+    result.alert_status = await delivered ? 'delivered' : 'failed';
+  } catch (alertError) { result.alert_status = 'failed'; await log(`Emergency alert setup failed: ${alertError instanceof Error ? alertError.message : 'unknown error'}`); }
+  await writeAtomic(resultFile, JSON.stringify(result));
+  await writeAtomic(lastResultFile, JSON.stringify(result));
+}
+
 async function writeAtomic(file, content) {
   const temporary = `${file}.${process.pid}.tmp`;
   await fs.writeFile(temporary, content, { mode: 0o600 });

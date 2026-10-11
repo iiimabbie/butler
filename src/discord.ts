@@ -1,5 +1,6 @@
 import { Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
@@ -19,6 +20,7 @@ import { createPeopleToolRuntime } from './people-tools.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { compactSession } from './compaction.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { archiveOutgoingAttachment, AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
@@ -28,6 +30,7 @@ import type { MemoryCoordinator } from './memory-coordinator.js';
 import { logError, logInfo, logWarn, withoutLogMention } from './log.js';
 import { isHttp429, ToolUsageError } from './tool-errors.js';
 import { SubagentCoordinator, type SubagentEvent } from './subagent-coordinator.js';
+import { processDeploymentResultEvent, type DeploymentResultEventRow } from './deployment-notifications.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
@@ -68,11 +71,20 @@ export class DiscordHandler {
   private deployRequest?: { id: string; nonce: string; workerPid: number };
   private deploySchedulerPaused = false;
   private deployCheckRunning = false;
-  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().catch(error => logError('Deployment handshake check failed', error, { notify: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
+  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { notify: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
   constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) {
     this.outputChannel = options.outputChannel ?? (async () => undefined);
     this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
     this.memoryCoordinator = options.memoryCoordinator;
+    this.store.recoverRunningDeployments();
+    this.localTools?.setDeploymentAdapter({
+      accept: source => { const id = randomUUID(); if (this.store.createDeploymentRequest({ id, parentSession: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId })) return id; const existing = this.store.activeDeploymentRequest()?.id; if (typeof existing === 'string') return existing; throw new Error('Could not persist deployment request'); },
+      pending: () => { const row = this.store.queuedDeploymentRequest(); return row?.id as string | undefined; },
+      active: () => { const row = this.store.activeDeploymentRequest(); return row?.id as string | undefined; },
+      running: id => this.store.claimDeploymentRequest(id),
+      failed: (id, error) => this.store.completeDeployment(id, 'failed', { status: 'failed', phase: 'spawn', error }),
+    });
+    this.localTools?.restoreQueuedDeploy();
     this.subagentCoordinator = new SubagentCoordinator(snapshot => this.store.saveSubagentRun(snapshot), {
       onEvent: event => this.handleSubagentEvent(event),
       persistEvent: event => this.store.saveSubagentEvent(event),
@@ -276,7 +288,7 @@ export class DiscordHandler {
             subagent: runtime.settings.subagent,
             subagentCoordinator: this.subagentCoordinator,
             subagentOrigin: { channelId: message.channelId, outputChannelId: message.channelId, entryKind: 'normal', requesterId: message.authorId, triggerInputId: stored.id },
-            discordContext: { channelId: message.channelId, messageId: message.messageId },
+            discordContext: { channelId: message.channelId, messageId: message.messageId, requesterId: message.authorId },
             consumeSteer: async () => this.pendingSteer.get(message.channelId)?.[0],
             onSteerPersisted: storedMessageId => {
               let consumed = this.consumedSteerMessageIds.get(stored.sessionId);
@@ -645,6 +657,54 @@ export class DiscordHandler {
       }
       await progress.finish('failed');
       throw auditError ?? error;
+    }
+  }
+
+  private async processDeploymentResults(): Promise<void> {
+    const root = dirname(dirname(fileURLToPath(import.meta.url)));
+    const active = this.store.activeDeploymentRequest();
+    if (active?.status === 'queued' && !this.stopping && !this.deploying) this.localTools?.startQueuedDeploy();
+    if (active?.status === 'running' || active?.status === 'needs_reconciliation') {
+      const resultPath = join(root, '.data/deploy', `${active.id}-result.json`);
+      if (existsSync(resultPath)) {
+        try {
+          const result = JSON.parse(readFileSync(resultPath, 'utf8')) as { id: string; status: string; [key: string]: unknown };
+          if (result.id === active.id && (result.status === 'completed' || result.status === 'failed')) this.store.completeDeployment(active.id as string, result.status, result);
+        } catch (error) { logError('Could not read deployment result record', error, { notify: false }); }
+      }
+    }
+    for (const event of this.store.pendingDeploymentEvents()) {
+      const runtime = this.getRuntime();
+      try {
+        await processDeploymentResultEvent(this.store, event as unknown as DeploymentResultEventRow, {
+          ask: async (input, content, _options) => {
+            const channel = String(event.channel_id);
+            const state = this.store.channelState(channel, runtime.discord.defaultModel, runtime.discord.ownerId);
+            const target = await this.outputChannel(channel);
+            if (!target) throw new Error('Deployment result channel unavailable');
+            await this.runAsk(this.store, String(event.parent_session_id), content, {
+              baseUrl: runtime.discord.baseUrl, apiKey: runtime.discord.apiKey, model: state.model,
+              maxContextTokens: runtime.discord.maxContextTokens, modelContextTokens: runtime.discord.modelContextTokens,
+              transcriptTimezone: runtime.settings.schedule?.timezone, workspaceDirectory: DEFAULT_WORKSPACE,
+              storedInput: input, messageSource: { sourceKind: 'deployment_result', channelId: channel,
+                authorId: typeof event.requester_id === 'string' ? event.requester_id : undefined },
+              deploymentResultEvent: true,
+              onResponseReady: _options.onResponseReady,
+            });
+          },
+          send: async (channelId, content) => {
+            const target = await this.outputChannel(channelId);
+            if (!target) throw new Error('Deployment result channel unavailable');
+            const sent = await target.send(content);
+            if (!isRecord(sent) || typeof sent.id !== 'string') throw new Error('Discord send result did not return a message ID');
+            const saved = this.recordOutgoingSegment(String(event.parent_session_id), content, sent);
+            if (saved) this.store.finalizeOutgoing(saved.id, content);
+            return { messageId: sent.id };
+          },
+        });
+      } catch (error) {
+        logError(`Deployment result notification failed id=${event.id}`, error, { notify: false });
+      }
     }
   }
 
@@ -1028,7 +1088,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     handler.setScheduler(scheduler);
     scheduler.start();
     if (readyFile) { try { writeFileSync(readyFile, 'ready\\n', { mode: 0o600 }); } catch (error) { logError('Discord readiness signal failed', error, { notify: !isHttp429(error) }); } }
-
+    const serviceReadyFile = process.env.BUTLER_SERVICE_READY_FILE;
+    if (serviceReadyFile) { try {
+      const manifestPath = join(dirname(fileURLToPath(import.meta.url)), 'build-manifest.json');
+      const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { buildId?: string; buildDigest?: string };
+      writeFileSync(serviceReadyFile, JSON.stringify({ ready: true, buildId: manifest.buildId ?? 'unknown', buildDigest: manifest.buildDigest ?? 'unknown' }), { mode: 0o600 });
+    } catch (error) {
+      try { writeFileSync(serviceReadyFile, JSON.stringify({ ready: true, buildId: 'unknown', buildDigest: 'unknown' }), { mode: 0o600 }); } catch { /* service wrapper reports readiness timeout */ }
+      logWarn('Service build manifest unavailable at readiness', error);
+    } }
   });
   client.on('messageCreate', message => {
     const errorWebhookUrl = getRuntime().settings.discord?.errorWebhookUrl;

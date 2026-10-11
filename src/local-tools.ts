@@ -36,6 +36,9 @@ export class LocalToolRuntime {
   private deployPersisted = false;
   private deployTimer?: ReturnType<typeof setTimeout>;
   private deploymentQueueIdle: () => boolean = () => false;
+  private deploymentAdapter?: { accept: (source: { sessionId: string; channelId: string; messageId?: string; requesterId?: string }) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void };
+  setDeploymentAdapter(adapter: { accept: (source: { sessionId: string; channelId: string; messageId?: string; requesterId?: string }) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void }) { this.deploymentAdapter = adapter; if (adapter.pending()) { this.deployPending = true; this.deployPersisted = true; } }
+  restoreQueuedDeploy() { if (this.deploymentAdapter?.pending()) { this.deployPending = true; this.deployPersisted = true; } }
   constructor(private readonly root = ROOT) {}
   setDeploymentQueueIdleCheck(check: () => boolean) { this.deploymentQueueIdle = check; }
   confirmDeployRequest() { if (this.deployPending) this.deployPersisted = true; }
@@ -49,24 +52,32 @@ export class LocalToolRuntime {
     this.deployPending = false;
     this.deployPersisted = false;
     const script = join(this.root, 'scripts/butler-deploy.mjs');
+    const deploymentId = this.deploymentAdapter?.pending();
+    if (!deploymentId) return false;
+    if (!this.deploymentAdapter?.running?.(deploymentId)) { this.deployPending = false; this.deployPersisted = false; return false; }
     try {
-      const child = spawn('setsid', [process.execPath, script], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
-      child.once('error', error => { void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ status: 'failed', error: error.message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined); });
+      const child = spawn('setsid', [process.execPath, script, deploymentId], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
+      child.once('error', error => { this.deploymentAdapter?.failed?.(deploymentId, error.message); void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ id: deploymentId, status: 'failed', error: error.message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined); });
       child.unref();
       return true;
     } catch (error) {
-      void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ status: 'failed', error: error instanceof Error ? error.message : String(error), at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined);
+      const message = error instanceof Error ? error.message : String(error);
+      this.deploymentAdapter?.failed?.(deploymentId, message);
+      void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ id: deploymentId, status: 'failed', error: message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined);
       return false;
     }
   }
   get activeCount() { return this.processes.activeCount; }
   async close() { this.closed = true; this.cancelDeployRequest(); await this.processes.close(); }
-  async execute(name: string, args: Record<string, unknown>): Promise<unknown> {
+  async execute(name: string, args: Record<string, unknown>, source?: { sessionId?: string; channelId?: string; messageId?: string; requesterId?: string }): Promise<unknown> {
     if (this.closed) throw new Error('Local runtime is closing');
     if (name === 'butler_deploy') {
-      if (this.deployPending) throw new Error('A deployment is already queued for this service');
+      const existing = this.deploymentAdapter?.active?.() ?? this.deploymentAdapter?.pending();
+      if (existing) return { accepted: true, duplicate: true, deployment_id: existing, message: `部署已排隊，deployment_id=${existing}` };
+      if (!this.deploymentAdapter || !source?.sessionId || !source.channelId) throw new Error('Deployment request source metadata is unavailable; request was not queued');
+      const id = this.deploymentAdapter.accept({ sessionId: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId });
       this.deployPending = true;
-      return { accepted: true, message: '已受理，將在本輪結束後部署。' };
+      return { accepted: true, deployment_id: id, message: `已受理，將在本輪結束後部署（${id}）。` };
     }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');

@@ -61,12 +61,13 @@ export interface AgentConfig {
   reasoningEffort?: ReasoningEffort;
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
-  discordContext?: { channelId: string; messageId?: string };
+  discordContext?: { channelId: string; messageId?: string; requesterId?: string };
   workspaceDirectory?: string;
   subagent?: SubagentConfig;
   subagentCoordinator?: SubagentCoordinator;
   subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string };
   subagentEvent?: boolean;
+  deploymentResultEvent?: boolean;
 }
 
 interface FunctionCall {
@@ -181,7 +182,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const availableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
-    const memory = config.hindsight && fresh[0]!.source.sourceKind !== 'subagent_event' ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
+    const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
     let stableInput: unknown[] = [...workspaceInput, ...runtimeInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
     const initialGroups = await Promise.all(sessionMessages.map(async message => {
       const inputMessage = message.id === config.storedInput!.id && message.content !== prompt ? { ...message, content: prompt } : message;
@@ -387,6 +388,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       }
       if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
+      if (config.deploymentResultEvent && calls.length) throw new Error('Deployment result events are notification-only; tool calls are not authorized');
       for (const call of calls) {
         const output = await executeCall(store, session, call, config, googleRuntime);
         if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
@@ -487,7 +489,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await config.webTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
       if (!config.localTools) throw new Error('Local tools are unavailable in this entry point');
-      result = await config.localTools.execute(call.name, runtimeArgs);
+      result = await config.localTools.execute(call.name, runtimeArgs, { sessionId: session, channelId: config.discordContext?.channelId, messageId: config.discordContext?.messageId, requesterId: config.discordContext?.requesterId });
     } else if (call.name.startsWith('discord_')) {
       if (!config.discordTools) throw new Error('Discord tools are unavailable in this entry point');
       result = await config.discordTools.execute(call.name, runtimeArgs);
