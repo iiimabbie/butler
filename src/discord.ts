@@ -587,6 +587,7 @@ export class DiscordHandler {
         discordTools: createDiscordToolRuntime({
           token: config.token,
           attachmentDir: config.attachmentDir,
+          transcription: commandRuntime.settings.transcription,
           context: { channelId: request.outputChannelId, ownerId: commandRuntime.discord.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } },
         }),
         googleTools: this.googleTools,
