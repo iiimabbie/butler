@@ -6,7 +6,7 @@ export async function requestModel(options: {
   url: string; headers: Record<string, string>; body: string; session: string;
   model: string; turn: number; timeoutMs: number; fetcher: typeof fetch;
   emit?: (event: Record<string, unknown>) => void;
-}): Promise<{ response: Response; raw: unknown }> {
+}): Promise<{ response: Response; raw: unknown; requestId: string }> {
   const requestId = randomUUID();
   const started = performance.now();
   const signal = AbortSignal.timeout(options.timeoutMs);
@@ -30,8 +30,8 @@ export async function requestModel(options: {
     let raw: unknown = null;
     let validJson = true;
     try { raw = JSON.parse(text); } catch { validJson = false; }
-    log({ event: 'complete', status: response.status, upstreamRequestId, headersMs, bodyMs, responseBytes: Buffer.byteLength(text), validJson });
-    return { response, raw };
+    log({ event: response.ok && validJson ? 'complete' : 'failed', status: response.status, upstreamRequestId, headersMs, bodyMs, responseBytes: Buffer.byteLength(text), validJson, ...(response.ok && validJson ? {} : { errorType: response.ok ? 'invalid_json' : 'http_error' }) });
+    return { response, raw, requestId };
   } catch (error) {
     log({ event: 'failed', stage, status: response?.status ?? null, headersMs, bodyMs, timedOut: signal.aborted && signal.reason?.name === 'TimeoutError', errorType: error instanceof Error ? error.name : 'unknown' });
     // Preserve the original error, including a timeout while reading the body.
