@@ -141,6 +141,10 @@ All Discord speakers admitted by the existing conversation triggers, including b
 
 A single local-process runtime belongs to the Discord service and survives `/new` and subsequent asks. Normal shutdown stops scheduler polling, drains already queued work, then closes tools and SQLite. `/restart` rejects active host jobs and asks you to stop them first. Scheduled reminders and cron jobs persist in SQLite; missed cron ticks are skipped at startup, overdue reminders are claimed, and executions left running by a crash are marked unknown rather than replayed. Side effects retain pending-first history recording; a result-save failure never replays the operation. See [host-tool plan](docs/local-tools.md).
 
+## Knowledge pages
+
+With Hindsight configured, `knowledge_page_create` creates general knowledge pages using fixed operator-owned settings; `people_upsert` creates or refreshes person pages, with optional refresh settings applying only to new pages. Both queue generation rather than returning completed content. See [knowledge page creation](docs/knowledge-page-create.md) for inputs and fixed settings.
+
 ## Web tools (Discord only; deployed, user acceptance pending)
 
 With `web.provider: tavily` and `web.apiKey`, all triggered human/bot senders share `web_search(query, max_results=5)` and `web_fetch(url)`. Search uses Tavily basic depth (1–10 results) without generated answers/raw content or automatic advanced upgrades; fetch performs one basic extract of a public HTTP(S) URL. Sources are returned, content is labeled untrusted, and truncation is explicit. Output is bounded to 64 KiB, HTTP responses to 5 MiB, with a 30-second request deadline and no automatic retries/fallback. Missing key means neither tool is advertised. No CLI web feature is added.
