@@ -321,7 +321,7 @@ export class DiscordHandler {
           attachmentFiles = [];
           this.activeAsk.delete(message.channelId);
           const failureKind = error instanceof AttachmentInputError ? ` (${error.code}${error.code === 'request_rejected' && error.status ? ` HTTP ${error.status}` : ''})` : '';
-          logSafe(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error);
+          logSafe(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { deduplicationKey: discordAskDeduplicationKey(message.channelId, failureKind) });
           const pending = this.pendingSteer.get(message.channelId) ?? [];
           pending.splice(0);
           this.pendingSteer.delete(message.channelId);
@@ -1110,8 +1110,11 @@ function formatContextUsage(sample: ReturnType<Store['contextUsage']>, model: st
   return `${sample.inputTokens} input / ${sample.outputTokens} output；${sample.model}；${sample.limitSource} ${limit} tokens；${pct}；${sample.sampledAt}；Responses usage${stale}`;
 }
 
-function logSafe(context: string, error?: unknown): void {
-  logError(context, error);
+export function discordAskDeduplicationKey(channelId: string, failureKind: string): string {
+  return `Discord message ask failed${failureKind} channel=${channelId}`;
+}
+function logSafe(context: string, error?: unknown, options?: { deduplicationKey?: string }): void {
+  logError(context, error, options);
 }
 function isHighSurrogate(code: number): boolean { return code >= 0xD800 && code <= 0xDBFF; }
 function isLowSurrogate(code: number): boolean { return code >= 0xDC00 && code <= 0xDFFF; }
