@@ -97,7 +97,7 @@ export class Hindsight {
   }
 
   async reflect(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } });
+    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 60_000);
     const record = asRecord(result);
     if (typeof record?.text !== 'string' || !(record.based_on === null || asRecord(record.based_on))) throw new Error('Hindsight reflect response is invalid');
     return result;
@@ -320,11 +320,11 @@ export class Hindsight {
     this.finishTrace(trace);
     return body;
   }
-  private async post(url: string, data: unknown): Promise<unknown> {
+  private async post(url: string, data: unknown, timeoutMs?: number): Promise<unknown> {
     const record = asRecord(data);
     const operation = url.endsWith('/memories/recall') ? 'recall' : url.endsWith('/reflect') ? 'reflect' : url.endsWith('/memories') ? 'memory_retain' : 'post';
     const traceMetadata = { ...(typeof record?.query === 'string' ? { queryChars: record.query.length } : {}), ...(typeof record?.budget === 'string' ? { budget: record.budget } : {}), ...(typeof record?.max_tokens === 'number' ? { maxTokens: record.max_tokens } : {}) };
-    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata);
+    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata, timeoutMs);
     const text = await this.readResponse(response, trace);
     if (!response.ok) {
       const recoverable = operation === 'recall' && (response.status === 400 || response.status === 422);
