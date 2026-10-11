@@ -1,6 +1,7 @@
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
-import { ToolUsageError } from './tool-errors.js';
+import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
+import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
 import { requestModel } from './model-request.js';
 import type { Store, ToolRecord } from './store.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -96,6 +97,7 @@ const WRAP_UP_REMINDER_TURN = 45;
 
 const tools = [
   memoryTagsDefinition,
+  knowledgePageCreateDefinition,
   {
     type: 'function', name: 'current_time', description: 'Get the current local time.',
     parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
@@ -174,7 +176,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const availableTools = [...tools.filter(tool => !String(tool.name).startsWith('memory_') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const availableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
     const memory = config.hindsight && fresh[0]!.source.sourceKind !== 'subagent_event' ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
@@ -414,7 +416,7 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
   };
 }
 
-async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime): Promise<unknown> {
+export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime): Promise<unknown> {
   let args: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(call.arguments);
@@ -462,6 +464,9 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     } else if (call.name === 'memory_tags_list') {
       if (!config.hindsight) throw new Error('Shared memory is unavailable');
       result = await listMemoryTagsTool(config.hindsight, runtimeArgs);
+    } else if (call.name === 'knowledge_page_create') {
+      if (!config.hindsight) throw new Error('Shared memory is unavailable');
+      result = await knowledgePageCreateTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
       if (!config.hindsight) throw new Error('Shared memory is unavailable');
       const query = requiredString(runtimeArgs.query, 'query');
