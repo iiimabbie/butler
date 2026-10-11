@@ -22,7 +22,7 @@ test('historical ready extensionless octet-stream PNG formats as input_image wit
   const path=join(images,'123e4567-e89b-12d3-a456-426614174000-ani-references'); await writeFile(path,png);
   try {
     const attachment={ attachmentId:'a', filename:'ani-references', mimeType:'application/octet-stream', size:png.length, status:'ready', localPath:path };
-    const [,formatted]=messageAttachmentContent(message(attachment),dir);
+    const [,formatted]=await messageAttachmentContent(message(attachment),dir);
     assert.equal(formatted.type,'input_image'); assert.match(formatted.image_url,/^data:image\/png;base64,/);
     assert.equal(attachment.filename,'ani-references'); assert.equal(attachment.mimeType,'application/octet-stream');
   } finally { await rm(root,{recursive:true,force:true}); }
@@ -62,9 +62,9 @@ test('normal image metadata remains input_image and signature conflicts are expl
   const path=join(images,'123e4567-e89b-12d3-a456-426614174000-photo.png'); await writeFile(path,png);
   try {
     const good={attachmentId:'a',filename:'photo.png',mimeType:'image/png',size:png.length,status:'ready',localPath:path};
-    assert.equal(messageAttachmentContent(message(good),dir)[1].type,'input_image');
+    assert.equal((await messageAttachmentContent(message(good),dir))[1].type,'input_image');
     const conflict={...good,mimeType:'image/jpeg'};
-    const result=messageAttachmentContent(message(conflict),dir)[1];
+    const result=(await messageAttachmentContent(message(conflict),dir))[1];
     assert.equal(result.type,'input_text'); assert.match(result.text,/簽章與來源名稱\/MIME 不一致/);
   } finally { await rm(root,{recursive:true,force:true}); }
 });

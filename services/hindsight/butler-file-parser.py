@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -190,21 +191,28 @@ class ButlerParser(FileParser):
         with tempfile.TemporaryDirectory(prefix="butler-video-") as tmp:
             source = Path(tmp) / ("input" + Path(filename).suffix.lower())
             source.write_bytes(data)
-            probe = await self._run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=duration:stream=codec_type", "-of", "json", str(source)], capture=True)
+            probe = await self._run(["ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe", "-show_entries", "format=duration:stream=codec_type,avg_frame_rate,r_frame_rate,duration,duration_ts,time_base", "-of", "json", str(source)], capture=True)
             try:
                 info = json.loads(probe)
-                duration = float(info["format"]["duration"])
                 stream_types = {s.get("codec_type") for s in info.get("streams", [])}
+                video_stream = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
+                stream_duration = (video_stream or {}).get("duration")
+                if not stream_duration and (video_stream or {}).get("duration_ts") and (video_stream or {}).get("time_base"):
+                    duration_ts = float((video_stream or {})["duration_ts"])
+                    time_base_num, time_base_den = (video_stream or {})["time_base"].split("/", 1)
+                    stream_duration = str(duration_ts * float(time_base_num) / float(time_base_den))
+                duration = float(stream_duration) if stream_duration else float("nan")
                 has_audio = "audio" in stream_types
-                has_video = "video" in stream_types
+                has_video = video_stream is not None
+                frame_rate = self._parse_rate((video_stream or {}).get("avg_frame_rate") or (video_stream or {}).get("r_frame_rate"))
             except (ValueError, KeyError, TypeError) as exc:
                 raise RuntimeError("Video metadata could not be read") from exc
-            if not math.isfinite(duration) or duration <= 0:
-                raise RuntimeError("Video duration is invalid")
             if not has_video:
                 if has_audio:
                     return await self._transcribe(data, filename)
                 raise RuntimeError("Media contains neither audio nor video streams")
+            if not math.isfinite(duration) or duration <= 0:
+                raise RuntimeError("Video stream duration is invalid")
             parts = [f"# Video: {filename}", "\n> Keyframe sampling only; this is not a full frame-by-frame analysis."]
             if has_audio:
                 wav = Path(tmp) / "audio.wav"
@@ -221,24 +229,66 @@ class ButlerParser(FileParser):
                     parts.append("\n## Audio\n\n" + transcript.split("\n\n", 1)[-1])
             else:
                 parts.append("\n## Audio\n\nNo audio track was present; no transcript was generated.")
-            times = sorted(set(min(duration - 0.05, duration * i / 5) for i in range(6)))
-            for timestamp in times:
-                image_path = Path(tmp) / f"frame-{timestamp:.3f}.jpg"
-                await self._run(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-ss", f"{timestamp:.3f}", "-i", str(source), "-frames:v", "1", "-vf", "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease", "-y", str(image_path)])
-                if image_path.exists() and image_path.stat().st_size:
+            tail_safe = max(0.05, min(0.5, 2.0 / frame_rate if frame_rate > 0 else 0.08))
+            end = max(0.0, duration - tail_safe)
+            times = sorted(set(end * i / 5 for i in range(6)))
+            extracted = 0
+            for index, timestamp in enumerate(times):
+                image_path = Path(tmp) / f"frame-{index}.jpg"
+                saved_at = None
+                step = 1.0 / frame_rate if frame_rate > 0 else 0.04
+                for attempt in range(3):
+                    candidate = max(0.0, timestamp - attempt * max(step, 0.04))
+                    try:
+                        await self._run(["ffmpeg", "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe", "-ss", f"{candidate:.3f}", "-i", str(source), "-frames:v", "1", "-vf", "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease", "-y", str(image_path)])
+                        if image_path.is_file() and 16 < image_path.stat().st_size <= 4 * 1024 * 1024:
+                            with Image.open(image_path) as check:
+                                check.verify()
+                            saved_at = candidate
+                            break
+                    except (RuntimeError, OSError, ValueError):
+                        pass
+                    image_path.unlink(missing_ok=True)
+                if saved_at is not None:
                     description = await self._image(image_path.read_bytes(), image_path.name)
                     frame_description = description.partition("\n\n")[2]
-                    parts.append(f"\n## Keyframe at {timestamp:.2f}s\n\n{frame_description}")
-            if len(parts) <= 3:
-                raise RuntimeError("No video content could be extracted")
+                    parts.append(f"\n## Keyframe at {saved_at:.2f}s\n\n{frame_description}")
+                    extracted += 1
+            if extracted == 0:
+                raise RuntimeError("No valid video frames could be extracted")
             return "\n".join(parts)
+
+    @staticmethod
+    def _parse_rate(value: str | None) -> float:
+        try:
+            numerator, denominator = (value or "").split("/", 1)
+            rate = float(numerator) / float(denominator)
+            return rate if math.isfinite(rate) and rate > 0 else 0.0
+        except (ValueError, ZeroDivisionError):
+            return 0.0
 
     async def _run(self, argv: list[str], *, capture: bool = False) -> str:
         try:
-            result = await asyncio.to_thread(subprocess.run, argv, check=True, capture_output=True, text=True, timeout=90)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            raise RuntimeError("Media conversion failed") from exc
-        return result.stdout if capture else ""
+            with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+                result = await asyncio.to_thread(subprocess.run, argv, check=False, stdout=stdout_file, stderr=stderr_file, timeout=90)
+                stderr_file.seek(max(0, stderr_file.tell() - 2048))
+                stderr = stderr_file.read(2048).decode("utf-8", errors="replace")
+                if result.returncode:
+                    stderr = stderr.replace("\\n", " ").replace("\\r", " ")
+                    stderr = re.sub(r"/tmp/butler-(?:video|audio)-[^ /]+", "[temporary-file]", stderr)[:240]
+                    detail = f" (exit {result.returncode}{': ' + stderr if stderr else ''})"
+                    raise RuntimeError("Media conversion failed" + detail)
+                if capture:
+                    stdout_file.seek(0)
+                    output = stdout_file.read(64 * 1024 + 1)
+                    if len(output) > 64 * 1024:
+                        raise RuntimeError("Media probe output exceeded 64 KiB limit")
+                    return output.decode("utf-8", errors="strict")
+                return ""
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Media conversion timed out after 90 seconds") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Media conversion could not start ({type(exc).__name__})") from exc
 
     def _zip(self, data: bytes, filename: str) -> str:
         try:
