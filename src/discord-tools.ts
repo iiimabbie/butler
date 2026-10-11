@@ -6,6 +6,7 @@ import { resolve, basename } from 'node:path';
 import type { Store, StoredMessage } from './store.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
+import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
 export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
@@ -42,7 +43,7 @@ function safeDiscordDiagnostic(value: string, token: string): string {
   return redacted.replace(/https?:\/\/[^\s"<>]+/gi, '[url redacted]').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 500);
 }
 
-export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string }): DiscordToolRuntime {
+export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string; transcription?: AudioTranscriptionConfig }): DiscordToolRuntime {
   const fetcher = options.fetcher ?? fetch;
   const pendingInput: StoredMessage[] = [];
   const takeInputMessages = (): StoredMessage[] => pendingInput.splice(0, pendingInput.length);
@@ -62,7 +63,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         return { id: attachment.id, url: attachment.url, name: attachment.filename, contentType: typeof attachment.content_type === 'string' ? attachment.content_type : null, size: typeof attachment.size === 'number' ? attachment.size : undefined } satisfies DiscordAttachmentInput;
       });
       if (rawAttachments.length && !options.attachmentDir) throw new Error('Attachment storage is unavailable');
-      const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir!) : [];
+      const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir!, options.transcription) : [];
       if (attachments.some(attachment => attachment.status === 'failed' && attachment.error === '附件無法保存到受控目錄')) throw new Error('Attachment storage is unavailable');
       const author = isRecord(record.author) ? record.author : {};
       const eventTime = typeof record.timestamp === 'string' && Number.isFinite(Date.parse(record.timestamp)) ? record.timestamp : undefined;

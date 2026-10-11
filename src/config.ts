@@ -3,6 +3,7 @@ import { isAbsolute, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import type { ImageConfig } from './image-tools.js';
+import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
@@ -14,6 +15,7 @@ export type ButlerConfig = {
   google?: GoogleClientConfig;
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
+  transcription?: AudioTranscriptionConfig;
   schedule?: { timezone?: string };
   subagent?: { model: string; maxTurns?: number; timeoutMs?: number };
 };
@@ -26,7 +28,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
   catch { throw new Error('Butler config could not be read as YAML'); }
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'schedule', 'subagent'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -83,6 +85,9 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
       const identityReferencePath = string('identityReferencePath');
       if (identityReferencePath !== undefined && !isAbsolute(identityReferencePath)) throw new Error('Butler config image.identityReferencePath must be an absolute path');
       config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined, identityReferencePath };
+    } else if (name === 'transcription') {
+      if (section.provider !== 'groq') throw new Error('Butler config transcription.provider must be groq');
+      config.transcription = { provider: 'groq', apiKey: requireSetting(string('apiKey'), 'transcription.apiKey') };
     } else if (name === 'schedule') {
       config.schedule = { timezone: string('timezone') ?? 'Asia/Taipei' };
     } else if (name === 'subagent') {

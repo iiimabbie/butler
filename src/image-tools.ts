@@ -16,6 +16,8 @@ export interface ImageConfig {
 export interface ImageAttachmentFile {
   attachment: string;
   name: string;
+  archivePath?: string;
+  origin?: 'butler_generated';
 }
 
 export interface ImageToolRuntime {
@@ -31,7 +33,7 @@ const WORKSPACE_ROOT = resolve(PROJECT_ROOT, 'workspace');
 const generationDefinition = {
   type: 'function',
   name: 'image_generate',
-  description: 'Generate an image from a text prompt and save it temporarily. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then call image_save with the returned exact path and destination, and reply with text and the queued attachment. For an image of yourself, use image_generate_self.',
+  description: 'Generate an image from a text prompt and save it to the attachment archive. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then call image_save with the returned exact path and destination, and reply with text and the queued attachment. For an image of yourself, use image_generate_self.',
   parameters: {
     type: 'object',
     properties: { prompt: { type: 'string', minLength: 1, maxLength: 10_000 } },
@@ -65,7 +67,7 @@ export function createImageToolRuntime(options: {
   const { config } = options;
   const fetcher = options.fetcher ?? fetch;
   const definitions: Array<Record<string, unknown>> = [generationDefinition, ...(config.identityReferencePath ? [selfDefinition] : []), saveDefinition];
-  const pending = new Map<string, { filename: string; mime: string }>();
+  const pending = new Map<string, { filename: string; mime: string; archivePath: string }>();
 
   return {
     definitions,
@@ -94,7 +96,7 @@ export function createImageToolRuntime(options: {
         try { await unlink(args.path); }
         catch { throw new Error('image_save copied the named file but could not remove the temporary image; generated image remains pending and was not queued'); }
         pending.delete(args.path);
-        options.attachmentFiles.push({ attachment: destination, name: filename });
+        options.attachmentFiles.push({ attachment: destination, name: filename, archivePath: image.archivePath, origin: 'butler_generated' });
         return { status: 'queued_for_final_reply', path: destination, filename, mime: image.mime, delivery: 'pending' };
       }
       if (name !== 'image_generate' && name !== 'image_generate_self') throw new Error(`Unknown image tool: ${name}`);
@@ -139,6 +141,12 @@ export function createImageToolRuntime(options: {
       const bytes = await readGeneratedImage(response, [config.apiKey, args.prompt]);
       const image = detectImage(bytes);
       if (!image) throw new Error('Image generation returned unrecognized image data; outcome is unknown and must not be retried automatically');
+      const archiveName = `${randomUUID()}-generated.${image.extension}`;
+      const archiveDir = join(options.attachmentDir, 'images');
+      await mkdir(archiveDir, { recursive: true, mode: 0o700 });
+      const archivePath = join(archiveDir, archiveName);
+      try { await writeFile(archivePath, bytes, { flag: 'wx', mode: 0o600 }); }
+      catch { throw new Error('Generated image could not be saved to the attachment archive; generation outcome is unknown and must not be retried automatically'); }
       const filename = `${randomUUID()}.${image.extension}`;
       await mkdir(options.attachmentDir, { recursive: true });
       const path = join(options.attachmentDir, filename);
@@ -147,7 +155,7 @@ export function createImageToolRuntime(options: {
       } catch {
         throw new Error('Generated image could not be saved as an attachment; generation outcome is unknown and must not be retried automatically');
       }
-      pending.set(path, { filename, mime: image.mime });
+      pending.set(path, { filename, mime: image.mime, archivePath });
       return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'First use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a workspace destination and semantic filename, preferring a suitable existing picture category subdirectory; use workspace/picture/ root only when no category fits. This is a recommendation, not a restriction. Then call image_save with this exact path and destination, and reply with text and the queued attachment.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
     },
   };

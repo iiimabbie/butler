@@ -39,6 +39,11 @@ google:
   clientId: YOUR_GOOGLE_OAUTH_CLIENT_ID
   clientSecret: YOUR_GOOGLE_OAUTH_CLIENT_SECRET
 
+# Optional speech transcription for incoming audio attachments.
+transcription:
+  provider: groq
+  apiKey: YOUR_GROQ_API_KEY
+
 # Optional shared long-term memory.
 memory:
   baseUrl: http://127.0.0.1:18888

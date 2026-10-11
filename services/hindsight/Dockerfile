@@ -1,5 +1,14 @@
 FROM ghcr.io/vectorize-io/hindsight:0.10.2
 
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir PyMuPDF==1.26.7
+USER hindsight
+
+COPY --chown=hindsight:hindsight butler-file-parser.py /tmp/butler.py
+COPY --chown=hindsight:hindsight patch-butler-parser.py /tmp/patch-butler-parser.py
+RUN python /tmp/patch-butler-parser.py && rm /tmp/patch-butler-parser.py /tmp/butler.py
+
 RUN python - <<'PY'
 from pathlib import Path
 

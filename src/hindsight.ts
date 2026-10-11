@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
+import { open } from 'node:fs/promises';
 import type { Store } from './store.js';
 import type { ProgressEvent } from './progress.js';
 import { logError } from './error-log.js';
+import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
 
 export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; size: number; status: 'ready' | 'failed' }> };
@@ -202,6 +205,35 @@ export class Hindsight {
     }
   }
 
+  async submitAttachmentFile(input: { path: string; filename: string; mimeType?: string; documentId: string; context: string; metadata: Record<string, string>; timestamp: string; size: number }): Promise<{ operationId: string }> {
+    const handle = await open(input.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size !== input.size || stat.size > 20 * 1024 * 1024) throw new Error('Attachment archive file is unavailable or changed');
+      const bytes = await handle.readFile();
+      if (bytes.length !== input.size) throw new Error('Attachment archive file size changed while reading');
+      const imageType = resolveSupportedImageType(bytes, input.filename, input.mimeType ?? 'application/octet-stream');
+      const uploadFilename = imageType ? imageUploadFilename(input.filename, imageType) : input.filename;
+      const form = new FormData();
+      form.set('files', new Blob([new Uint8Array(bytes)], imageType ? { type: imageType.mimeType } : undefined), uploadFilename);
+      form.set('request', JSON.stringify({ files_metadata: [{ document_id: input.documentId, parser: 'butler', timestamp: input.timestamp, context: input.context, metadata: input.metadata }] }));
+      const { response, trace } = await this.request(`${this.bankUrl()}/files/retain`, { method: 'POST', body: form, headers: {} }, 'attachment_submit', {}, 120_000);
+      const text = await this.readResponse(response, trace);
+      let body: unknown;
+      try { body = this.parseResponse(text, trace); } catch { this.finishTrace(trace, { failedStage: 'json_parse' }); throw new ConversationSubmissionError(response.status >= 400 && response.status < 500 ? 'rejection' : 'unknown', `Invalid attachment conversion JSON (HTTP ${response.status})`, response.status); }
+      const record = asRecord(body);
+      if (!response.ok) { this.finishTrace(trace, { failedStage: 'http_status' }); throw new ConversationSubmissionError(response.status >= 400 && response.status < 500 ? 'rejection' : 'unknown', `Attachment conversion returned HTTP ${response.status}`, response.status, body); }
+      const operationIds = record?.operation_ids;
+      if (!Array.isArray(operationIds) || operationIds.length !== 1 || typeof operationIds[0] !== 'string' || !operationIds[0]) { this.finishTrace(trace, { failedStage: 'response_validation' }); throw new ConversationSubmissionError('unknown', 'Attachment conversion response is invalid; outcome unknown', response.status, body); }
+      this.finishTrace(trace);
+      return { operationId: operationIds[0] as string };
+    } catch (error) {
+      if (error instanceof ConversationSubmissionError) throw error;
+      if (error instanceof AttachmentImageTypeConflictError) throw new ConversationSubmissionError('rejection', `Attachment type metadata conflict: ${error.message}`);
+      throw new ConversationSubmissionError('unknown', `Attachment conversion outcome unknown: ${safeError(error)}`);
+    } finally { await handle.close(); }
+  }
+
   async getOperationStatus(operationId: string): Promise<OperationStatusResult> {
     const { response, trace } = await this.request(`${this.bankUrl()}/operations/${encodeURIComponent(operationId)}`, { method: 'GET' }, 'operation_status');
     const text = await this.readResponse(response, trace);
@@ -223,11 +255,11 @@ export class Hindsight {
 
   private bankUrl(): string { return `${this.baseUrl()}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`; }
   private baseUrl(): string { return this.config.baseUrl.replace(/\/$/, ''); }
-  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}): Promise<{ response: Response; trace: RequestTiming }> {
+  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number): Promise<{ response: Response; trace: RequestTiming }> {
     const startedAt = Date.now();
-    const trace: RequestTiming = { startedAt, timestamp: new Date(startedAt).toISOString(), requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: this.config.timeoutMs ?? 8000, ...metadata };
+    const trace: RequestTiming = { startedAt, timestamp: new Date(startedAt).toISOString(), requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: timeoutMs ?? this.config.timeoutMs ?? 8000, ...metadata };
     try {
-      const response = await this.fetcher(url, { ...init, headers: { 'content-type': 'application/json', ...init.headers }, signal: AbortSignal.timeout(trace.timeoutMs) });
+      const response = await this.fetcher(url, { ...init, headers: { ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...init.headers }, signal: AbortSignal.timeout(trace.timeoutMs) });
       trace.headersWaitMs = Date.now() - startedAt;
       trace.status = response.status;
       return { response, trace };

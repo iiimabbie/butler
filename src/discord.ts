@@ -21,7 +21,7 @@ import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
 import { compactSession } from './compaction.js';
 import { formatDiscordUrls } from './discord-url.js';
-import { AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
+import { archiveOutgoingAttachment, AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import { hasAnsiProgress } from './discord-ansi.js';
 import type { SessionOpeningContext } from './store.js';
 import type { MemoryCoordinator } from './memory-coordinator.js';
@@ -195,7 +195,7 @@ export class DiscordHandler {
       let stored = ingestion.message;
       let attachments: import('./store.js').MessageInputAttachment[];
       const preparation = (async () => {
-        try { attachments = await prepareAttachments(message.attachments ?? [], ingressRuntime.discord.attachmentDir); }
+        try { attachments = await prepareAttachments(message.attachments ?? [], ingressRuntime.discord.attachmentDir, ingressRuntime.settings.transcription); }
         catch { attachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備失敗' })); }
         this.store.updateAttachments(stored.id, attachments);
       })();
@@ -242,7 +242,7 @@ export class DiscordHandler {
           }
           this.activeAsk.add(message.channelId);
           progress = new ProgressRenderer({ send: async content => { const sent = await message.reply(formatDiscordUrls(content), { allowedMentions: ALLOWED_MENTIONS }); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress reply did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress reply did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: logSafe });
-          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
+          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
             catch (error) { logSafe('Discord referenced message could not be retrieved', error); }
@@ -296,14 +296,12 @@ export class DiscordHandler {
                 const delivered: string[] = [];
                 const deliveredAttachments: import('./store.js').MessageInputAttachment[] = [];
                 try {
-                  await sendText(message, text, attachmentFiles, () => { filesDelivered = true; }, (content, result) => {
+                  await sendText(message, text, attachmentFiles, () => { filesDelivered = true; }, async (content, result) => {
                     const saved = this.recordOutgoingSegment(state.sessionId, content, result, outgoing);
                     if (saved) {
                       outgoing = saved;
                       delivered.push(content);
-                      if (isRecord(result) && isRecord(result.attachments) && typeof result.attachments.values === 'function') for (const item of (result.attachments.values as () => Iterable<unknown>)()) {
-                        if (isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string') deliveredAttachments.push({ attachmentId: item.id, filename: item.name, mimeType: typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream', size: typeof item.size === 'number' ? item.size : 0, status: 'ready' });
-                      }
+                      deliveredAttachments.push(...await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id));
                     }
                   });
                 } finally {
@@ -614,15 +612,13 @@ export class DiscordHandler {
           let outgoing: import('./store.js').StoredMessage | undefined;
           const delivered: string[] = [];
           try {
-            await sendText({ authorId: request.job.creatorId, channelId: request.outputChannelId, content: request.prompt, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, (content, result) => {
+            await sendText({ authorId: request.job.creatorId, channelId: request.outputChannelId, content: request.prompt, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, async (content, result) => {
               const saved = this.recordOutgoingSegment(session, content, result, outgoing);
               if (saved) {
                 outgoing = saved;
                 delivered.push(content);
-                if (isRecord(result) && isRecord(result.attachments) && typeof result.attachments.values === 'function') {
-                  const deliveredAttachments = [...(result.attachments.values as () => Iterable<unknown>)()].flatMap(item => isRecord(item) && typeof item.id === 'string' && typeof item.name === 'string' ? [{ attachmentId: item.id, filename: item.name, mimeType: typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream', size: typeof item.size === 'number' ? item.size : 0, status: 'ready' as const }] : []);
-                  if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments);
-                }
+                const deliveredAttachments = await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id);
+                if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments);
               }
             });
           } finally {
@@ -682,7 +678,7 @@ export class DiscordHandler {
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.channelId, origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
           imageTools: this.imageTools(attachmentFiles, origin.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
           subagentCoordinator: this.subagentCoordinator, subagentOrigin: origin, subagentEvent: true,
-          discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: origin.outputChannelId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
+          discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: origin.outputChannelId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
           onResponseReady: async text => {
             if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
               if (text) console.info(`Discord reply discarded ${JSON.stringify({ entry: 'subagent_event', channelId: origin.outputChannelId, sessionId: event.parentSession, inputId: storedInput.id, eventId: event.id, reason: 'unquoted_no_reply_marker', text })}`);
@@ -693,9 +689,9 @@ export class DiscordHandler {
             const delivered: string[] = [];
             let filesDelivered = false;
             try {
-              await sendText({ authorId: origin.requesterId ?? config.ownerId, channelId: origin.outputChannelId, content, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, (body, result) => {
+              await sendText({ authorId: origin.requesterId ?? config.ownerId, channelId: origin.outputChannelId, content, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, async (body, result) => {
                 const saved = this.recordOutgoingSegment(event.parentSession, body, result, outgoing);
-                if (saved) { outgoing = saved; delivered.push(body); }
+                if (saved) { outgoing = saved; delivered.push(body); const deliveredAttachments = await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id); if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments); }
               });
             } finally {
               if (outgoing) { this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); this.memoryCoordinator?.notifyReady(); }
@@ -748,13 +744,33 @@ export function splitDiscordText(text: string): string[] {
   return chunks;
 }
 
-async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void): Promise<void> {
+async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void | Promise<void>): Promise<void> {
   const chunks = splitDiscordText(formatDiscordUrls(text || (files?.length ? ' ' : DELIVERY_ERROR)));
   for (let index = 0; index < chunks.length; index++) {
     const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
     if (index === 0 && files?.length) onFilesDelivered?.();
-    onDelivered?.(chunks[index]!, result);
+    await onDelivered?.(chunks[index]!, result);
   }
+}
+
+async function archiveDeliveredAttachments(result: unknown, files: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {
+  if (!isRecord(result) || !isRecord(result.attachments) || typeof result.attachments.values !== 'function') return [];
+  const items = [...(result.attachments.values as () => Iterable<unknown>)()];
+  const delivered: import('./store.js').MessageInputAttachment[] = [];
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') continue;
+    const file = files.find(candidate => candidate.name === item.name);
+    if (!file) continue;
+    const mimeType = typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream';
+    const size = typeof item.size === 'number' ? item.size : 0;
+    let localPath = file.archivePath;
+    if (!localPath) {
+      try { localPath = (await archiveOutgoingAttachment(file.attachment, item.name, attachmentDir, mimeType)).localPath; }
+      catch (error) { logSafe(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error); }
+    }
+    delivered.push({ attachmentId: item.id, filename: item.name, mimeType, size, status: 'ready', ...(localPath ? { localPath, memoryDocumentId: `attachment:${messageId}:${item.id}` } : {}), ...(file.origin ? { origin: file.origin } : {}) });
+  }
+  return delivered;
 }
 
 export const commands = [

@@ -54,6 +54,9 @@ image:
   protocol: images
   timeoutMs: 300000
   identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
+transcription:
+  provider: groq
+  apiKey: GROQ_API_KEY
 subagent:
   model: YOUR_SUBAGENT_MODEL
   # maxTurns: 30 (1–100)
