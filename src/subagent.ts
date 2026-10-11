@@ -1,5 +1,6 @@
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import type { Store } from './store.js';
+import { logInfo } from './log.js';
 
 export type SubagentConfig = { model: string; maxTurns?: number; timeoutMs?: number };
 export type SubagentToolRuntime = { definitions: Array<{ type: string; name: string; [key: string]: unknown }>; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
@@ -123,6 +124,7 @@ export async function runSubagent(config: SubagentConfig, options: SubagentRunCo
       syncStop();
       const calls = output.filter(item => item.type === 'function_call');
       for (const call of calls) {
+        logInfo('tool_call', { tool: typeof call.name === 'string' ? call.name : 'unknown', source: 'subagent', sessionId: id, ...(typeof call.call_id === 'string' ? { callId: call.call_id } : {}) });
         if (typeof call.name !== 'string' || (call.name !== 'subagent_parent_message' && !allow.has(call.name)) || typeof call.arguments !== 'string' || typeof call.call_id !== 'string') throw new Error(`Subagent tool is not allowed or malformed: ${String(call.name)}`);
         syncStop();
         options.signal?.throwIfAborted();

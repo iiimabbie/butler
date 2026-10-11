@@ -1,3 +1,4 @@
+import { ToolUsageError } from './tool-errors.js';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -49,9 +50,9 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         const candidateReal = await realpath(candidate);
         assertInside(stagingReal, candidateReal);
         const meta = await skillMetadata(candidateReal);
-        if (meta.name !== skillName) throw new Error(`Candidate skill name is ${meta.name}, not ${skillName}`);
+        if (meta.name !== skillName) throw new ToolUsageError(`Candidate skill name is ${meta.name}, not ${skillName}`);
         const destination = resolve(skillsDirectory, skillName);
-        try { await lstat(destination); throw new Error(`Skill already exists: ${skillName}`); }
+        try { await lstat(destination); throw new ToolUsageError(`Skill already exists: ${skillName}`); }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         await mkdir(skillsDirectory, { recursive: true });
         await cp(candidateReal, destination, { recursive: true, errorOnExist: true, force: false, dereference: false });
@@ -65,7 +66,7 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         await rename(skill.path, destination);
         return { removed: skill.name, path: relative(workspace, destination) };
       }
-      throw new Error(`Unknown skills tool: ${name}`);
+      throw new ToolUsageError(`Unknown skills tool: ${name}`);
     },
   };
 }
@@ -146,11 +147,11 @@ async function installedSkill(name: string, directory: string) {
   return { name: safeName, path: real, metadata };
 }
 function validName(name: string) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name) || name === '.' || name === '..') throw new Error('Skill name must be a simple directory name');
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name) || name === '.' || name === '..') throw new ToolUsageError('Skill name must be a simple directory name');
   return name;
 }
 function assertInside(root: string, target: string) {
   const rel = relative(root, target);
-  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) { if (rel !== '') throw new Error('Path must remain inside its skill or staging directory'); }
+  if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) { if (rel !== '') throw new ToolUsageError('Path must remain inside its skill or staging directory'); }
 }
-function stringArg(value: unknown, name: string, empty = false) { if (typeof value !== 'string' || (!empty && !value.trim()) || value.includes('\0')) throw new Error(`${name} must be a string`); return value; }
+function stringArg(value: unknown, name: string, empty = false) { if (typeof value !== 'string' || (!empty && !value.trim()) || value.includes('\0')) throw new ToolUsageError(`${name} must be a string`); return value; }

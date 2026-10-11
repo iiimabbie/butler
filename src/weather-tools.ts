@@ -35,7 +35,7 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
   return {
     definitions: weatherDefinitions,
     async execute(name, args) {
-      if (name !== 'weather_search' && name !== 'weather_forecast') throw new Error('Unknown weather tool');
+      if (name !== 'weather_search' && name !== 'weather_forecast') throw new ToolUsageError('Unknown weather tool');
       const allowed = name === 'weather_search' ? ['location', 'country_code'] : ['latitude', 'longitude', 'days'];
       if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown weather tool argument');
       if (name === 'weather_search') {
@@ -152,7 +152,7 @@ function text(value: unknown, name: string): string {
 }
 
 function coordinate(value: unknown, name: string, min: number, max: number): number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new Error(`${name} must be a number from ${min} to ${max}`);
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) throw new ToolUsageError(`${name} must be a number from ${min} to ${max}`);
   return value;
 }
 

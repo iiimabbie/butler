@@ -1,3 +1,4 @@
+import { logError, logInfo } from './log.js';
 import { randomUUID } from 'node:crypto';
 
 /** Metadata only: never log prompts, responses, credentials or endpoint URLs. */
@@ -9,7 +10,7 @@ export async function requestModel(options: {
   const requestId = randomUUID();
   const started = performance.now();
   const signal = AbortSignal.timeout(options.timeoutMs);
-  const emit = options.emit ?? (event => console.log(`Model HTTP ${JSON.stringify(event)}`));
+  const emit = options.emit ?? (event => { const { event: name, timestamp: _timestamp, ...fields } = event; if (name === 'failed') logError('Model HTTP request failed', undefined, { notify: false, fields }); else logInfo(`model_http_${String(name)}`, fields); });
   const metadata = { requestId, session: options.session, model: options.model, turn: options.turn, timeoutMs: options.timeoutMs, requestBytes: Buffer.byteLength(options.body) };
   const log = (event: Record<string, unknown>) => emit({ timestamp: new Date().toISOString(), ...metadata, elapsedMs: Math.round(performance.now() - started), ...event });
   let stage = 'headers';

@@ -19,7 +19,7 @@ import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
 import { Hindsight } from './hindsight.js';
 import type { MessageInputAttachment } from './store.js';
-import { logError } from './error-log.js';
+import { logError, logInfo, logWarn } from './log.js';
 import { AttachmentInputError, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from './input-attachments.js';
 import { countContext } from './context-budget.js';
 import { compactLiveGroups, compactSession } from './compaction.js';
@@ -298,7 +298,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
                 percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
                 updateContextState(prediction, percent);
               }
-            } catch (error) { logError(`Automatic persistent compaction failed session=${session}`, error); }
+            } catch (error) { logWarn(`Automatic persistent compaction failed session=${session}`, error); }
           }
         }
       }
@@ -320,7 +320,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
               percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
               updateContextState(prediction, percent);
             }
-          } catch (error) { logError(`Automatic live compaction failed session=${session}`, error); }
+          } catch (error) { logWarn(`Automatic live compaction failed session=${session}`, error); }
         }
       }
       if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${config.modelContextTokens?.[config.model] ? 'model limit' : 'configured budget'}; stopping before request.`);
@@ -416,7 +416,8 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
   };
 }
 
-export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime): Promise<unknown> {
+export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, executionSource: 'agent' | 'subagent' = 'agent'): Promise<unknown> {
+  if (executionSource !== 'subagent') logInfo('tool_call', { tool: call.name, source: executionSource, sessionId: session, callId: call.call_id });
   let args: Record<string, unknown>;
   try {
     const parsed: unknown = JSON.parse(call.arguments);
@@ -426,7 +427,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     const id = store.beginTool(session, call.name, { raw_arguments: call.arguments });
     emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name });
     const result = { error: errorMessage(error) };
-    logError(`Tool argument parsing failed tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
     store.finishTool(id, 'failed', result);
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
     return { tool_history_id: id, ...result };
@@ -508,7 +508,8 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     }
   } catch (error) {
     if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) throw error;
-    logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: !(error instanceof ToolUsageError) && !(error instanceof WebFetchExtractionError), deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
+    if (error instanceof WebFetchExtractionError) logWarn(`Tool execution fallback available tool=${call.name} session=${session} audit=${id}`, error);
+    else if (!(error instanceof ToolUsageError)) logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: true, deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
     result = { error: errorMessage(error) };
     try { store.finishTool(id, 'failed', result); } catch (persistError) { throw Object.assign(persistError instanceof Error ? persistError : new Error(String(persistError)), { auditPersistenceFailure: true }); }
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
@@ -525,7 +526,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
 
 function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   try { config.onProgress?.(event); }
-  catch (error) { logError('Agent progress callback failed', error); }
+  catch (error) { logWarn('Agent progress callback failed', error); }
 }
 
 function runTool(store: Store, session: string, name: string, args: Record<string, unknown>, transcriptTimezone: string): unknown {

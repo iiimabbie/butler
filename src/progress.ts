@@ -1,3 +1,4 @@
+import type { LogMethods } from './log.js';
 export type ProgressEvent =
   | { type: 'tool_start'; callId: string; toolName: string; args?: Record<string, unknown>; description?: string }
   | { type: 'tool_update'; callId: string; toolName: string; message: string }
@@ -11,7 +12,7 @@ export interface ProgressMessage {
 
 export interface ProgressTransport {
   send(content: string): Promise<ProgressMessage>;
-  log(message: string, error?: unknown): void;
+  log: LogMethods;
 }
 
 export interface ProgressRendererOptions extends ProgressTransport {
@@ -69,7 +70,7 @@ export class ProgressRenderer {
     await this.flushing;
     if (!this.sendAttempted || !this.message) return;
     try { await this.message.delete(); }
-    catch (error) { this.options.log('Could not delete progress message', error); }
+    catch (error) { this.options.log.logWarn('Could not delete progress message', error); }
   }
 
   private scheduleFlush(): void {
@@ -86,10 +87,10 @@ export class ProgressRenderer {
           // A rejected send may nevertheless have succeeded remotely; never retry the initial send.
           this.sendAttempted = true;
           try { this.message = await this.options.send(body); }
-          catch (error) { this.options.log('Could not send initial progress message; not retrying because delivery is unknown', error); }
+          catch (error) { this.options.log.logWarn('Could not send initial progress message; not retrying because delivery is unknown', error); }
         }
-      } catch (error) { this.options.log('Could not update progress message', error); }
-    }).catch(error => { this.options.log('Progress renderer failed', error); });
+      } catch (error) { this.options.log.logWarn('Could not update progress message', error); }
+    }).catch(error => { this.options.log.logWarn('Progress renderer failed', error); });
     return this.flushing;
   }
 }

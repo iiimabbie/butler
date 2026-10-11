@@ -1,4 +1,4 @@
-import { logError } from './error-log.js';
+import { logWarn } from './log.js';
 
 export type CountSource = 'local-count-estimate' | 'character-estimate' | 'calibrated estimate';
 export type ContextCount = { inputTokens: number; source: CountSource; nativeCoverage: 'unmeasured native inputs' | 'text and tools'; reason?: string };
@@ -19,7 +19,7 @@ export async function countContext(options: { baseUrl: string; apiKey?: string; 
     return { inputTokens: body.input_tokens as number, source: 'local-count-estimate', nativeCoverage: native ? 'unmeasured native inputs' : 'text and tools' };
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    logError(`Context token count unavailable model=${options.model}; using Unicode character estimate`, error);
+    logWarn(`Context token count unavailable model=${options.model}; using Unicode character estimate`, error);
     const native = hasNative(options.input);
     return { inputTokens: unicodeEstimate(JSON.stringify({ input: stripNative(options.input), tools: options.tools })), source: 'character-estimate', nativeCoverage: native ? 'unmeasured native inputs' : 'text and tools', reason };
   }

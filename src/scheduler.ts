@@ -1,3 +1,5 @@
+import { isHttp429 } from './tool-errors.js';
+import type { LogMethods } from './log.js';
 import { Cron } from 'croner';
 
 export type ScheduleKind = 'cron' | 'reminder';
@@ -66,7 +68,7 @@ export interface ScheduledTaskRequest {
 export interface SchedulerOptions {
   store: SchedulerStore;
   enqueue: (request: ScheduledTaskRequest) => Promise<unknown>;
-  log: (message: string, error?: unknown) => void;
+  log: LogMethods;
   pollIntervalMs?: number;
   now?: () => Date;
 }
@@ -117,7 +119,7 @@ export class Scheduler {
     this.stopped = false;
     const now = this.now().toISOString();
     for (const run of this.options.store.markRunningScheduleRunsUnknown(now)) {
-      this.options.log(`Scheduled execution ${run.id} was running at restart; marked unknown and not replayed`);
+      this.options.log.logWarn('Scheduled execution was running at restart; marked unknown and not replayed', undefined, { runId: run.id });
     }
     // Skip cron ticks missed while offline once, but do not discard overdue ticks
     // caused by ordinary polling/queue delays after this startup reconciliation.
@@ -127,7 +129,7 @@ export class Scheduler {
         const nextRun = scheduleNextRun(job, new Date(Date.parse(now) + 1));
         this.options.store.updateSchedule(job.id, { nextRun });
       } catch (error) {
-        this.options.log(`Could not advance missed cron schedule ${job.id}; disabling it`, error);
+        this.options.log.logError('Could not advance missed cron schedule; disabling it', error, { notify: !isHttp429(error), fields: { scheduleId: job.id } });
         this.options.store.updateSchedule(job.id, { enabled: false });
       }
     }
@@ -171,14 +173,14 @@ export class Scheduler {
         let nextRun: string | null = null;
         if (job.kind === 'cron') {
           try { nextRun = scheduleNextRun({ kind: 'cron', cron: job.cron ?? undefined, timezone: job.timezone }, new Date(Math.max(nowDate.getTime(), Date.parse(scheduled)) + 1)); }
-          catch (error) { this.options.log(`Could not calculate next run for schedule ${job.id}; disabling it`, error); this.options.store.updateSchedule(job.id, { enabled: false }); continue; }
+          catch (error) { this.options.log.logError('Could not calculate next run for schedule; disabling it', error, { notify: !isHttp429(error), fields: { scheduleId: job.id } }); this.options.store.updateSchedule(job.id, { enabled: false }); continue; }
         }
         const claimed = this.options.store.claimScheduleRun(job.id, scheduled, nextRun, now);
         if (!claimed) continue;
         const work = this.execute(claimed.job, claimed.run).finally(() => this.pending.delete(work));
         this.pending.add(work);
       }
-    } catch (error) { this.options.log('Scheduler polling failed', error); }
+    } catch (error) { this.options.log.logError('Scheduler polling failed', error, { notify: !isHttp429(error) }); }
     finally { this.polling = false; }
   }
 
@@ -187,9 +189,9 @@ export class Scheduler {
       await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}, created in channel ${job.sourceChannelId}. Send the result only to the configured output channel.\n\n${job.content}` });
       this.options.store.finishScheduleRun(run.id, 'completed');
     } catch (error) {
-      this.options.log(`Scheduled task ${job.id} execution ${run.id} failed`, error);
+      this.options.log.logError('Scheduled task execution failed', error, { notify: !isHttp429(error), fields: { scheduleId: job.id, runId: run.id } });
       try { this.options.store.finishScheduleRun(run.id, 'failed', error instanceof Error ? error.message : String(error)); }
-      catch (finishError) { this.options.log(`Could not persist scheduled execution ${run.id} failure`, finishError); }
+      catch (finishError) { this.options.log.logError('Could not persist scheduled execution failure', finishError, { notify: !isHttp429(finishError), fields: { runId: run.id } }); }
     }
   }
 }

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { executeCall } from '../dist/agent.js';
-import { configureErrorLogging, flushErrorLogs } from '../dist/error-log.js';
+import { configureLogging, flushLogs } from '../dist/log.js';
 import { WebFetchExtractionError } from '../dist/tool-errors.js';
 
 function fakeStore() {
@@ -20,13 +20,13 @@ async function withMockWebhook(run) {
     requests.push({ url: String(url), init });
     return new Response(null, { status: 204 });
   };
-  configureErrorLogging({ discord: { errorWebhookUrl: 'https://discord.com/api/webhooks/123/test-token' } });
+  configureLogging({ discord: { errorWebhookUrl: 'https://discord.com/api/webhooks/123/test-token' } });
   try {
     return await run(requests);
   } finally {
-    await flushErrorLogs();
+    await flushLogs();
     globalThis.fetch = originalFetch;
-    configureErrorLogging({});
+    configureLogging({});
   }
 }
 
@@ -66,7 +66,7 @@ test('unknown extraction reason and operational failures still notify', async ()
       assert.equal(store.finished[0].status, 'failed');
       assert.equal(store.finished[0].result.error, result.error);
     }
-    await flushErrorLogs();
+    await flushLogs();
     assert.equal(requests.length, errors.length);
   });
 });

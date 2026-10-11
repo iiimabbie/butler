@@ -1,4 +1,4 @@
-import { logError } from './error-log.js';
+import { logError } from './log.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';

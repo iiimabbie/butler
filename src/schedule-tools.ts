@@ -63,7 +63,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
       if (name === 'schedule_list') return options.store.listSchedules(options.sourceChannelId);
       const id = stringArg(args.id, 'id');
       const current = findLocal(id);
-      if (!current) throw new Error('Schedule not found in this source channel');
+      if (!current) throw new ToolUsageError('Schedule not found in this source channel');
       if (name === 'schedule_delete') return { deleted: options.store.deleteSchedule(id) };
       if (name === 'schedule_enable' || name === 'schedule_disable') {
         const enabled = name === 'schedule_enable';
@@ -83,7 +83,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         patch.nextRun = candidate.enabled ? scheduleNextRun(candidate, now()) : null;
         return options.store.updateSchedule(id, patch);
       }
-      throw new Error(`Unknown schedule tool: ${name}`);
+      throw new ToolUsageError(`Unknown schedule tool: ${name}`);
     },
   };
 }

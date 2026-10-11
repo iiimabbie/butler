@@ -131,19 +131,19 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const type = Number(target.type);
     if ([10, 11, 12].includes(type)) {
       if (String(target.id) !== id) throw new Error('Discord returned a different channel than requested');
-      if (requireThread && ![10, 11, 12].includes(type)) throw new Error('Target is not a thread');
+      if (requireThread && ![10, 11, 12].includes(type)) throw new ToolUsageError('Target is not a thread');
       return target;
     }
-    if (requireThread) throw new Error('Target is not a thread');
+    if (requireThread) throw new ToolUsageError('Target is not a thread');
     return target;
   };
   return { definitions: discordMessageTools, context: options.context, takeInputMessages, async execute(name, args) {
-    const spec = specs.find(item => item.name === name); if (!spec) throw new Error(`Unknown Discord tool: ${name}`);
+    const spec = specs.find(item => item.name === name); if (!spec) throw new ToolUsageError(`Unknown Discord tool: ${name}`);
     validateArgs(spec, args);
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : formatDiscordUrls(stringArg(args.content, 'content'));
-    if (content !== undefined && content.length > 2000) throw new Error('Formatted Discord message exceeds 2000 characters');
+    if (content !== undefined && content.length > 2000) throw new ToolUsageError('Formatted Discord message exceeds 2000 characters');
     if (name === 'discord_react') {
       const emojis = args.emojis as string[];
       const added: string[] = [];
@@ -161,23 +161,23 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     if (name === 'discord_fetch_message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
       const file = stringArg(args.file, 'file');
-      if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new Error('Attachment must be a local file path');
+      if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new ToolUsageError('Attachment must be a local file path');
       const absolute = resolve(projectRoot, file); const real = realpathSync(absolute);
-      if (!statSync(real).isFile()) throw new Error('Attachment must be a regular file');
+      if (!statSync(real).isFile()) throw new ToolUsageError('Attachment must be a regular file');
       const name = args.filename === undefined ? basename(real) : stringArg(args.filename, 'filename');
-      if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new Error('filename must be a plain filename');
+      if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new ToolUsageError('filename must be a plain filename');
       options.context.attachmentFiles.push({ attachment: real, name });
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
     }
     if (name === 'discord_send_buttons') {
       if (!options.context.store || !options.context.ownerId || !options.context.sessionId) throw new Error('Persistent Discord actions are unavailable');
       const users = args.allowedUserIds as string[] | undefined;
-      if (users?.length === 0) throw new Error('allowedUserIds must not be empty');
-      if (users?.some(id => id !== options.context.ownerId)) throw new Error('Interactive actions are restricted to the configured owner');
+      if (users?.length === 0) throw new ToolUsageError('allowedUserIds must not be empty');
+      if (users?.some(id => id !== options.context.ownerId)) throw new ToolUsageError('Interactive actions are restricted to the configured owner');
       const allowedActions = new Set(specs.filter(s => ['discord_send_message','discord_edit_message','discord_delete_message','discord_react','discord_pin','discord_unpin','discord_create_forum_post','discord_archive_thread','discord_delete_thread','discord_rename_post','discord_rename_forum'].includes(s.name)).map(s => s.name));
       const buttons = args.buttons as Array<Record<string, unknown>>;
-      if (new Set(buttons.map(item => item.id)).size !== buttons.length) throw new Error('Button IDs must be unique');
-      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new Error('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); }
+      if (new Set(buttons.map(item => item.id)).size !== buttons.length) throw new ToolUsageError('Button IDs must be unique');
+      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new ToolUsageError('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); }
       const actionId = randomUUID(); const expiresAt = new Date(Date.now() + Number(args.expiresInMinutes ?? 1440) * 60_000).toISOString();
       const custom: Array<Record<string, unknown>> = buttons.map(item => ({ ...item, custom_id: `${actionId}:${randomUUID()}` }));
       options.context.store.createDiscordAction({ id: actionId, sessionId: options.context.sessionId, channelId: channelId!, ownerId: options.context.ownerId, expiresAt, buttons: custom });
@@ -198,23 +198,23 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       return { id: channel.id, name: channel.name ?? null, type: channel.type, flags: channel.flags ?? 0, available_tags: tags ?? [], require_tag: (Number(channel.flags ?? 0) & 16) !== 0 };
     } else if (name === 'discord_create_forum_post') {
       const parent = await checkRootOrChild(channelId!); const type = Number(parent.type);
-      if (![15,16].includes(type)) throw new Error('Target channel is not a forum/media channel');
+      if (![15,16].includes(type)) throw new ToolUsageError('Target channel is not a forum/media channel');
       const availableTags = parent.available_tags;
       if (availableTags !== undefined && !Array.isArray(availableTags)) throw new Error('Discord returned invalid available_tags');
       const tags = (availableTags ?? []) as Array<Record<string, unknown>>;
       const appliedTagIds = args.appliedTagIds as string[] | undefined;
       const requireTag = (Number(parent.flags ?? 0) & 16) !== 0;
-      if (appliedTagIds?.some(id => !tags.some(tag => tag.id === id))) throw new Error('appliedTagIds must identify tags available in this forum');
+      if (appliedTagIds?.some(id => !tags.some(tag => tag.id === id))) throw new ToolUsageError('appliedTagIds must identify tags available in this forum');
       if (requireTag && !appliedTagIds?.length) return { ok: false, confirmed: false, requiresTag: true, forumId: channelId, available_tags: tags };
       method='POST'; path=`/channels/${channelId}/threads`;
       body={name:args.title,message:{content,allowed_mentions:{parse:[]}},auto_archive_duration:1440,...(appliedTagIds?.length ? {applied_tags:appliedTagIds} : {})};
     } else if (['discord_archive_thread','discord_delete_thread'].includes(name)) {
-      const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new Error('Thread does not belong to the specified root');
+      const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new ToolUsageError('Thread does not belong to the specified root');
       if (name === 'discord_delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
     } else if (name === 'discord_rename_post') {
-      const target = await checkRootOrChild(stringArg(args.threadId,'threadId'),true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new Error('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
+      const target = await checkRootOrChild(stringArg(args.threadId,'threadId'),true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new ToolUsageError('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
     } else if (name === 'discord_rename_forum') {
-      const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new Error('Target is not a forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
+      const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new ToolUsageError('Target is not a forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {

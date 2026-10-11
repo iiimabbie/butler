@@ -132,7 +132,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     const form = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(metadata)}\r\n--${boundary}\r\nContent-Type: ${mime}\r\n\r\n`), bytes, Buffer.from(`\r\n--${boundary}--\r\n`)]);
     return c.request('/upload/drive/v3/files', { method: 'POST', query: { uploadType: 'multipart', fields: 'id,name,mimeType,size,webViewLink' }, upload: { bytes: form, contentType: `multipart/related; boundary=${boundary}` } });
   }
-  throw new Error('Unknown Google tool');
+  throw new ToolUsageError('Unknown Google tool');
 }
 
 // Todos do not use due dates; leave existing Google data unchanged and omit it from tool results.

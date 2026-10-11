@@ -39,7 +39,7 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
         web_map: ['url','instructions','max_depth','max_breadth','limit','select_paths','exclude_paths'], web_usage: [],
       };
       const allowed = allowedByName[name];
-      if (!allowed) throw new Error('Unknown web tool');
+      if (!allowed) throw new ToolUsageError('Unknown web tool');
       if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown web tool argument');
       const redact = (value: string) => value.replaceAll(apiKey, '[redacted]');
       if (name === 'web_search') {

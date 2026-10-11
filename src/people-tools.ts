@@ -33,7 +33,7 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
         people_list: ['limit', 'offset'], people_get: ['key'], people_upsert: ['dcid', 'nickname', 'max_tokens', 'tags', ...Object.keys(refreshProperties)],
       };
       const keys = allowed[name];
-      if (!keys) throw new Error(`Unknown people tool: ${name}`);
+      if (!keys) throw new ToolUsageError(`Unknown people tool: ${name}`);
       if (Object.keys(args).some(key => !keys.includes(key))) throw new ToolUsageError('Unknown people tool argument');
       if (name === 'people_list') {
         const limit = integerArg(args.limit, 50, 1, 100, 'limit');

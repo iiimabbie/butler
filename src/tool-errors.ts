@@ -15,3 +15,12 @@ export class WebFetchExtractionError extends Error {
     this.name = 'WebFetchExtractionError';
   }
 }
+export function isHttp429(value: unknown, depth = 0): boolean {
+  if (depth > 4) return false;
+  if (typeof value === 'string') return /\bHTTP\s+429\b/i.test(value) || /^429\b/.test(value);
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as { status?: unknown; statusCode?: unknown; message?: unknown; cause?: unknown };
+  if (record.status === 429 || record.status === '429' || record.statusCode === 429 || record.statusCode === '429') return true;
+  if (typeof record.message === 'string' && (/\bHTTP\s+429\b/i.test(record.message) || /^429\b/.test(record.message))) return true;
+  return 'cause' in record && isHttp429(record.cause, depth + 1);
+}

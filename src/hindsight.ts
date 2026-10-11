@@ -3,7 +3,8 @@ import { constants as fsConstants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import type { Store } from './store.js';
 import type { ProgressEvent } from './progress.js';
-import { logError } from './error-log.js';
+import { formatLogTimestamp, logError, logInfo, logWarn } from './log.js';
+import { isHttp429 } from './tool-errors.js';
 import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
 
 export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
@@ -34,6 +35,7 @@ export class Hindsight {
   constructor(private readonly config: HindsightConfig, private readonly fetcher: typeof fetch = fetch) {}
 
   async ensureBank(store: Store, session: string, onProgress?: (event: ProgressEvent) => void): Promise<void> {
+    logInfo('tool_call', { tool: 'hindsight_bank_setup', source: 'internal', sessionId: session });
     const audit = store.beginTool(session, 'hindsight_bank_setup', { bankId: this.config.bankId });
     const started = Date.now();
     emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_bank_setup', description: '確認共享記憶服務' });
@@ -51,7 +53,7 @@ export class Hindsight {
         createdBank = true;
       } else if (!response.ok) throw new Error(`bank config returned HTTP ${response.status}`);
     } catch (error) {
-      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error);
+      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error, { notify: !isHttp429(error) });
       store.finishTool(audit, 'failed', { bankId: this.config.bankId, error: safeError(error) });
       emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed' });
       logMemoryPhase('bank_setup', started, 'failed');
@@ -67,6 +69,7 @@ export class Hindsight {
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
     const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
     const request = { query };
+    logInfo('tool_call', { tool: 'hindsight_recall', source: 'internal', sessionId: session });
     const audit = store.beginTool(session, 'hindsight_recall', { bankId: this.config.bankId, ...request, phase: 'ask-start' });
     const recallStarted = Date.now();
     emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_recall', description: '查找相關的過往對話' });
@@ -74,7 +77,7 @@ export class Hindsight {
     try { result = await this.recall(query); }
     catch (error) {
       const recoverable = error instanceof RecallQueryError;
-      logError(`Hindsight recall failed session=${session} audit=${audit}`, error, { notify: false });
+      logWarn(`Hindsight recall failed session=${session} audit=${audit}`, error);
       const reason = recoverable ? error.safeReason : undefined;
       store.finishTool(audit, 'failed', { error: safeError(error), ...(reason ? { reason } : {}) });
       logMemoryPhase('recall', recallStarted, 'failed');
@@ -303,8 +306,10 @@ export class Hindsight {
     if (trace.logged) return;
     Object.assign(trace, extra);
     trace.logged = true;
-    console.info(`Hindsight HTTP ${JSON.stringify({ timestamp: trace.timestamp, requestId: trace.requestId, method: trace.method, operation: trace.operation, timeoutMs: trace.timeoutMs, headersWaitMs: trace.headersWaitMs ?? null, bodyReadMs: trace.bodyReadMs ?? null, jsonParseMs: trace.jsonParseMs ?? null, totalMs: Date.now() - trace.startedAt, status: trace.status ?? null, responseBytes: trace.responseBytes ?? null, budget: trace.budget ?? null, maxTokens: trace.maxTokens ?? null, queryChars: trace.queryChars ?? null, resultCount: trace.resultCount ?? null, failedStage: trace.failedStage ?? null, errorType: trace.errorType ?? null })}`);
-    if (trace.failedStage) logError(`Hindsight request failed operation=${trace.operation} request=${trace.requestId} status=${trace.status ?? 'unknown'} stage=${trace.failedStage} errorType=${trace.errorType ?? 'unknown'}`, undefined, { notify: !(trace.operation === 'recall' && (trace.status === 400 || trace.status === 422)) });
+    const fields = { startedAt: formatLogTimestamp(new Date(trace.startedAt)), requestId: trace.requestId, method: trace.method, operation: trace.operation, timeoutMs: trace.timeoutMs, headersWaitMs: trace.headersWaitMs ?? null, bodyReadMs: trace.bodyReadMs ?? null, jsonParseMs: trace.jsonParseMs ?? null, totalMs: Date.now() - trace.startedAt, status: trace.status ?? null, responseBytes: trace.responseBytes ?? null, budget: trace.budget ?? null, maxTokens: trace.maxTokens ?? null, queryChars: trace.queryChars ?? null, resultCount: trace.resultCount ?? null, failedStage: trace.failedStage ?? null, errorType: trace.errorType ?? null };
+    if (!trace.failedStage) logInfo('hindsight_http', fields);
+    else if (trace.operation === 'recall' && (trace.status === 400 || trace.status === 422)) logWarn('hindsight_http', undefined, fields);
+    else logError('hindsight_http', undefined, { notify: false, fields });
   }
   private async get(url: string): Promise<unknown> {
     const { response, trace } = await this.request(url, { method: 'GET' }, 'document_read');
@@ -356,8 +361,8 @@ class RecallQueryError extends Error {
     this.safeReason = safeReason.slice(0, 300);
   }
 }
-function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch (error) { logError('Hindsight progress callback failed', error); /* progress must not affect memory behavior */ } }
-function logMemoryPhase(phase: string, started: number, status: string): void { console.info(`Hindsight ${phase} ${status} ${Date.now() - started}ms`); }
+function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch (error) { logWarn('Hindsight progress callback failed', error); /* progress must not affect memory behavior */ } }
+function logMemoryPhase(phase: string, started: number, status: string): void { const fields = { phase, status, durationMs: Date.now() - started }; if (status === 'completed') logInfo('hindsight_phase', fields); else if (phase === 'recall') logWarn('hindsight_phase', undefined, fields); else logError('hindsight_phase', undefined, { notify: false, fields }); }
 function speaker(message: MemoryMessage): string { const id = message.source.authorId ?? 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }
 function asRecord(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function auditView(value: unknown): unknown { const r = asRecord(value); if (!r) return value; return { ...r, ...(typeof r.text === 'string' ? { text: r.text.slice(0, 8000) } : {}) }; }

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
+import type { LogMethods } from './log.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
@@ -139,7 +140,7 @@ function valueAt(config: ButlerConfig, path: string): unknown {
 }
 function sameValue(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 
-export function watchConfig(options: { onCandidate(config: ButlerConfig): void; log(message: string): void; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
+export function watchConfig(options: { onCandidate(config: ButlerConfig): void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
   const path = options.path ?? CONFIG_PATH;
   let current = options.initial ?? readConfig(path);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -150,19 +151,19 @@ export function watchConfig(options: { onCandidate(config: ButlerConfig): void; 
     if (closed) return;
     let candidate: ButlerConfig;
     try { candidate = readConfig(path); }
-    catch (error) { options.log(`Config reload rejected: ${error instanceof Error ? error.message : 'invalid config'}`); return; }
+    catch (error) { options.log.logWarn('Config reload rejected', error); return; }
     const cold = coldPaths.filter(key => !sameValue(valueAt(current, key), valueAt(candidate, key)));
-    if (cold.length) { options.log(`Config reload rejected; restart required for: ${cold.join(', ')}`); return; }
+    if (cold.length) { options.log.logWarn('Config reload rejected; restart required', undefined, { coldPaths: cold }); return; }
     if (sameValue(current, candidate)) return;
-    try { options.onCandidate(candidate); current = candidate; options.log('Config reload applied'); }
-    catch (error) { options.log(`Config reload rejected: ${error instanceof Error ? error.message : 'runtime validation failed'}`); }
+    try { options.onCandidate(candidate); current = candidate; options.log.logInfo('Config reload applied'); }
+    catch (error) { options.log.logWarn('Config reload rejected', error); }
   };
   const schedule = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { void reload(); }, options.debounceMs ?? 250); };
   try {
     watcher = watch(dirname(path), { persistent: false }, (_event, filename) => {
       if (filename === null || filename.toString() === basename(path)) schedule();
     });
-    watcher.on('error', () => options.log('Config watcher failed; service continues without further reloads'));
-  } catch { options.log('Config watcher failed; service continues without further reloads'); }
+    watcher.on('error', () => options.log.logError('Config watcher failed; service continues without further reloads'));
+  } catch { options.log.logError('Config watcher failed; service continues without further reloads'); }
   return { close() { closed = true; if (timer) clearTimeout(timer); timer = undefined; watcher?.close(); watcher = undefined; } };
 }
