@@ -503,7 +503,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     }
   } catch (error) {
     if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) throw error;
-    logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: !(error instanceof ToolUsageError), deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
+    logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: !(error instanceof ToolUsageError) && !(error instanceof WebFetchExtractionError), deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
     result = { error: errorMessage(error) };
     try { store.finishTool(id, 'failed', result); } catch (persistError) { throw Object.assign(persistError instanceof Error ? persistError : new Error(String(persistError)), { auditPersistenceFailure: true }); }
     emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'failed' });
