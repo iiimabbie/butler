@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { executeCall } from '../dist/agent.js';
 import { configureLogging, flushLogs } from '../dist/log.js';
 import { WebFetchExtractionError } from '../dist/tool-errors.js';
+import { LocalToolRuntime } from '../dist/local-tools.js';
 
 function fakeStore() {
   const finished = [];
@@ -33,6 +34,18 @@ async function withMockWebhook(run) {
 function toolCall() {
   return { call_id: 'call-1', name: 'web_fetch', arguments: JSON.stringify({ url: 'https://example.test/page' }) };
 }
+
+test('unknown local tool remains an audited usage error without an error notification', async () => {
+  await withMockWebhook(async requests => {
+    const store = fakeStore();
+    const localTools = new LocalToolRuntime('/tmp');
+    const result = await executeCall(store, 'session-local', { call_id: 'local-call', name: 'local_unknown', arguments: '{"path":"unused"}' }, { localTools });
+    assert.equal(result.error, 'Unknown local tool: local_unknown');
+    assert.equal(store.finished[0].status, 'failed');
+    assert.equal(requests.length, 0);
+    await localTools.close();
+  });
+});
 
 test('unavailable tool request is audited without error notification or duplicate subagent entry log', async () => {
   await withMockWebhook(async requests => {
