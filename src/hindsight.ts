@@ -260,7 +260,7 @@ export class Hindsight {
   private baseUrl(): string { return this.config.baseUrl.replace(/\/$/, ''); }
   private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number): Promise<{ response: Response; trace: RequestTiming }> {
     const startedAt = Date.now();
-    const trace: RequestTiming = { startedAt, timestamp: new Date(startedAt).toISOString(), requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: timeoutMs ?? this.config.timeoutMs ?? 8000, ...metadata };
+    const trace: RequestTiming = { startedAt, requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: timeoutMs ?? this.config.timeoutMs ?? 8000, ...metadata };
     try {
       const response = await this.fetcher(url, { ...init, headers: { ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...init.headers }, signal: AbortSignal.timeout(trace.timeoutMs) });
       trace.headersWaitMs = Date.now() - startedAt;
