@@ -121,7 +121,7 @@ function renderMessage(row) {
   if (row.attachments) {
     let attachments = [];
     try { attachments = JSON.parse(row.attachments); } catch { /* malformed metadata is not rendered */ }
-    for (const file of attachments) card.append(element('div', `附件：${file.filename} · ${file.mimeType} · ${file.size} bytes · ${file.status}`, 'attachment'));
+    for (const file of attachments) card.append(element('div', `附件：${file.filename} · ${file.mimeType} · ${file.status}`, 'attachment'));
   }
 
   const details = element('details', undefined, 'metadata');

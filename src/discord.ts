@@ -204,14 +204,14 @@ export class DiscordHandler {
         ...(message.forwardedMessage ? { forwardedMessage: message.forwardedMessage } : {}),
       };
       const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
-      const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備尚未完成' }));
+      const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       if (!ingestion.created) { releaseIngress(); return; }
       let stored = ingestion.message;
       let attachments: import('./store.js').MessageInputAttachment[];
       const preparation = (async () => {
         try { attachments = await prepareAttachments(message.attachments ?? [], ingressRuntime.discord.attachmentDir, ingressRuntime.settings.transcription); }
-        catch { attachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.size ?? 0, status: 'failed' as const, error: '附件準備失敗' })); }
+        catch { attachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備失敗' })); }
         this.store.updateAttachments(stored.id, attachments);
       })();
       this.activeIngestions.add(preparation);
@@ -829,13 +829,12 @@ async function archiveDeliveredAttachments(result: unknown, files: Array<{ attac
     const file = files.find(candidate => candidate.name === item.name);
     if (!file) continue;
     const mimeType = typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream';
-    const size = typeof item.size === 'number' ? item.size : 0;
     let localPath = file.archivePath;
     if (!localPath) {
       try { localPath = (await archiveOutgoingAttachment(file.attachment, item.name, attachmentDir, mimeType)).localPath; }
       catch (error) { logError(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error, { notify: !isHttp429(error) }); }
     }
-    delivered.push({ attachmentId: item.id, filename: item.name, mimeType, size, status: 'ready', ...(localPath ? { localPath, memoryDocumentId: `attachment:${messageId}:${item.id}` } : {}), ...(file.origin ? { origin: file.origin } : {}) });
+    delivered.push({ attachmentId: item.id, filename: item.name, mimeType, status: 'ready', ...(localPath ? { localPath, memoryDocumentId: `attachment:${messageId}:${item.id}` } : {}), ...(file.origin ? { origin: file.origin } : {}) });
   }
   return delivered;
 }
@@ -1044,7 +1043,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
         ? await channel.fetchStarterMessage()
         : (await channel.messages.fetch({ after: '0', limit: 1 })).first() ?? null;
       if (!opening) return undefined;
-      return { channelId: opening.channelId, messageId: opening.id, authorId: opening.author.id, createdAt: opening.createdAt.toISOString(), content: opening.content, attachments: [...opening.attachments.values()].map(file => ({ filename: file.name ?? 'attachment', mimeType: file.contentType ?? 'application/octet-stream', size: file.size })) };
+      return { channelId: opening.channelId, messageId: opening.id, authorId: opening.author.id, createdAt: opening.createdAt.toISOString(), content: opening.content, attachments: [...opening.attachments.values()].map(file => ({ filename: file.name ?? 'attachment', mimeType: file.contentType ?? 'application/octet-stream' })) };
     },
     outputChannel: async id => {
       const target = await client.channels.fetch(id);

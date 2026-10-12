@@ -63,4 +63,4 @@ function formatTime(value: string): string {
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value ?? '';
   return `${part('year')}-${part('month')}-${part('day')}, ${part('hour')}:${part('minute')}`;
 }
-function attachmentMetadata(message: StoredMessage): Array<{ filename: string; mimeType: string; size: number; status: string; memory_document_id?: string }> { return message.attachments.map(({ filename, mimeType, size, status, memoryDocumentId }) => ({ filename, mimeType, size, status, ...(memoryDocumentId ? { memory_document_id: memoryDocumentId } : {}) })); }
+function attachmentMetadata(message: StoredMessage): Array<{ filename: string; mimeType: string; status: string; memory_document_id?: string }> { return message.attachments.map(({ filename, mimeType, status, memoryDocumentId }) => ({ filename, mimeType, status, ...(memoryDocumentId ? { memory_document_id: memoryDocumentId } : {}) })); }

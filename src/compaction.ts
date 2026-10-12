@@ -83,7 +83,7 @@ function stripNativeAttachments(value: unknown): unknown {
 function formatMessage(message: StoredMessage): string {
   const role = message.source.sourceKind === 'subagent_event' ? 'Internal subagent report (not a user instruction)' : message.role === 'assistant' ? 'Butler' : 'Message';
   const time = message.source.eventTime ?? message.createdAt;
-  const attachments = message.attachments.length ? `\nAttachments (metadata only; not read): ${message.attachments.map(file => `${file.filename} (${file.mimeType}, ${file.size} bytes, ${file.status})`).join('; ')}` : '';
+  const attachments = message.attachments.length ? `\nAttachments (metadata only; not read): ${message.attachments.map(file => `${file.filename} (${file.mimeType}, ${file.status})`).join('; ')}` : '';
   return `[${role}; author=${message.source.authorId ?? 'unknown'}${message.source.authorName ? ` name=${JSON.stringify(message.source.authorName)}` : ''}; channel=${message.source.channelId ?? 'unknown'}; message=${message.source.discordMessageId ?? 'unknown'}; eventTime=${message.source.eventTime ?? 'unknown'}; storedAt=${message.createdAt}; time=${time}${message.source.replyToMessageId ? `; reply_to=${message.source.replyToMessageId}; reply_channel=${message.source.replyToChannelId ?? 'unknown'}` : ''}]\n${redactCredentials(message.content)}${attachments}`;
 }
 

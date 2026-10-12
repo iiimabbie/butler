@@ -87,7 +87,7 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
         const offset = numberParam(url.searchParams.get('offset'), 0);
         const table = match[2] === 'messages' ? 'messages' : 'tool_calls';
         const sql = table === 'messages'
-          ? 'SELECT m.id,m.session_id,m.role,m.content,m.created_at,s.author_id,s.author_name,s.event_time,(SELECT json_group_array(json_object(\'filename\',a.filename,\'mimeType\',a.mime_type,\'size\',a.size,\'status\',a.status)) FROM message_input_attachments a WHERE a.message_id=m.id) attachments FROM messages m LEFT JOIN message_sources s ON s.message_id=m.id WHERE m.session_id=? ORDER BY m.rowid LIMIT 51 OFFSET ?'
+          ? 'SELECT m.id,m.session_id,m.role,m.content,m.created_at,s.author_id,s.author_name,s.event_time,(SELECT json_group_array(json_object(\'filename\',a.filename,\'mimeType\',a.mime_type,\'status\',a.status)) FROM message_input_attachments a WHERE a.message_id=m.id) attachments FROM messages m LEFT JOIN message_sources s ON s.message_id=m.id WHERE m.session_id=? ORDER BY m.rowid LIMIT 51 OFFSET ?'
           : `SELECT t.id,t.session_id,t.name,t.arguments,t.status,t.result,t.created_at,t.finished_at,d.status AS delivery_status,d.updated_at AS delivery_updated_at FROM tool_calls t LEFT JOIN attachment_deliveries d ON d.tool_call_id=t.id WHERE t.session_id=? ORDER BY t.rowid LIMIT 51 OFFSET ?`;
         const rows = db.prepare(sql).all(id, offset) as Record<string, unknown>[];
         const more = rows.length > 50;

@@ -639,7 +639,7 @@ function nativeAttachmentSignature(input: unknown[]): string {
 }
 
 function formatOpeningContext(opening: SessionOpeningContext): string {
-  const attachments = opening.attachments.length ? `\nAttachments (metadata only; not read): ${opening.attachments.map(file => `${file.filename} (${file.mimeType}, ${file.size} bytes)`).join('; ')}` : '';
+  const attachments = opening.attachments.length ? `\nAttachments (metadata only; not read): ${opening.attachments.map(file => `${file.filename} (${file.mimeType})`).join('; ')}` : '';
   return `Original Discord opening message (historical background):\n[Discord account ${opening.authorId}; channel=${opening.channelId}; message=${opening.messageId}; time=${opening.createdAt}]\n${opening.content}${attachments}`;
 }
 

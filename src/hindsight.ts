@@ -8,7 +8,7 @@ import { isHttp429 } from './tool-errors.js';
 import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
 
 export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
-export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; size: number; status: 'ready' | 'failed' }> };
+export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; status: 'ready' | 'failed' }> };
 export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number };
 type RequestTiming = { startedAt: number; timestamp: string; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };
 
@@ -208,13 +208,13 @@ export class Hindsight {
     }
   }
 
-  async submitAttachmentFile(input: { path: string; filename: string; mimeType?: string; documentId: string; context: string; metadata: Record<string, string>; timestamp: string; size: number }): Promise<{ operationId: string }> {
+  async submitAttachmentFile(input: { path: string; filename: string; mimeType?: string; documentId: string; context: string; metadata: Record<string, string>; timestamp: string }): Promise<{ operationId: string }> {
     const handle = await open(input.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     try {
       const stat = await handle.stat();
-      if (!stat.isFile() || stat.size !== input.size || stat.size > 20 * 1024 * 1024) throw new Error('Attachment archive file is unavailable or changed');
+      if (!stat.isFile() || stat.size > 20 * 1024 * 1024) throw new Error('Attachment archive file is unavailable at its last-known location');
       const bytes = await handle.readFile();
-      if (bytes.length !== input.size) throw new Error('Attachment archive file size changed while reading');
+      if (bytes.length !== stat.size) throw new Error('Attachment archive file read was incomplete');
       const imageType = resolveSupportedImageType(bytes, input.filename, input.mimeType ?? 'application/octet-stream');
       const uploadFilename = imageType ? imageUploadFilename(input.filename, imageType) : input.filename;
       const form = new FormData();
