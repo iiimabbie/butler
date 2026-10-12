@@ -86,6 +86,52 @@ test('batch extract preserves partial successes and reports truncation', async (
   await assert.rejects(runtime.execute('web_extract', { urls: Array(21).fill('https://example.test') }), /1 to 20/);
 });
 
+test('web_extract query and chunks select relevant chunks without changing legacy behavior', async () => {
+  const response = { results: [{ url: 'https://example.test', raw_content: 'relevant text' }], failed_results: [] };
+  const { runtime, requests } = fakeRuntime(() => response);
+  const definition = webDefinitions.find(tool => tool.name === 'web_extract');
+  assert.ok(definition.parameters.properties.query);
+  assert.deepEqual(definition.parameters.properties.chunks_per_source, { type: 'integer', minimum: 1, maximum: 5 });
+  assert.match(definition.description, /Use query for a specific question/);
+  assert.match(definition.description, /omit query to read the full content/);
+  assert.match(definition.description, /chunks_per_source requires query/);
+
+  const selected = await runtime.execute('web_extract', { urls: ['https://example.test'], query: 'answer this', chunks_per_source: 2 });
+  assert.deepEqual(requests[0].body, { urls: ['https://example.test'], extract_depth: 'basic', timeout: 20, format: 'markdown', query: 'answer this', chunks_per_source: 2 });
+  assert.equal(selected.content_scope, 'query_relevant_chunks');
+  assert.match(selected.content_scope_description, /not the full source content/);
+  assert.equal(selected.results[0].truncated, false, 'false only means local output cap did not truncate');
+
+  await runtime.execute('web_extract', { urls: ['https://example.test'], query: 'answer this' });
+  assert.deepEqual(requests[1].body, { urls: ['https://example.test'], extract_depth: 'basic', timeout: 20, format: 'markdown', query: 'answer this' }, 'Tavily default is not hard-coded into payload');
+  const legacy = await runtime.execute('web_extract', { urls: ['https://example.test'] });
+  assert.deepEqual(requests[2].body, { urls: ['https://example.test'], extract_depth: 'basic', timeout: 20, format: 'markdown' });
+  assert.deepEqual(legacy, { result_count: 1, failed_count: 0, results: [{ url: 'https://example.test', content: 'relevant text', truncated: false }], failed_results: [], truncated: false });
+});
+
+test('web_extract rejects invalid query/chunks before HTTP; web_fetch rejects new args', async () => {
+  const { runtime, requests } = fakeRuntime(() => ({ results: [], failed_results: [] }));
+  const invalid = [
+    [{ urls: ['https://example.test'], query: '   ' }, /query must be a non-empty string/],
+    [{ urls: ['https://example.test'], query: 1 }, /query must be a non-empty string/],
+    [{ urls: ['https://example.test'], chunks_per_source: 1 }, /requires query/],
+    ...[0, 6, 1.5, '2'].map(chunks_per_source => [{ urls: ['https://example.test'], query: 'q', chunks_per_source }, /chunks_per_source must be an integer/]),
+  ];
+  for (const [args, expected] of invalid) await assert.rejects(runtime.execute('web_extract', args), expected);
+  assert.equal(requests.length, 0);
+  await assert.rejects(runtime.execute('web_fetch', { url: 'https://example.test', query: 'q' }), /Unknown web tool argument/);
+  await assert.rejects(runtime.execute('web_fetch', { url: 'https://example.test', chunks_per_source: 1 }), /Unknown web tool argument/);
+  assert.equal(requests.length, 0);
+});
+
+test('query-mode local output truncation remains distinct from content scope', async () => {
+  const { runtime } = fakeRuntime(() => ({ results: [{ url: 'https://example.test', raw_content: 'x'.repeat(70_000) }], failed_results: [] }));
+  const result = await runtime.execute('web_extract', { urls: ['https://example.test'], query: 'q' });
+  assert.equal(result.content_scope, 'query_relevant_chunks');
+  assert.equal(result.results[0].truncated, true);
+  assert.match(result.content_scope_description, /not the full source content/);
+});
+
 test('map uses bounded defaults and usage calls read-only documented endpoint', async () => {
   const { runtime, requests } = fakeRuntime(request => request.url.endsWith('/map') ? ({ base_url: 'https://example.test', results: ['https://example.test/a'] }) : ({ key: { usage: 1, limit: 100 }, account: { current_plan: 'test' } }));
   await runtime.execute('web_map', { url: 'https://example.test' });

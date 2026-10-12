@@ -18,7 +18,7 @@ export const webDefinitions: { type: 'function'; name: string; description: stri
     include_domains: optionalArray(300), exclude_domains: optionalArray(150), include_domains_mode: { type: 'string', enum: ['restrict', 'prefer'] }, time_range: { type: 'string', enum: TIME_RANGES }, start_date: { type: 'string', format: 'date' }, end_date: { type: 'string', format: 'date' }, country: { type: 'string', enum: COUNTRIES },
   }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'web_fetch', description: 'Extract content from one public HTTP(S) URL using basic extraction; truncated indicates incomplete content.', parameters: { type: 'object', properties: { url: string }, required: ['url'], additionalProperties: false } },
-  { type: 'function', name: 'web_extract', description: 'Extract content from 1–20 public HTTP(S) URLs in one request. Returns successes and per-URL failures; advanced extraction may cost more. Content may be truncated.', parameters: { type: 'object', properties: { urls: stringArray(20), extract_depth: { type: 'string', enum: EXTRACT_DEPTH, default: 'basic' }, format: { type: 'string', enum: FORMATS, default: 'markdown' } }, required: ['urls'], additionalProperties: false } },
+  { type: 'function', name: 'web_extract', description: 'Extract content from 1–20 public HTTP(S) URLs in one request. Use query for a specific question and relevant chunks; omit query to read the full content. chunks_per_source requires query. Returns successes and per-URL failures; advanced extraction may cost more. Content may be truncated.', parameters: { type: 'object', properties: { urls: stringArray(20), extract_depth: { type: 'string', enum: EXTRACT_DEPTH, default: 'basic' }, format: { type: 'string', enum: FORMATS, default: 'markdown' }, query: string, chunks_per_source: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['urls'], additionalProperties: false } },
   { type: 'function', name: 'web_map', description: 'Map a website to discover URLs only; this does not crawl or extract page contents. Mapping costs credits per successful pages; instructions raise the rate from 1 to 2 credits per 10 successful pages. Conservative defaults: depth 1, breadth 5, limit 10, external domains excluded.', parameters: { type: 'object', properties: { url: string, instructions: { type: 'string', minLength: 1, maxLength: 1000 }, max_depth: { type: 'integer', minimum: 1, maximum: 5, default: 1 }, max_breadth: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 }, select_paths: optionalArray(20), exclude_paths: optionalArray(20) }, required: ['url'], additionalProperties: false } },
   { type: 'function', name: 'web_usage', description: 'Read-only Tavily API key and account usage for the current billing cycle.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } },
 ];
@@ -35,7 +35,7 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
       if (config.provider !== undefined && config.provider !== 'tavily') throw new Error('Unsupported web provider');
       const allowedByName: Record<string, string[]> = {
         web_search: ['query','max_results','search_depth','topic','include_domains','exclude_domains','include_domains_mode','time_range','start_date','end_date','country'],
-        web_fetch: ['url'], web_extract: ['urls','extract_depth','format'],
+        web_fetch: ['url'], web_extract: ['urls','extract_depth','format','query','chunks_per_source'],
         web_map: ['url','instructions','max_depth','max_breadth','limit','select_paths','exclude_paths'], web_usage: [],
       };
       const allowed = allowedByName[name];
@@ -74,7 +74,13 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
         const urls = name === 'web_fetch' ? [validUrl(args.url)] : validateUrls(args.urls);
         const depth = name === 'web_fetch' ? 'basic' : oneOf(args.extract_depth, 'basic', EXTRACT_DEPTH, 'extract_depth');
         const format = name === 'web_extract' ? oneOf(args.format, 'markdown', FORMATS, 'format') : undefined;
-        const response = await request('extract', { urls, extract_depth: depth, timeout: 20, ...(format ? { format } : {}) }, apiKey, fetcher, baseUrl);
+        const query = name === 'web_extract' && args.query !== undefined ? requiredString(args.query, 'query') : undefined;
+        const chunksPerSource = name === 'web_extract' && args.chunks_per_source !== undefined
+          ? integer(args.chunks_per_source, 3, 1, 5, 'chunks_per_source')
+          : undefined;
+        if (chunksPerSource !== undefined && query === undefined) throw new ToolUsageError('chunks_per_source requires query');
+        const body: Record<string, unknown> = { urls, extract_depth: depth, timeout: 20, ...(format ? { format } : {}), ...(query !== undefined ? { query } : {}), ...(chunksPerSource !== undefined ? { chunks_per_source: chunksPerSource } : {}) };
+        const response = await request('extract', body, apiKey, fetcher, baseUrl);
         if (!Array.isArray(response.failed_results) || !Array.isArray(response.results)) throw new Error('Tavily extract: invalid response');
         const failed = response.failed_results.map(item => {
           if (!isRecord(item) || typeof item.url !== 'string' || typeof item.error !== 'string') throw new Error('Tavily extract: invalid response');
@@ -100,7 +106,7 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
           return boundedOutput(results[0]!, [results[0]!]);
         }
         const safeFailed = failed.map(item => ({ url: redact(item.url), error: redact(item.error) }));
-        const result = { result_count: results.length, failed_count: safeFailed.length, results, failed_results: safeFailed, truncated: false };
+        const result = { result_count: results.length, failed_count: safeFailed.length, results, failed_results: safeFailed, truncated: false, ...(query !== undefined ? { content_scope: 'query_relevant_chunks' as const, content_scope_description: 'Content contains query-relevant chunks, not the full source content.' } : {}) };
         return boundedOutput(result, results);
       }
       if (name === 'web_map') {
