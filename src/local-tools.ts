@@ -126,7 +126,7 @@ export class LocalToolRuntime {
       await writeFile(actual, edited, 'utf8');
       return { path: actual, replacements: matches, bytes_written: Buffer.byteLength(edited) };
     }
-    throw new Error(`Unknown local tool: ${name}`);
+    throw new ToolUsageError(`Unknown local tool: ${name}`);
   }
   private path(value: unknown) { return resolve(this.root, text(value, 'path')); }
 }

@@ -34,6 +34,23 @@ function toolCall() {
   return { call_id: 'call-1', name: 'web_fetch', arguments: JSON.stringify({ url: 'https://example.test/page' }) };
 }
 
+test('unavailable tool request is audited without error notification or duplicate subagent entry log', async () => {
+  await withMockWebhook(async requests => {
+    const store = fakeStore();
+    const info = [];
+    const originalInfo = console.info;
+    console.info = (...args) => info.push(args.join(' '));
+    try {
+      const result = await executeCall(store, 'session-child', { call_id: 'child-call', name: 'web_search', arguments: '{"query":"test"}' }, {}, undefined, 'subagent');
+      await flushLogs();
+      assert.equal(result.error, 'Web tools are unavailable in this entry point');
+      assert.equal(store.finished[0].status, 'failed');
+      assert.equal(requests.length, 0, 'ToolUsageError must not notify the webhook');
+      assert.equal(info.filter(line => line.includes('tool_call')).length, 0, 'subagent tool entry is logged by the parent dispatcher only once');
+    } finally { console.info = originalInfo; }
+  });
+});
+
 test('known web_fetch extraction failure suppresses webhook but remains failed and actionable for model', async () => {
   await withMockWebhook(async requests => {
     const store = fakeStore();

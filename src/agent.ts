@@ -417,7 +417,7 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
       },
       executeTool: async (childWindowId, model, name, childArgs, callId) => {
         const childCall: FunctionCall = { type: 'function_call', name, call_id: callId, arguments: JSON.stringify({ ...childArgs, label: `Subagent ${model}: ${name}` }) };
-        try { return await executeCall(store, childWindowId, childCall, { baseUrl: config.baseUrl, apiKey: config.apiKey, model, fetcher: config.fetcher, localTools: config.localTools, webTools: config.webTools }); }
+        try { return await executeCall(store, childWindowId, childCall, { baseUrl: config.baseUrl, apiKey: config.apiKey, model, fetcher: config.fetcher, localTools: config.localTools, webTools: config.webTools }, undefined, 'subagent'); }
         catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { auditPersistenceFailure: true }); }
       },
     }, { ...task, task: taskText, subagent_id: id });
@@ -447,67 +447,67 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   let result: unknown;
   try {
     if (call.name === 'subagent_run') {
-      if (!config.subagent || !config.subagentCoordinator) throw new Error('Subagent is unavailable');
+      if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       const required = ['task', 'context', 'constraints', 'expected_output'];
       if (Object.keys(runtimeArgs).some(key => ![...required, 'subagent_id'].includes(key)) || required.some(key => typeof runtimeArgs[key] !== 'string' || !(runtimeArgs[key] as string).trim()) || (runtimeArgs.subagent_id !== undefined && typeof runtimeArgs.subagent_id !== 'string')) throw new ToolUsageError('Invalid subagent task arguments');
       const task = runtimeArgs as unknown as { task: string; context: string; constraints: string; expected_output: string; subagent_id?: string };
       const windowId = store.createSubagentWindow(session, config.subagent.model, [{ role: 'developer', content: subagentSystem }], task.subagent_id);
       result = config.subagentCoordinator.start({ id: windowId, parentSession: session, task: task.task, origin: config.subagentOrigin, execute: subagentExecutor(store, session, windowId, task, config) });
     } else if (call.name === 'subagent_list') {
-      if (!config.subagentCoordinator) throw new Error('Subagent is unavailable');
+      if (!config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       result = { items: config.subagentCoordinator.list(session, safePage(runtimeArgs.offset, 0, Number.MAX_SAFE_INTEGER), safePage(runtimeArgs.limit, 20, 100, 1)) };
     } else if (call.name === 'subagent_status') {
-      if (!config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string') throw new Error('Invalid subagent status request');
+      if (!config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string') throw new ToolUsageError('Invalid subagent status request');
       result = config.subagentCoordinator.status(runtimeArgs.subagent_id, session, safePage(runtimeArgs.offset, 0, Number.MAX_SAFE_INTEGER), safePage(runtimeArgs.limit, 20, 100, 1)) ?? { error: 'Unknown subagent window for this parent session' };
     } else if (call.name === 'subagent_stop') {
       if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.reason !== 'string' || !runtimeArgs.reason.trim() || Object.keys(runtimeArgs).some(key => !['subagent_id', 'reason'].includes(key))) throw new ToolUsageError('Invalid or unavailable subagent stop request');
       const task = { task: 'Cooperative stop', context: 'Parent requested safe closeout', constraints: 'Do not start new work', expected_output: 'Report changes, incomplete work and background task handoff' };
       result = config.subagentCoordinator.stop(runtimeArgs.subagent_id, session, runtimeArgs.reason, subagentExecutor(store, session, runtimeArgs.subagent_id, task, config));
     } else if (call.name === 'subagent_send') {
-      if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.message !== 'string' || !runtimeArgs.message.trim() || (runtimeArgs.question_id !== undefined && typeof runtimeArgs.question_id !== 'string')) throw new Error('Invalid or unavailable subagent message');
+      if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.message !== 'string' || !runtimeArgs.message.trim() || (runtimeArgs.question_id !== undefined && typeof runtimeArgs.question_id !== 'string')) throw new ToolUsageError('Invalid or unavailable subagent message');
       if (!store.getSubagentWindow(runtimeArgs.subagent_id, session)) throw new ToolUsageError('Unknown subagent window for this parent session; use subagent_list to find the actual ID in this parent session, or use subagent_run and omit subagent_id for an independent new task');
       const task = { task: 'Continue the existing task', context: 'Use the persisted window.', constraints: 'Do not repeat completed actions.', expected_output: 'Return the continuation result.' };
       const resume = subagentExecutor(store, session, runtimeArgs.subagent_id, task, config);
       result = config.subagentCoordinator.message(runtimeArgs.subagent_id, session, runtimeArgs.message, typeof runtimeArgs.question_id === 'string' ? runtimeArgs.question_id : undefined, resume);
     } else if (call.name === 'memory_tags_list') {
-      if (!config.hindsight) throw new Error('Shared memory is unavailable');
+      if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       result = await listMemoryTagsTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'knowledge_page_create') {
-      if (!config.hindsight) throw new Error('Shared memory is unavailable');
+      if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       result = await knowledgePageCreateTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
-      if (!config.hindsight) throw new Error('Shared memory is unavailable');
+      if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       const query = requiredString(runtimeArgs.query, 'query');
       result = call.name === 'memory_recall'
         ? await config.hindsight.recall(query)
         : await config.hindsight.reflect(query);
     } else if (call.name.startsWith('weather_')) {
-      if (!config.weatherTools) throw new Error('Weather tools are unavailable in this entry point');
+      if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
       result = await config.weatherTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('web_')) {
-      if (!config.webTools) throw new Error('Web tools are unavailable in this entry point');
+      if (!config.webTools) throw new ToolUsageError('Web tools are unavailable in this entry point');
       result = await config.webTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
-      if (!config.localTools) throw new Error('Local tools are unavailable in this entry point');
+      if (!config.localTools) throw new ToolUsageError('Local tools are unavailable in this entry point');
       result = await config.localTools.execute(call.name, runtimeArgs, { sessionId: session, channelId: config.discordContext?.channelId, messageId: config.discordContext?.messageId, requesterId: config.discordContext?.requesterId });
     } else if (call.name.startsWith('discord_')) {
-      if (!config.discordTools) throw new Error('Discord tools are unavailable in this entry point');
+      if (!config.discordTools) throw new ToolUsageError('Discord tools are unavailable in this entry point');
       result = await config.discordTools.execute(call.name, runtimeArgs);
       if (call.name === 'discord_attach_to_reply') config.discordTools.context.attachmentToolCallIds?.push(id);
     } else if (call.name.startsWith('google_')) {
-      if (!googleRuntime) throw new Error('Google tools are unavailable until Google is connected');
+      if (!googleRuntime) throw new ToolUsageError('Google tools are unavailable until Google is connected');
       result = await googleRuntime.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('people_')) {
-      if (!config.peopleTools) throw new Error('People tools are unavailable in this entry point');
+      if (!config.peopleTools) throw new ToolUsageError('People tools are unavailable in this entry point');
       result = await config.peopleTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('skills_')) {
-      if (!config.skillsTools) throw new Error('Skills tools are unavailable in this entry point');
+      if (!config.skillsTools) throw new ToolUsageError('Skills tools are unavailable in this entry point');
       result = await config.skillsTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('schedule_')) {
-      if (!config.scheduleTools) throw new Error('Schedule tools are unavailable in this entry point');
+      if (!config.scheduleTools) throw new ToolUsageError('Schedule tools are unavailable in this entry point');
       result = await config.scheduleTools.execute(call.name, runtimeArgs);
     } else if (call.name === 'image_generate' || call.name === 'image_generate_self' || call.name === 'image_save') {
-      if (!config.imageTools) throw new Error('Image tools are unavailable in this entry point');
+      if (!config.imageTools) throw new ToolUsageError('Image tools are unavailable in this entry point');
       result = await config.imageTools.execute(call.name, runtimeArgs);
       const attachmentIds = config.discordTools?.context.attachmentToolCallIds;
       if (attachmentIds && Array.isArray(attachmentIds)) attachmentIds.push(id);

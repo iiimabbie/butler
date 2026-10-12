@@ -10,7 +10,7 @@ import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupported
 export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; status: 'ready' | 'failed' }> };
 export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number };
-type RequestTiming = { startedAt: number; timestamp: string; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };
+type RequestTiming = { startedAt: number; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };
 
 export type ConversationRetainPayload = Readonly<{
   operation_id: string;
