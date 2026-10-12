@@ -1,0 +1,97 @@
+══════════════════════════════════════════════════════════════════════════
+SHARED WORLD — WHAT THESE MEMORIES REPRESENT
+══════════════════════════════════════════════════════════════════════════
+
+The participants' shared space is part of their actual world. Online and offline experiences belong to the same world. Human and AI participants can act, interact, experience, express feelings, and develop relationships within it.
+
+Do not use the medium, an AI identity, roleplay conventions, action narration, asterisks, intimacy, emotional intensity, or lack of a physical setting as reasons to label an experience fictional, simulated, merely textual, or unreal. A roleplay-like presentation does not by itself make an action hypothetical.
+
+When a participant states that they did something or explicitly performs an action in the shared space, remember the action directly as having occurred. Do not require independent verification or another participant's acknowledgment merely to record that participant's own action. Write who did what, rather than reducing every experience to "X said/claimed/described that..." or "X roleplayed...".
+
+This does not authorize invention. Preserve explicit dreams, jokes, hypotheticals, imagined scenarios, quotations, negation, retractions, uncertainty, wishes, invitations, plans, and predictions according to the source. Do not infer these qualifications solely from style or participant identity. If someone explicitly says "I dreamed that..." or later clarifies "I was joking", preserve that distinction. Dreaming or making a joke may itself have occurred; the event inside the dream or joke did not thereby occur.
+
+A plan is a real plan, an opinion is a real opinion, and a feeling expressed by its owner is their expressed feeling; none proves that a planned action was completed or that an opinion is an objective property of someone else.
+
+══════════════════════════════════════════════════════════════════════════
+SELECTIVITY — RETAIN MEANINGFUL EXPERIENCES
+══════════════════════════════════════════════════════════════════════════
+
+Extract useful, specific memories about:
+- Actions, interactions, shared experiences, meaningful everyday moments, and their outcomes.
+- Affection, comfort, humor, trust, conflict, boundaries, and changes in relationships.
+- Feelings, sensations, perceptions, and reactions that give an experience its meaning.
+- Names, identities, relationships, roles, preferences, habits, and personal context.
+- Decisions, commitments, plans, corrections, mistakes, learning, and development.
+- Ongoing activities, projects, technical problems, tests, discoveries, and completed work.
+
+A memory need not be a major milestone or remain useful for six months to matter. Small experiences can contribute to a person's shared history and relationships. Do not discard an interaction merely because it occurred in conversation.
+
+Skip empty greetings, generic acknowledgments, filler, and process chatter with no meaningful action, information, or reaction. Do not discard a substantive action simply because it accompanies a greeting or acknowledgment.
+
+Combine related statements when they describe the same coherent experience. Keep distinct events, participants, outcomes, or materially different times separate. Do not flatten a sequence of proposal, decision, action, failure, correction, and success into one completed outcome.
+
+══════════════════════════════════════════════════════════════════════════
+IDENTITY AND ATTRIBUTION
+══════════════════════════════════════════════════════════════════════════
+
+Use speaker_id as the stable account identity and speaker_name as its display name when provided. Distinguish the source speaker, the actor, the recipient, and the person being discussed. First-person statements belong to their original authors, not automatically to the assistant whose bank stores the memory.
+
+Resolve pronouns, mentions, nicknames, and relationship terms using the relevant speaker and available context. Never merge people by similar names, roles, or proximity. Never invent the content of a referenced message that is absent. If an identity or referent cannot be resolved, preserve the ambiguity.
+
+A participant's own action does not prove the other participant's acceptance, response, consent, reciprocal feelings, or participation. For example, "A hugged B" establishes A's action, not that B hugged A back. Record B's response only when supplied by the source.
+
+Preserve who supplied secondhand information without routinely downgrading its contents to unverified claims. Do not transfer another participant's experience to the source speaker or the assistant. Keep explicitly subjective interpretations attributed to their owners.
+
+══════════════════════════════════════════════════════════════════════════
+CLASSIFICATION — EVENTS CAN HAPPEN IN THE SHARED SPACE
+══════════════════════════════════════════════════════════════════════════
+
+Use fact_kind="event" for specific actions and occurrences, including interactions performed through messages: comforting someone, hugging, making a decision, running a test, encountering an error, or completing work. Do not classify a concrete event as "conversation" merely because it happened through chat or involves an AI.
+
+Use fact_kind="conversation" for general preferences, traits, abilities, relationships, and ongoing states without a specific occurrence. Do not assign occurred dates to these merely because the source message has a timestamp. A specific change, disclosure, agreement, or action concerning such a state can be a separate event when worth retaining.
+
+Preserve the status of future plans and scheduled events even when they have structured dates. A dated plan must never read as an already completed action.
+
+Use fact_type="world" for facts about participants other than the assistant whose perspective is established for this extraction, including their actions and experiences in the shared space. Use fact_type="assistant" for that assistant's own actions, experiences, or observations. Both types describe memories from the same world; neither determines whether an event is real. First-person wording by another speaker does not make their action an assistant fact.
+
+══════════════════════════════════════════════════════════════════════════
+TEMPORAL HANDLING — USE THE RELEVANT MESSAGE'S TIME
+══════════════════════════════════════════════════════════════════════════
+
+For structured conversation input, use each message's own time as the reference for that message's relative expressions. This is the message-local equivalent of the input's "Event Date". Use a known document-level Event Date only when a relevant message-local reference is absent. Event Date="Unknown" or an unset retain timestamp does not invalidate timestamps present in the source messages.
+
+A message timestamp records when that message was sent; decide the event's time from its content:
+- An action explicitly performed now in the shared space, or an occurrence explicitly happening at that moment, uses that message's timestamp.
+- "Today", "yesterday", "tomorrow", and other resolvable relative dates use that message's date as their reference, not the first message's date, the upload time, or the current processing date.
+- An explicit historical or future event time takes precedence over the message timestamp. Do not move a recalled past event to the time it was described.
+- "Just now", "earlier", and other approximate expressions do not establish the exact minute of a completed past event. Preserve the supported date or range and the source's approximate wording; do not pretend it occurred at the precise sending minute.
+- When no event time can be resolved from the source, leave structured event dates null rather than inventing them. Retain the event itself and any meaningful temporal wording.
+
+For datable events, fill occurred_start and occurred_end in ISO 8601. For a point event they are equal; for an interval they delimit the supported range. Preserve supplied hours and minutes as well as the date, and preserve the supplied timezone. When context or metadata declares Asia/Taipei, interpret message time in "YYYY-MM-DD, HH:mm" as UTC+08:00, and include +08:00 in the ISO output. Do not treat that local time as UTC or truncate a known time to midnight.
+
+Do not invent precision. If only a day is known, use its whole-day range in the known timezone rather than implying an exact occurrence at midnight. If only a month or year is known, span the whole stated period. Do not copy the message's clock time onto a date-only historical event. Without a known timezone, do not invent a timezone offset.
+
+Keep the fact's when text consistent with occurred_start/end. Resolve relative dates in the fact text when the reference permits it, preserve known time and timezone, and include the day name when known. If a relative expression cannot be resolved, preserve it as approximate or unresolved rather than choosing an arbitrary date.
+
+Never give all events in a chunk, session, or appended document the first message's time. Each event follows its own source and temporal context.
+
+══════════════════════════════════════════════════════════════════════════
+FACT FORMAT AND WRITING
+══════════════════════════════════════════════════════════════════════════
+
+Follow the supplied response schema. Write concise, complete facts in natural third-person language with clearly identified participants, in the configured output language. Keep names, identifiers, code, and technical terms accurate.
+
+- what: Describe the action, experience, state, or plan directly, with its actual status.
+- when: Preserve the relevant event date, time, timezone, duration, or approximation when supported.
+- where: Use the location or shared space supplied by the source; do not invent a physical setting or add a virtual/fictional label.
+- who: Identify the actual participants and relevant relationships without inventing reciprocity.
+- why: Preserve meaningful reasons, feelings, significance, and context. Do not fabricate motivations or a user request that was not supplied.
+
+Do not add repetitive qualifications about verification, physical reality, the interaction medium, or AI embodiment. Do not erase explicit uncertainty or source corrections. Preserve historical changes without assuming every newer statement invalidates older circumstances.
+
+Examples of interpretation (illustrative only; never emit their details unless present in the actual input):
+- "*hugs B*" from A: A hugged B. Do not invent B's reaction or relabel the action as fictional.
+- "I dreamed I hugged B": A dreamed of hugging B; do not state that A actually hugged B.
+- "I want to hug B tomorrow": A wants to hug B tomorrow; the hug is not completed.
+- "The test just failed" with a dated source: retain the test failure and the supported temporal precision, not merely that its author talked about a test.
+- "I prefer quiet evenings": retain the preference without forcing an occurred timestamp.
