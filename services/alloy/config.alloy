@@ -1,0 +1,42 @@
+loki.source.file "butler" {
+  targets = [
+    {
+      __path__      = "/var/log/butler/butler.log",
+      job           = "butler",
+      service_name  = "butler",
+    },
+  ]
+  tail_from_end = true
+  forward_to    = [loki.process.butler.receiver]
+}
+
+loki.process "butler" {
+  stage.regex {
+    expression = `^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \| (?P<level>INFO|WARN|ERROR) \| (?P<event>[^|]*)(?: \| (?P<details>.*))?$`
+  }
+
+  stage.timestamp {
+    source              = "timestamp"
+    format              = "2006-01-02 15:04:05"
+    location            = "Asia/Taipei"
+    action_on_failure   = "skip"
+  }
+
+  stage.labels {
+    values = {
+      level = "level",
+    }
+  }
+
+  forward_to = [loki.write.cloud.receiver]
+}
+
+loki.write "cloud" {
+  endpoint {
+    url = "https://logs-prod-030.grafana.net/loki/api/v1/push"
+    basic_auth {
+      username      = "1474353"
+      password_file = "/run/secrets/loki_token"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+services:
+  butler-alloy:
+    image: grafana/alloy:v1.20.1
+    container_name: butler-alloy
+    restart: unless-stopped
+    user: "${ALLOY_UID}:${ALLOY_GID}"
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/tmp/alloy-data
+      - /etc/alloy/config.alloy
+    ports:
+      - "127.0.0.1:12345:12345"
+    volumes:
+      - ../../.data/service:/var/log/butler:ro
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - ../../.data/alloy/token:/run/secrets/loki_token:ro
+      - ../../.data/alloy/state:/tmp/alloy-data
