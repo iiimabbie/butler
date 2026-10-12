@@ -8,3 +8,6 @@ dist/
 /config.yaml
 /backups/
 .codegraph/
+temp.*
+__pycache__/
+*.pyc
