@@ -168,7 +168,7 @@ export class Scheduler {
       const now = nowDate.toISOString();
       for (const job of this.options.store.dueSchedules(now)) {
         if (this.stopped) break;
-        const scheduled = job.kind === 'reminder' ? job.runAt : job.nextRun;
+        const scheduled = job.nextRun;
         if (!scheduled || Date.parse(scheduled) > nowDate.getTime()) continue;
         let nextRun: string | null = null;
         if (job.kind === 'cron') {
