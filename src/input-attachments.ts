@@ -168,7 +168,10 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       continue;
     }
     if (inputMimeType.startsWith('image/')) content.push({ type: 'input_image', image_url: `data:${inputMimeType};base64,${data}` });
-    else content.push({ type: 'input_file', filename: attachment.filename, file_data: `data:${inputMimeType};base64,${data}` });
+    else {
+      const fileMimeType = safeMime(inputMimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
+      content.push({ type: 'input_file', filename: attachment.filename, file_data: `data:${fileMimeType};base64,${data}` });
+    }
   }
   return content;
 }
