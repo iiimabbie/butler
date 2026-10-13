@@ -677,11 +677,9 @@ export class DiscordHandler {
       const runtime = this.getRuntime();
       try {
         await processDeploymentResultEvent(this.store, event as unknown as DeploymentResultEventRow, {
-          ask: async (input, content, _options) => {
+          ask: async (input, content, options) => {
             const channel = String(event.channel_id);
             const state = this.store.channelState(channel, runtime.discord.defaultModel, runtime.discord.ownerId);
-            const target = await this.outputChannel(channel);
-            if (!target) throw new Error('Deployment result channel unavailable');
             await this.runAsk(this.store, String(event.parent_session_id), content, {
               baseUrl: runtime.discord.baseUrl, apiKey: runtime.discord.apiKey, model: state.model,
               maxContextTokens: runtime.discord.maxContextTokens, modelContextTokens: runtime.discord.modelContextTokens,
@@ -689,18 +687,23 @@ export class DiscordHandler {
               storedInput: input, messageSource: { sourceKind: 'deployment_result', channelId: channel,
                 authorId: typeof event.requester_id === 'string' ? event.requester_id : undefined },
               deploymentResultEvent: true,
-              onResponseReady: _options.onResponseReady,
+              deploymentResultStatus: options.readDeploymentStatus,
+              onResponseReady: options.onResponseReady,
             });
           },
-          send: async (channelId, content) => {
+          send: async (channelId, content, onAttempt) => {
             const target = await this.outputChannel(channelId);
             if (!target) throw new Error('Deployment result channel unavailable');
+            onAttempt?.();
             const sent = await target.send(content);
             if (!isRecord(sent) || typeof sent.id !== 'string') throw new Error('Discord send result did not return a message ID');
-            const saved = this.recordOutgoingSegment(String(event.parent_session_id), content, sent);
-            if (saved) this.store.finalizeOutgoing(saved.id, content);
-            return { messageId: sent.id };
+            return { messageId: sent.id, sent };
           },
+          recordOutgoing: (sessionId, content, sent) => {
+            const saved = this.recordOutgoingSegment(sessionId, content, sent);
+            if (saved) this.store.finalizeOutgoing(saved.id, content);
+          },
+          logSupplementError: error => logError(`Deployment result verification failed id=${event.id}`, error, { notify: false }),
         });
       } catch (error) {
         logError(`Deployment result notification failed id=${event.id}`, error, { notify: false });

@@ -527,6 +527,9 @@ export class Store implements SchedulerStore {
     return Number(result.changes) === 1;
   }
   deploymentRequest(id: string): Record<string, unknown> | undefined { return this.db.prepare('SELECT * FROM deployment_requests WHERE id=?').get(id) as Record<string, unknown> | undefined; }
+  deploymentResultEvidence(id: string): { id: string; status: string; result_json: string | null; created_at: string; updated_at: string } | undefined {
+    return this.db.prepare('SELECT id,status,result_json,created_at,updated_at FROM deployment_requests WHERE id=?').get(id) as { id: string; status: string; result_json: string | null; created_at: string; updated_at: string } | undefined;
+  }
   activeDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status IN ('queued','running','needs_reconciliation') ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
   queuedDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status='queued' ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
   recoverRunningDeployments(): void {

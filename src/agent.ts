@@ -68,6 +68,7 @@ export interface AgentConfig {
   subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string };
   subagentEvent?: boolean;
   deploymentResultEvent?: boolean;
+  deploymentResultStatus?: () => unknown;
 }
 
 interface FunctionCall {
@@ -179,7 +180,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const availableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const availableTools = (config.deploymentResultEvent
+      ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
+      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
     const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
@@ -388,7 +391,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       }
       if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
-      if (config.deploymentResultEvent && calls.length) throw new Error('Deployment result events are notification-only; tool calls are not authorized');
+      if (config.deploymentResultEvent && calls.some(call => call.name !== 'deployment_result_status' || !config.deploymentResultStatus)) throw new Error('Deployment result event tool call is not authorized');
       for (const call of calls) {
         const output = await executeCall(store, session, call, config, googleRuntime);
         if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
@@ -440,13 +443,17 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     return { tool_history_id: id, ...result };
   }
 
+  if (config.deploymentResultEvent && (call.name !== 'deployment_result_status' || !config.deploymentResultStatus || Object.keys(args).some(key => key !== 'label'))) throw new ToolUsageError('Deployment result event tool call is not authorized');
   const id = store.beginTool(session, call.name, args);
   const label = typeof args.label === 'string' ? args.label.trim() : '';
   const { label: _label, ...runtimeArgs } = args;
   emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args: runtimeArgs, ...(label ? { description: label } : {}) });
   let result: unknown;
   try {
-    if (call.name === 'subagent_run') {
+    if (call.name === 'deployment_result_status') {
+      if (!config.deploymentResultEvent || !config.deploymentResultStatus) throw new ToolUsageError('Deployment result status is unavailable');
+      result = config.deploymentResultStatus();
+    } else if (call.name === 'subagent_run') {
       if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       const required = ['task', 'context', 'constraints', 'expected_output'];
       if (Object.keys(runtimeArgs).some(key => ![...required, 'subagent_id'].includes(key)) || required.some(key => typeof runtimeArgs[key] !== 'string' || !(runtimeArgs[key] as string).trim()) || (runtimeArgs.subagent_id !== undefined && typeof runtimeArgs.subagent_id !== 'string')) throw new ToolUsageError('Invalid subagent task arguments');
