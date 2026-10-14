@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import type { MemoryWriteToken } from './store.js';
 
 export type SubagentStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped' | 'handoff';
 export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; questionId: string; message: string; waitForReply: boolean; kind?: 'question' | 'progress' | 'completed' | 'failed' | 'interrupted' | 'stopped' | 'handoff'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
-export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string }; result?: unknown; error?: string; question?: { id: string; message: string; callId?: string }; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
+export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string; memoryWriteToken?: MemoryWriteToken | null }; result?: unknown; error?: string; question?: { id: string; message: string; callId?: string }; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
 type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<unknown>;
 type Entry = { snapshot: SubagentSnapshot; abort: AbortController; answer?: (value: string) => void };
 type Options = {

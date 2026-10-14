@@ -3,7 +3,12 @@ const $ = selector => document.querySelector(selector);
 let selectedSession = null;
 let sessionDetails = new Map();
 let selectedKind = 'messages';
-let activeTab = 'sessions';
+let activeTab = 'channels';
+let channelView = 'settings';
+let sessionScope = 'channels';
+let sessionChannelId = null;
+let sessionSnapshot = '';
+let selectedChannelId = null;
 let sessionOffset = 0;
 let sessionState = 'active';
 let recordOffset = 0;
@@ -11,8 +16,16 @@ let rawRequestBody = null;
 let sessionRequestId = 0;
 let recordRequestId = 0;
 let latestRequestId = 0;
+let channelRequestId = 0;
+let channelRows = [];
+let channelModels = { models: [], imageModels: [] };
+const channelDrafts = new Map();
+const busyChannels = new Set();
 const pendingSessionPages = new Set();
 const pendingRecordPages = new Set();
+
+const recordsWorkspaceTemplate = $('#records-workspace-template');
+$('#channel-records-slot').append(recordsWorkspaceTemplate.content.cloneNode(true));
 
 async function getJson(url) {
   const response = await fetch(url, { cache: 'no-store' });
@@ -40,9 +53,29 @@ function formatTime(value) {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
 }
 
+function recordsWorkspace() { return $('#session-list')?.closest('.records-workspace'); }
+function moveRecordsWorkspace() {
+  const workspace = recordsWorkspace();
+  if (!workspace) return;
+  const slot = sessionScope === 'history' ? $('#history-records-slot') : $('#channel-records-slot');
+  slot.replaceChildren(workspace);
+  workspace.classList.toggle('history-workspace', sessionScope === 'history');
+  workspace.querySelector('[data-session-heading]').textContent = sessionScope === 'history' ? '歷史 Session' : '頻道 Session';
+}
+function resetSessionSelection() {
+  selectedSession = null; sessionDetails = new Map(); recordOffset = 0;
+  sessionRequestId++; recordRequestId++;
+  $('#session-list')?.replaceChildren(); $('#more-sessions').hidden = true;
+  $('#session-title').textContent = '選擇一個 Session'; $('#session-title').removeAttribute('title');
+  $('#records').replaceChildren(); $('#more-records').hidden = true;
+}
 async function loadSessions(append = false) {
+  const scope = sessionScope, channelId = sessionChannelId, state = sessionState;
+  const snapshot = `${scope}:${channelId ?? ''}:${state}`;
+  if (snapshot !== sessionSnapshot) { sessionSnapshot = snapshot; resetSessionSelection(); append = false; }
+  if (scope === 'channels' && !channelId) { resetSessionSelection(); setStatus('先選取頻道以檢視 Session。'); return; }
   const offset = append ? sessionOffset : 0;
-  const pageKey = `${sessionState}:${offset}`;
+  const pageKey = `${scope}:${channelId ?? ''}:${state}:${offset}`;
   if (append && pendingSessionPages.has(pageKey)) return;
   const requestId = ++sessionRequestId;
   if (append) pendingSessionPages.add(pageKey);
@@ -50,8 +83,11 @@ async function loadSessions(append = false) {
 
   try {
     setStatus(`載入${sessionState === 'active' ? '目前' : '封存'} Session…`);
-    const data = await getJson(`api/sessions?state=${sessionState}&offset=${offset}`);
-    if (requestId !== sessionRequestId) return;
+    const params = new URLSearchParams({ state, offset: String(offset) });
+    if (scope === 'channels') params.set('channel_id', channelId);
+    else params.set('scope', 'history');
+    const data = await getJson(`api/sessions?${params}`);
+    if (requestId !== sessionRequestId || snapshot !== sessionSnapshot) return;
 
     const host = $('#session-list');
     if (!append) { host.replaceChildren(); sessionDetails = new Map(); }
@@ -61,17 +97,18 @@ async function loadSessions(append = false) {
       button.classList.toggle('selected', selectedSession === session.id);
       button.dataset.sessionId = session.id;
       button.title = session.id;
-      button.append(
-        element('strong', session.channel_name || (session.channel_id ? '無法取得頻道名稱' : '未知頻道')),
-        element('small', `頻道 ID：${session.channel_id ?? '未知'}`),
-        element('small', `最後活動：${formatTime(session.last_active_at)}`),
-      );
+      button.append(element('strong', sessionScope === 'history' ? (session.channel_name || (session.channel_id ? '無法取得頻道名稱' : '未知頻道')) : `Session ${formatTime(session.created_at)}`),
+        ...(sessionScope === 'history' ? [element('small', `頻道 ID：${session.channel_id ?? '未知'}`)] : []),
+        element('small', `最後活動：${formatTime(session.last_active_at)}`));
       button.onclick = () => openSession(session.id);
       host.append(button);
     }
     sessionOffset = data.next_offset ?? offset;
     $('#more-sessions').hidden = data.next_offset === null;
     setStatus(data.items.length ? 'Session 已載入。' : sessionState === 'active' ? '目前沒有使用中的 Session。' : '目前沒有封存 Session。');
+    if (!append && selectedSession && !sessionDetails.has(selectedSession)) { selectedSession = null; recordRequestId++; $('#records').replaceChildren(); $('#more-records').hidden = true; }
+    if (!append && data.items.length) await openSession(selectedSession ?? data.items[0].id);
+    if (!append && !data.items.length) { $('#records').replaceChildren(element('p', scope === 'history' ? '此狀態下沒有歷史紀錄。' : '此頻道在此狀態下沒有對話紀錄。', 'empty-state')); $('#session-title').textContent = '沒有對話紀錄'; $('#session-title').removeAttribute('title'); }
   } catch (error) {
     if (requestId === sessionRequestId) setStatus(`載入 Session 失敗：${error.message}`);
   } finally {
@@ -207,18 +244,303 @@ async function loadLatestRequest() {
   }
 }
 
+function isChannelDirty(id) {
+  const draft = channelDrafts.get(id);
+  const channel = channelRows.find(item => item.channelId === id);
+  return !!draft && !!channel && JSON.stringify(draft) !== JSON.stringify(channelSettings(channel));
+}
+
+function channelSettings(channel) {
+  return {
+    tracked: channel.raw.tracked,
+    botReply: channel.raw.botReply,
+    hindsightWrite: channel.raw.hindsightWrite,
+    replyMode: channel.raw.replyMode,
+    mode: channel.raw.mode,
+    model: channel.raw.model,
+    effort: channel.raw.effort,
+    imageModel: channel.raw.imageModel,
+  };
+}
+
+function ensureChannelDraft(channel) {
+  if (!channelDrafts.has(channel.channelId)) channelDrafts.set(channel.channelId, channelSettings(channel));
+  return channelDrafts.get(channel.channelId);
+}
+
+function settingSelect(channel, draft, key, label, options, effectiveText) {
+  const wrap = element('label', undefined, 'channel-field');
+  wrap.append(element('span', label));
+  const select = element('select');
+  select.dataset.key = key;
+  for (const [value, title] of options) {
+    const option = element('option', title);
+    option.value = value;
+    select.append(option);
+  }
+  const raw = draft[key];
+  const desired = raw == null ? '' : String(raw);
+  if (desired && !options.some(([value]) => value === desired)) {
+    const unknown = element('option', `${desired}（目前設定）`);
+    unknown.value = desired;
+    select.append(unknown);
+  }
+  select.value = desired;
+  select.onchange = () => { draft[key] = select.value === '' ? null : select.value; updateChannelDirty(channel.channelId); };
+  wrap.append(select, element('small', `生效值：${effectiveText}`));
+  return wrap;
+}
+
+function booleanField(channel, draft, key, label, effectiveValue) {
+  const wrap = element('div', undefined, 'channel-field boolean-field');
+  const labelElement = element('label', undefined, 'checkbox-label');
+  const input = element('input');
+  input.type = 'checkbox';
+  input.dataset.key = key;
+  input.checked = draft[key] === null ? effectiveValue : draft[key];
+  input.onchange = () => { draft[key] = input.checked; updateChannelDirty(channel.channelId); };
+  labelElement.append(input, document.createTextNode(label));
+  wrap.append(labelElement, element('small', `生效值：${effectiveValue ? '開' : '關'}`));
+  return wrap;
+}
+
+function updateChannelDirty(id) {
+  const dirty = isChannelDirty(id);
+  const treeRow = document.querySelector(`#channel-tree [data-tree-channel-id="${CSS.escape(id)}"]`);
+  if (treeRow) {
+    treeRow.querySelector('[data-tree-dirty]').hidden = !dirty;
+    treeRow.classList.toggle('dirty', dirty);
+  }
+  const panel = $('#channel-panel');
+  if (panel.dataset.channelId !== id) return;
+  const marker = panel.querySelector('[data-dirty]');
+  const save = panel.querySelector('[data-save]');
+  if (marker) marker.textContent = dirty ? '有未儲存變更' : '已儲存';
+  if (save) save.disabled = !dirty || !channelRows.find(channel => channel.channelId === id)?.authorized || busyChannels.has(id);
+}
+
+function renderChannels() {
+  const tree = $('#channel-tree');
+  tree.replaceChildren();
+  const compare = (a, b) => (a.name || '').localeCompare(b.name || '') || a.channelId.localeCompare(b.channelId);
+  const byId = new Map(channelRows.map(channel => [channel.channelId, channel]));
+  const children = new Map();
+  for (const channel of channelRows) {
+    const key = channel.parentChannelId && byId.has(channel.parentChannelId) ? channel.parentChannelId : null;
+    if (!children.has(key)) children.set(key, []);
+    children.get(key).push(channel);
+  }
+  for (const group of children.values()) group.sort(compare);
+  const ordered = [], visited = new Set();
+  const visit = (channel, branches = []) => {
+    if (visited.has(channel.channelId)) return;
+    visited.add(channel.channelId); ordered.push({channel, branches});
+    const group = children.get(channel.channelId) || [];
+    group.forEach((child, index) => visit(child, [...branches, index === group.length - 1]));
+  };
+  for (const root of children.get(null) || []) visit(root);
+  for (const channel of [...channelRows].sort(compare)) visit(channel);
+  for (const {channel, branches} of ordered) {
+    const row = element('div', undefined, `channel-tree-row${selectedChannelId === channel.channelId ? ' selected' : ''}${channel.tracked ? '' : ' untracked'}`);
+    row.dataset.treeChannelId = channel.channelId;
+    row.style.setProperty('--channel-depth', branches.length);
+    branches.forEach((last, level) => {
+      const current = level === branches.length - 1;
+      if (!current && last) return;
+      const branch = element('span', undefined, `tree-branch${current ? ' tree-branch-current' : ''}${current && last ? ' tree-branch-last' : ''}`);
+      branch.style.setProperty('--branch-level', level);
+      branch.setAttribute('aria-hidden', 'true');
+      row.append(branch);
+    });
+    const button = element('button', undefined, 'channel-tree-select');
+    button.type = 'button';
+    button.setAttribute('aria-current', selectedChannelId === channel.channelId ? 'true' : 'false');
+    const name = element('strong', channel.name || '未取得頻道名稱');
+    const title = element('span', undefined, 'channel-tree-title');
+    const kinds = { forum: '論壇', post: '貼文', channel: '頻道' };
+    title.append(element('span', kinds[channel.kind] ?? '未知', `channel-kind channel-kind-${channel.kind ?? 'unknown'}`), name);
+    const state = channel.authorized ? (channel.tracked ? '追蹤中' : '已停止追蹤') : '僅歷史';
+    const details = element('span', state, 'tree-state');
+    const dirty = element('span', '未儲存', 'tree-dirty'); dirty.dataset.treeDirty = ''; dirty.hidden = !isChannelDirty(channel.channelId);
+    button.append(title, details, dirty);
+    button.onclick = () => selectChannel(channel.channelId);
+    const action = element('button', channel.tracked ? '停止追蹤' : '恢復追蹤', 'channel-tree-tracking');
+    action.type = 'button';
+    action.disabled = !channel.authorized || busyChannels.has(channel.channelId);
+    action.setAttribute('aria-label', `${action.textContent}：${channel.name || channel.channelId}`);
+    action.onclick = () => {
+      if (channel.tracked) {
+        if (window.confirm('停止追蹤此頻道？歷史紀錄會保留。')) void mutateChannel(channel, 'DELETE');
+      } else void mutateChannel(channel, 'PATCH', { tracked: true });
+    };
+    row.append(button, action);
+    tree.append(row);
+  }
+  const panel = $('#channel-panel');
+  const channel = channelRows.find(item => item.channelId === selectedChannelId);
+  if (!channel) {
+    panel.removeAttribute('data-channel-id');
+    panel.replaceChildren(element('p', channelRows.length ? '選取左側頻道以檢視或編輯設定。' : '目前沒有可管理的頻道。', 'empty-state'));
+    return;
+  }
+  panel.dataset.channelId = channel.channelId;
+  panel.replaceChildren();
+  const draft = ensureChannelDraft(channel);
+  const parent = byId.get(channel.parentChannelId);
+  const inherits = Boolean(channel.parentChannelId) && ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel'].every(key => draft[key] == null);
+  const effective = inherits ? (parent?.effective ?? channel.effective) : channel.effective;
+  const heading = element('header', undefined, 'channel-panel-heading');
+  const identity = element('div'); identity.append(element('p', '頻道設定', 'eyebrow'), element('h3', channel.name || '未取得頻道名稱'));
+  const state = element('span', channel.authorized ? (channel.tracked ? '追蹤中' : '已停止追蹤') : '不再授權（僅歷史）', 'channel-state'); heading.append(identity, state); panel.append(heading);
+  const meta = element('dl', undefined, 'channel-meta');
+  for (const [label, value] of [['頻道 ID', channel.channelId], ['父頻道', parent ? (parent.name || parent.channelId) : channel.parentChannelId || '無'], ['追蹤狀態', state.textContent]]) { meta.append(element('dt', label), element('dd', value)); }
+  panel.append(meta);
+  if (!channel.authorized) { panel.append(element('p', '此頻道已不再授權，僅保留歷史資料供檢視。', 'empty-state')); return; }
+  const fieldset = (title, className='') => { const section=element('section',undefined,`channel-group ${className}`); section.append(element('h4',title)); const grid=element('div',undefined,'channel-fields'); section.append(grid); panel.append(section); return grid; };
+  const reply = fieldset('回應','reply-group');
+  const memory = fieldset('記憶','memory-group');
+  const model = fieldset('模型','model-group');
+  const addSelect = (host,key,label,options,effectiveValue) => { const field=settingSelect(channel,draft,key,label,options,effectiveValue); host.append(field); };
+  addSelect(reply,'replyMode','回應模式',[['','沿用父頻道／預設'],['none','不回應'],['mention','僅 @'],['all','所有訊息']],effective.replyMode);
+  reply.append(booleanField(channel,draft,'botReply','回應其他 bot',effective.botReply));
+  addSelect(reply,'mode','處理模式',[['','沿用父頻道／預設'],['queue','Queue'],['steer','Steer']],effective.mode);
+  memory.append(booleanField(channel,draft,'hindsightWrite','寫入 Hindsight',effective.hindsightWrite));
+  memory.append(element('p','停用寫入時仍可查詢既有記憶。','muted'));
+  addSelect(model,'model','對話模型',[['','沿用預設'],...channelModels.models.map(value=>[value,value])],effective.model);
+  addSelect(model,'effort','Effort',[['','沿用預設'],...['none','minimal','low','medium','high','xhigh','auto'].map(value=>[value,value])],effective.effort);
+  addSelect(model,'imageModel','圖片模型',[['','沿用預設'],...channelModels.imageModels.map(value=>[value,value])],effective.imageModel ?? '停用');
+  for (const control of panel.querySelectorAll('select,input')) control.disabled = busyChannels.has(channel.channelId);
+  if (channel.parentChannelId) {
+    const inheritLabel=element('label',undefined,'inherit-label'); const inherit=element('input'); inherit.type='checkbox'; inherit.checked=inherits; inherit.disabled=busyChannels.has(channel.channelId);
+    inherit.onchange=()=>{for(const key of ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel']) draft[key]=inherit.checked?null:effective[key]; renderChannels();};
+    inheritLabel.append(inherit,document.createTextNode('使用父頻道設定')); panel.insertBefore(inheritLabel,reply.parentElement);
+    if (inherits) for (const control of panel.querySelectorAll('.channel-group select,.channel-group input')) control.disabled = true;
+  }
+  const footer=element('div',undefined,'channel-footer'); const dirty=element('span','已儲存'); dirty.dataset.dirty='';
+  const save=element('button','儲存設定'); save.type='button'; save.dataset.save=''; save.disabled=!isChannelDirty(channel.channelId)||busyChannels.has(channel.channelId);
+  save.onclick=()=>{const saved=channelSettings(channel);const settings=Object.fromEntries(Object.entries(draft).filter(([key,value])=>value!==saved[key]));if(Object.keys(settings).length)void mutateChannel(channel,'PATCH',settings);}; footer.append(dirty,save); panel.append(footer);
+  updateChannelDirty(channel.channelId);
+  if(busyChannels.has(channel.channelId)){panel.dataset.busy='true';panel.querySelectorAll('button,select,input').forEach(control=>control.disabled=true);}else delete panel.dataset.busy;
+}
+
+function selectChannel(id) {
+  if (selectedChannelId === id) { renderChannels(); return; }
+  selectedChannelId = id;
+  sessionScope = 'channels'; sessionChannelId = id; sessionSnapshot = '';
+  resetSessionSelection(); renderChannels();
+  if (activeTab === 'channels' && channelView === 'records') void loadSessions(false);
+}
+async function loadChannels(force = false) {
+  if (channelDrafts.size && [...channelDrafts.keys()].some(isChannelDirty)) {
+    if (!force || !window.confirm('有未儲存的頻道變更。重新載入會捨棄這些草稿，確定繼續嗎？')) {
+      setStatus('保留未儲存變更；未重新載入頻道。');
+      return;
+    }
+    channelDrafts.clear();
+  }
+  const requestId = ++channelRequestId;
+  try {
+    setStatus('載入頻道設定…');
+    const [data, models] = await Promise.all([getJson('api/channels'), getJson('api/models')]);
+    if (requestId !== channelRequestId) return;
+    if (!Array.isArray(data.channels) || !Array.isArray(models.models) || !Array.isArray(models.imageModels)) throw new Error('頻道或模型資料格式無效');
+    channelRows = data.channels.filter(channel => channel.authorized);
+    channelModels = models;
+    if (!channelRows.some(channel => channel.channelId === selectedChannelId)) selectedChannelId = channelRows[0]?.channelId ?? null;
+    if (activeTab === 'channels') { sessionScope = 'channels'; sessionChannelId = selectedChannelId; }
+    for (const channel of channelRows) if (!channelDrafts.has(channel.channelId)) channelDrafts.set(channel.channelId, channelSettings(channel));
+    renderChannels();
+    if (activeTab === 'channels' && channelView === 'records') void loadSessions(false);
+    setStatus('頻道設定已載入。')
+  } catch (error) {
+    if (requestId === channelRequestId) setStatus(`載入頻道設定失敗：${error.message}`);
+  }
+}
+
+async function mutateChannel(channel, method, body) {
+  if (busyChannels.has(channel.channelId)) return;
+  busyChannels.add(channel.channelId);
+  renderChannels();
+  try {
+    const headers = {};
+    const options = { method, headers, cache: 'no-store', credentials: 'same-origin' };
+    if (body !== undefined) { headers['content-type'] = 'application/json'; options.body = JSON.stringify(body); }
+    const response = await fetch(method === 'DELETE' ? `api/channels/${encodeURIComponent(channel.channelId)}/tracking` : `api/channels/${encodeURIComponent(channel.channelId)}`, options);
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+    if (!data.channel) throw new Error('回應缺少 channel');
+    const previous = channelRows.find(item => item.channelId === channel.channelId);
+    const previousSettings = channelSettings(previous);
+    const draft = channelDrafts.get(channel.channelId) ?? previousSettings;
+    channelRows = channelRows.map(item => item.channelId === channel.channelId ? data.channel : item);
+    const updatedSettings = channelSettings(data.channel);
+    for (const key of Object.keys(updatedSettings)) if (draft[key] === previousSettings[key] || (body && Object.hasOwn(body, key) && draft[key] === body[key])) draft[key] = updatedSettings[key];
+    channelDrafts.set(channel.channelId, draft);
+    if ((method === 'DELETE' || body?.tracked === true) && selectedChannelId === channel.channelId && activeTab === 'channels' && channelView === 'records') { sessionSnapshot = ''; resetSessionSelection(); void loadSessions(false); }
+    setStatus(method === 'DELETE' ? '已停止追蹤；歷史保留。' : '頻道設定已儲存。');
+  } catch (error) { setStatus(`頻道操作失敗：${error.message}`); }
+  finally { busyChannels.delete(channel.channelId); renderChannels(); }
+}
+
+$('#channel-add-toggle').onclick = () => {
+  const form=$('#channel-add'); form.hidden=!form.hidden;
+  $('#channel-add-toggle').setAttribute('aria-expanded',String(!form.hidden));
+  if(!form.hidden) $('#channel-new-id').focus();
+};
+
+$('#channel-add').onsubmit = async event => {
+  event.preventDefault();
+  const input = $('#channel-new-id');
+  const button = event.submitter;
+  const channelId = input.value.trim();
+  if (!channelId) return;
+  button.disabled = true;
+  try {
+    const response = await fetch('api/channels', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ channelId }), cache: 'no-store', credentials: 'same-origin' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
+    if (!data.channel) throw new Error('回應缺少 channel');
+    input.value = '';
+    channelRows = [data.channel, ...channelRows.filter(channel => channel.channelId !== data.channel.channelId)];
+    selectedChannelId = data.channel.channelId;
+    channelDrafts.set(data.channel.channelId, channelSettings(data.channel));
+    renderChannels();
+    sessionScope = 'channels'; sessionChannelId = data.channel.channelId; sessionSnapshot = '';
+    resetSessionSelection(); if (activeTab === 'channels' && channelView === 'records') void loadSessions(false);
+    setStatus('頻道已新增。');
+  } catch (error) { setStatus(`新增頻道失敗：${error.message}`); }
+  finally { button.disabled = false; }
+};
+
 document.querySelectorAll('[data-tab]').forEach(button => {
   button.onclick = () => {
+    if (activeTab === button.dataset.tab) return;
     activeTab = button.dataset.tab;
-    document.querySelectorAll('[data-tab]').forEach(tab => tab.setAttribute('aria-selected', String(tab === button)));
-    $('#sessions').hidden = activeTab !== 'sessions';
-    $('#request').hidden = activeTab !== 'request';
+    document.querySelectorAll('[data-tab]').forEach(tab => { const selected = tab === button; tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; });
+    for (const [tab, id] of Object.entries({ channels: 'channels', history: 'history', request: 'request', google: 'google-auth' })) $('#'+id).hidden = tab !== activeTab;
+    resetSessionSelection();
     if (activeTab === 'request') void loadLatestRequest();
     else {
       latestRequestId++;
-      setStatus('就緒。');
+      if (activeTab === 'channels') {
+        sessionScope = 'channels'; sessionChannelId = selectedChannelId; sessionSnapshot = '';
+        moveRecordsWorkspace();
+        if (!channelRows.length) void loadChannels();
+        else if (channelView === 'records' && selectedChannelId && !selectedSession) void loadSessions(false);
+      } else if (activeTab === 'history') {
+        sessionScope = 'history'; sessionChannelId = null; sessionSnapshot = '';
+        resetSessionSelection(); moveRecordsWorkspace(); void loadSessions(false);
+      } else if (activeTab === 'google') {
+        setStatus('Google 設定。'); if (!googleCsrf && !googleBusy) void loadGoogleStatus();
+      }
     }
   };
+});
+document.querySelectorAll('[data-channel-view]').forEach(button => button.onclick = () => {
+  channelView = button.dataset.channelView;
+  document.querySelectorAll('[data-channel-view]').forEach(tab => { const selected = tab === button; tab.setAttribute('aria-pressed', String(selected)); tab.classList.toggle('selected', selected); });
+  $('#channel-records-view').hidden = channelView !== 'records'; $('#channel-settings-view').hidden = channelView !== 'settings';
+  if (channelView === 'records' && activeTab === 'channels') { moveRecordsWorkspace(); if (selectedChannelId && !sessionSnapshot) void loadSessions(false); }
 });
 
 document.querySelectorAll('[data-session-state]').forEach(button => {
@@ -251,21 +573,17 @@ document.querySelectorAll('[data-kind]').forEach(button => {
     selectedKind = button.dataset.kind;
     recordOffset = 0;
     $('#records').replaceChildren();
-    document.querySelectorAll('[data-kind]').forEach(tab => tab.classList.toggle('selected', tab === button));
+    document.querySelectorAll('[data-kind]').forEach(tab => { tab.classList.toggle('selected', tab === button); tab.setAttribute('aria-pressed', String(tab === button)); });
     void loadRecords(false);
   };
 });
 
 $('#refresh').onclick = () => {
-  if (!googleCsrf) void loadGoogleStatus();
-  if (activeTab === 'request') void loadLatestRequest();
-  else {
-    void loadSessions(false);
-    if (selectedSession) {
-      recordOffset = 0;
-      void loadRecords(false);
-    }
-  }
+  if (activeTab === 'google') { if (!googleCsrf && !googleBusy) void loadGoogleStatus(); }
+  else if (activeTab === 'request') void loadLatestRequest();
+  else if (activeTab === 'channels') {
+    void loadChannels(true);
+  } else { sessionSnapshot = ''; resetSessionSelection(); void loadSessions(false); }
 };
 $('#more-sessions').onclick = () => void loadSessions(true);
 $('#more-records').onclick = () => void loadRecords(true);
@@ -277,6 +595,7 @@ $('#download').onclick = () => {
 };
 
 let googleCsrf = null;
+let googleBusy = false;
 let googleExpiry;
 function clearGoogleTransaction() {
   googleCsrf = null;
@@ -290,10 +609,12 @@ async function loadGoogleStatus() {
     const { status } = await getJson('api/google/status');
     const labels = { not_configured: '尚未設定 client', not_connected: '尚未連線', connected: '已連線', reauthorization_required: '需要重新授權' };
     $('#google-status').textContent = labels[status] ?? '連線狀態未知';
-    $('#google-start').disabled = status === 'not_configured';
+    $('#google-start').disabled = googleBusy || status === 'not_configured';
   } catch { $('#google-status').textContent = '無法讀取 Google 連線狀態'; }
 }
 $('#google-start').onclick = async () => {
+  if (googleBusy) return;
+  googleBusy = true;
   clearGoogleTransaction();
   $('#google-start').disabled = true;
   $('#google-submit').disabled = true;
@@ -309,9 +630,11 @@ $('#google-start').onclick = async () => {
     $('#google-status').textContent = '請在 Google 授權後，於五分鐘內複製導回的完整網址並貼回此處。';
     googleExpiry = setTimeout(() => { clearGoogleTransaction(); $('#google-status').textContent = '授權已逾時，請重新開始。'; }, 300_000);
   } catch { clearGoogleTransaction(); $('#google-status').textContent = '無法開始授權，請確認 client 設定與公開 UI origin。'; }
-  finally { $('#google-start').disabled = false; $('#google-submit').disabled = false; }
+  finally { googleBusy = false; $('#google-start').disabled = false; $('#google-submit').disabled = false; }
 };
 $('#google-submit').onclick = async () => {
+  if (googleBusy) return;
+  googleBusy = true;
   const input = $('#google-url'); const pastedUrl = input.value; input.value = '';
   $('#google-start').disabled = true;
   $('#google-submit').disabled = true;
@@ -323,7 +646,12 @@ $('#google-submit').onclick = async () => {
     if (!response.ok) throw new Error(data.error ?? '授權失敗，請重新開始');
     $('#google-complete').hidden = true; $('#google-status').textContent = '已連線';
   } catch (error) { $('#google-status').textContent = error.message; }
-  finally { clearGoogleTransaction(); $('#google-start').disabled = false; $('#google-submit').disabled = false; }
+  finally { googleBusy = false; clearGoogleTransaction(); $('#google-start').disabled = false; $('#google-submit').disabled = false; }
 };
-void loadGoogleStatus();
-void loadSessions();
+void loadChannels();
+
+let embeddedFrame=null;
+try { const frame=window.frameElement; if(frame && frame.tagName==='IFRAME') { embeddedFrame=frame; document.documentElement.classList.add('embedded'); document.body.classList.add('embedded'); frame.style.display='block'; } } catch { /* standalone or inaccessible frame */ }
+if(embeddedFrame){ let resizeFrame=0,lastHeight=0; const scheduleFrameResize=()=>{if(resizeFrame)return;resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;const height=Math.ceil($('main').getBoundingClientRect().height);if(height>0&&height!==lastHeight){lastHeight=height;embeddedFrame.style.height=`${height}px`;}});}; new ResizeObserver(scheduleFrameResize).observe($('main')); document.querySelectorAll('[data-tab]').forEach(tab=>tab.addEventListener('click',scheduleFrameResize)); window.addEventListener('resize',scheduleFrameResize); if(document.fonts?.ready) document.fonts.ready.then(scheduleFrameResize); scheduleFrameResize();}
+
+window.addEventListener('beforeunload', event => { if ([...channelDrafts.keys()].some(isChannelDirty)) { event.preventDefault(); event.returnValue=''; } });

@@ -8,7 +8,7 @@ import { formatDiscordUrls } from './discord-url.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; memoryWriteToken?: import('./store.js').MemoryWriteToken | null; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -86,7 +86,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         attachments, preparationStatus: 'ready', discordSegments: [],
       };
       if (options.context.store && options.context.sessionId) {
-        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, evidence.source, attachments);
+        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, evidence.source, attachments, options.context.store.tokenForSource(options.context.memoryWriteToken ?? null, channelId));
         if (persisted.created) options.context.store.updateAttachments(persisted.message.id, attachments);
         const storedEvidence = options.context.store.messagesWithSources(options.context.sessionId).find(item => item.id === persisted.message.id) ?? evidence;
         pendingInput.push(storedEvidence);
@@ -256,7 +256,7 @@ function persistDeliveredMessage(context: DiscordToolContext, channelId: string,
     throw new Error('Discord message response lacks a valid message ID or timestamp; delivery cannot be recorded');
   }
   if (!context.store || !context.sessionId) throw new Error('Discord message was delivered but cannot be recorded without its session store');
-  const message = context.store.createOutgoing(context.sessionId, content, { sourceKind: 'butler_tool_message', authorId: context.botId, authorName: context.botName, channelId, discordMessageId: messageId, eventTime });
+  const message = context.store.createOutgoing(context.sessionId, content, { sourceKind: 'butler_tool_message', authorId: context.botId, authorName: context.botName, channelId, discordMessageId: messageId, eventTime }, context.store.tokenForSource(context.memoryWriteToken ?? null, channelId));
   context.store.saveOutgoingSegment(message, { channelId, messageId, content, createdAt: eventTime });
   context.store.finalizeOutgoing(message.id, content);
   context.onMessageDelivered?.(channelId, context.sessionId);

@@ -27,6 +27,10 @@ export type ConversationRetainPayload = Readonly<{
 }>;
 export type OperationStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'not_found';
 export type OperationStatusResult = { status: OperationStatus; response: Record<string, unknown> | null };
+export class MemoryWriteSuppressedError extends Error {
+  constructor() { super('此頻道的 Hindsight 為只讀'); this.name = 'MemoryWriteSuppressedError'; }
+}
+
 export class ConversationSubmissionError extends Error {
   constructor(readonly classification: 'rejection' | 'unknown', message: string, readonly httpStatus?: number, readonly response?: unknown) { super(message); this.name = 'ConversationSubmissionError'; }
 }
@@ -34,7 +38,7 @@ export class ConversationSubmissionError extends Error {
 export class Hindsight {
   constructor(private readonly config: HindsightConfig, private readonly fetcher: typeof fetch = fetch) {}
 
-  async ensureBank(store: Store, session: string, onProgress?: (event: ProgressEvent) => void): Promise<void> {
+  async ensureBank(store: Store, session: string, onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean): Promise<void> {
     logInfo('tool_call', { tool: 'hindsight_bank_setup', source: 'internal', sessionId: session });
     const audit = store.beginTool(session, 'hindsight_bank_setup', { bankId: this.config.bankId });
     const started = Date.now();
@@ -46,7 +50,8 @@ export class Hindsight {
       await this.readResponse(response, trace);
       this.finishTrace(trace, { ...(response.ok || response.status === 404 ? {} : { failedStage: 'http_status' }) });
       if (response.status === 404) {
-        const createdRequest = await this.request(url, { method: 'PUT', body: JSON.stringify({}) }, 'bank_create');
+        assertWriteAllowed(writeAllowed);
+        const createdRequest = await this.request(url, { method: 'PUT', body: JSON.stringify({}) }, 'bank_create', {}, undefined, writeAllowed);
         await this.readResponse(createdRequest.response, createdRequest.trace);
         this.finishTrace(createdRequest.trace, { ...(createdRequest.response.ok ? {} : { failedStage: 'http_status' }) });
         if (!createdRequest.response.ok) throw new Error(`bank create returned HTTP ${createdRequest.response.status}`);
@@ -64,8 +69,8 @@ export class Hindsight {
     logMemoryPhase('bank_setup', started, 'completed');
   }
 
-  async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void): Promise<string> {
-    try { await this.ensureBank(store, session, onProgress); }
+  async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean): Promise<string> {
+    try { await this.ensureBank(store, session, onProgress, writeAllowed); }
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
     const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
     const request = { query };
@@ -135,16 +140,16 @@ export class Hindsight {
     return page;
   }
 
-  async createKnowledgeFolder(name: string): Promise<Record<string, unknown>> {
-    const { response, trace } = await this.request(`${this.bankUrl()}/knowledge-base/folders`, { method: 'POST', body: JSON.stringify({ name, parent_id: null }) }, 'knowledge_folder_create');
+  async createKnowledgeFolder(name: string, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {
+    const { response, trace } = await this.request(`${this.bankUrl()}/knowledge-base/folders`, { method: 'POST', body: JSON.stringify({ name, parent_id: null }) }, 'knowledge_folder_create', {}, undefined, writeAllowed);
     return this.readMutation<Record<string, unknown>>(response, trace, 'Hindsight knowledge folder create', value => typeof value.id === 'string' && value.kind === 'folder' && value.name === name && value.parent_id === null);
   }
 
-  async createKnowledgePage(data: { name: string; parent_id?: string; source_query: string; tags: string[]; max_tokens?: number; trigger: Record<string, unknown> }): Promise<Record<string, unknown>> {
+  async createKnowledgePage(data: { name: string; parent_id?: string; source_query: string; tags: string[]; max_tokens?: number; trigger: Record<string, unknown> }, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {
     let result: unknown;
-    try { result = await this.post(`${this.bankUrl()}/knowledge-base/pages`, data); }
+    try { result = await this.post(`${this.bankUrl()}/knowledge-base/pages`, data, undefined, writeAllowed); }
     catch (error) {
-      if (error instanceof Error && /HTTP 4\d\d/.test(error.message)) throw error;
+      if (error instanceof Error && (/HTTP 4\d\d/.test(error.message) || error.message === '此頻道的 Hindsight 為只讀')) throw error;
       throw new Error(`Hindsight knowledge page create outcome unknown: ${safeError(error)}`);
     }
     const page = asRecord(result);
@@ -152,17 +157,17 @@ export class Hindsight {
     return page;
   }
 
-  async updateKnowledgePage(pageId: string, data: Record<string, unknown>): Promise<Record<string, unknown>> {
+  async updateKnowledgePage(pageId: string, data: Record<string, unknown>, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {
     let request: { response: Response; trace: RequestTiming };
-    try { request = await this.request(`${this.bankUrl()}/knowledge-base/nodes/${encodeURIComponent(pageId)}`, { method: 'PATCH', body: JSON.stringify(data) }, 'knowledge_page_update'); }
-    catch (error) { throw new Error(`Hindsight knowledge page update outcome unknown: ${safeError(error)}`); }
+    try { request = await this.request(`${this.bankUrl()}/knowledge-base/nodes/${encodeURIComponent(pageId)}`, { method: 'PATCH', body: JSON.stringify(data) }, 'knowledge_page_update', {}, undefined, writeAllowed); }
+    catch (error) { if (error instanceof Error && error.message === '此頻道的 Hindsight 為只讀') throw error; throw new Error(`Hindsight knowledge page update outcome unknown: ${safeError(error)}`); }
     return this.readMutation<Record<string, unknown>>(request.response, request.trace, 'Hindsight knowledge page update', value => value.id === pageId && value.kind === 'page' && typeof value.name === 'string' && typeof value.mental_model_id === 'string');
   }
 
-  async refreshKnowledgePage(mentalModelId: string): Promise<{ operation_id: string; status: 'queued' }> {
+  async refreshKnowledgePage(mentalModelId: string, writeAllowed?: () => boolean): Promise<{ operation_id: string; status: 'queued' }> {
     let result: unknown;
-    try { result = await this.post(`${this.bankUrl()}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`, {}); }
-    catch (error) { throw new Error(`Hindsight knowledge page refresh outcome unknown: ${safeError(error)}`); }
+    try { result = await this.post(`${this.bankUrl()}/mental-models/${encodeURIComponent(mentalModelId)}/refresh`, {}, undefined, writeAllowed); }
+    catch (error) { if (error instanceof Error && error.message === '此頻道的 Hindsight 為只讀') throw error; throw new Error(`Hindsight knowledge page refresh outcome unknown: ${safeError(error)}`); }
     const refresh = asRecord(result);
     if (!refresh || typeof refresh.operation_id !== 'string' || refresh.status !== 'queued') throw new Error('Hindsight knowledge page refresh response is invalid; outcome unknown');
     return { operation_id: refresh.operation_id, status: 'queued' };
@@ -181,12 +186,12 @@ export class Hindsight {
     return record as T;
   }
 
-  async submitConversationBatch(payload: ConversationRetainPayload): Promise<Record<string, unknown>> {
+  async submitConversationBatch(payload: ConversationRetainPayload, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {
     const operationId = payload.operation_id;
     let response: Response;
     let trace: RequestTiming;
     try {
-      ({ response, trace } = await this.request(`${this.bankUrl()}/memories`, { method: 'POST', body: JSON.stringify(payload) }, 'conversation_submit'));
+      ({ response, trace } = await this.request(`${this.bankUrl()}/memories`, { method: 'POST', body: JSON.stringify(payload) }, 'conversation_submit', {}, undefined, writeAllowed));
       const text = await this.readResponse(response, trace);
       let body: unknown;
       try { body = this.parseResponse(text, trace); }
@@ -203,24 +208,27 @@ export class Hindsight {
       this.finishTrace(trace);
       return record;
     } catch (error) {
+      if (error instanceof MemoryWriteSuppressedError) throw error;
       if (error instanceof ConversationSubmissionError) throw error;
       throw new ConversationSubmissionError('unknown', `Conversation submission outcome unknown: ${safeError(error)}`);
     }
   }
 
-  async submitAttachmentFile(input: { path: string; filename: string; mimeType?: string; documentId: string; context: string; metadata: Record<string, string>; timestamp: string }): Promise<{ operationId: string }> {
+  async submitAttachmentFile(input: { path: string; filename: string; mimeType?: string; documentId: string; context: string; metadata: Record<string, string>; timestamp: string }, writeAllowed?: () => boolean): Promise<{ operationId: string }> {
     const handle = await open(input.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
     try {
       const stat = await handle.stat();
+      assertWriteAllowed(writeAllowed);
       if (!stat.isFile() || stat.size > 20 * 1024 * 1024) throw new Error('Attachment archive file is unavailable at its last-known location');
       const bytes = await handle.readFile();
       if (bytes.length !== stat.size) throw new Error('Attachment archive file read was incomplete');
+      assertWriteAllowed(writeAllowed);
       const imageType = resolveSupportedImageType(bytes, input.filename, input.mimeType ?? 'application/octet-stream');
       const uploadFilename = imageType ? imageUploadFilename(input.filename, imageType) : input.filename;
       const form = new FormData();
       form.set('files', new Blob([new Uint8Array(bytes)], imageType ? { type: imageType.mimeType } : undefined), uploadFilename);
       form.set('request', JSON.stringify({ files_metadata: [{ document_id: input.documentId, parser: 'butler', timestamp: input.timestamp, context: input.context, metadata: input.metadata }] }));
-      const { response, trace } = await this.request(`${this.bankUrl()}/files/retain`, { method: 'POST', body: form, headers: {} }, 'attachment_submit', {}, 120_000);
+      const { response, trace } = await this.request(`${this.bankUrl()}/files/retain`, { method: 'POST', body: form, headers: {} }, 'attachment_submit', {}, 120_000, writeAllowed);
       const text = await this.readResponse(response, trace);
       let body: unknown;
       try { body = this.parseResponse(text, trace); } catch { this.finishTrace(trace, { failedStage: 'json_parse' }); throw new ConversationSubmissionError(response.status >= 400 && response.status < 500 ? 'rejection' : 'unknown', `Invalid attachment conversion JSON (HTTP ${response.status})`, response.status); }
@@ -231,6 +239,7 @@ export class Hindsight {
       this.finishTrace(trace);
       return { operationId: operationIds[0] as string };
     } catch (error) {
+      if (error instanceof MemoryWriteSuppressedError) throw error;
       if (error instanceof ConversationSubmissionError) throw error;
       if (error instanceof AttachmentImageTypeConflictError) throw new ConversationSubmissionError('rejection', `Attachment type metadata conflict: ${error.message}`);
       throw new ConversationSubmissionError('unknown', `Attachment conversion outcome unknown: ${safeError(error)}`);
@@ -258,10 +267,11 @@ export class Hindsight {
 
   private bankUrl(): string { return `${this.baseUrl()}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`; }
   private baseUrl(): string { return this.config.baseUrl.replace(/\/$/, ''); }
-  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number): Promise<{ response: Response; trace: RequestTiming }> {
+  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number, writeAllowed?: () => boolean): Promise<{ response: Response; trace: RequestTiming }> {
     const startedAt = Date.now();
     const trace: RequestTiming = { startedAt, requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: timeoutMs ?? this.config.timeoutMs ?? 8000, ...metadata };
     try {
+      if (init.method && init.method.toUpperCase() !== 'GET') assertWriteAllowed(writeAllowed);
       const response = await this.fetcher(url, { ...init, headers: { ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...init.headers }, signal: AbortSignal.timeout(trace.timeoutMs) });
       trace.headersWaitMs = Date.now() - startedAt;
       trace.status = response.status;
@@ -320,11 +330,11 @@ export class Hindsight {
     this.finishTrace(trace);
     return body;
   }
-  private async post(url: string, data: unknown, timeoutMs?: number): Promise<unknown> {
+  private async post(url: string, data: unknown, timeoutMs?: number, writeAllowed?: () => boolean): Promise<unknown> {
     const record = asRecord(data);
     const operation = url.endsWith('/memories/recall') ? 'recall' : url.endsWith('/reflect') ? 'reflect' : url.endsWith('/memories') ? 'memory_retain' : 'post';
     const traceMetadata = { ...(typeof record?.query === 'string' ? { queryChars: record.query.length } : {}), ...(typeof record?.budget === 'string' ? { budget: record.budget } : {}), ...(typeof record?.max_tokens === 'number' ? { maxTokens: record.max_tokens } : {}) };
-    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata, timeoutMs);
+    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata, timeoutMs, writeAllowed);
     const text = await this.readResponse(response, trace);
     if (!response.ok) {
       const recoverable = operation === 'recall' && (response.status === 400 || response.status === 422);
@@ -361,6 +371,7 @@ class RecallQueryError extends Error {
     this.safeReason = safeReason.slice(0, 300);
   }
 }
+function assertWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new MemoryWriteSuppressedError(); }
 function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch (error) { logWarn('Hindsight progress callback failed', error); /* progress must not affect memory behavior */ } }
 function logMemoryPhase(phase: string, started: number, status: string): void { const fields = { phase, status, durationMs: Date.now() - started }; if (status === 'completed') logInfo('hindsight_phase', fields); else if (phase === 'recall') logWarn('hindsight_phase', undefined, fields); else logError('hindsight_phase', undefined, { notify: false, fields }); }
 function speaker(message: MemoryMessage): string { const id = message.source.authorId ?? 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }

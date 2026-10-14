@@ -33,10 +33,10 @@ try {
     current = buildBundle(config);
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
-    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); current = next; configureLogging(candidate); } });
+    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); current = next; configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { current = next; configureLogging(candidate); }; } });
     try {
       await memoryCoordinator?.start();
-      await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close());
+      await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close(), id => watcher.addChannel(id));
     } finally {
       watcher.close();
       await memoryCoordinator?.close();

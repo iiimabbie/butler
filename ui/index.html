@@ -1,3 +1,35 @@
 <!doctype html>
-<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Butler Session</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
-<body><main><header><div><p class="eyebrow">BUTLER · Session／RQ 檢視與 Google 授權</p><h1>對話與請求</h1></div><button id="refresh">重新整理</button></header><nav role="tablist"><button role="tab" aria-selected="true" data-tab="sessions">Session</button><button role="tab" aria-selected="false" data-tab="request">Latest Request</button></nav><section id="google-auth" aria-labelledby="google-title"><h2 id="google-title">Google 授權</h2><p id="google-status">檢查連線狀態…</p><button id="google-start" type="button">開始授權</button><div id="google-complete" hidden><label for="google-url">貼上 Google 導回的完整網址</label><input id="google-url" type="url" autocomplete="off" spellcheck="false"><button id="google-submit" type="button">完成連線</button></div><p id="google-note">授權會保存 Google 憑證。請勿將授權網址分享或貼入對話。</p></section><p id="status" aria-live="polite">載入中…</p><section id="sessions" role="tabpanel"><div class="columns"><aside><h2>Sessions</h2><div class="session-filter"><button type="button" data-session-state="active" class="selected" aria-pressed="true">目前</button><button type="button" data-session-state="archived" aria-pressed="false">封存</button></div><div id="session-list"></div><button id="more-sessions" hidden>載入更多</button></aside><article><h2 id="session-title">選擇一個 Session</h2><div class="subtabs"><button data-kind="messages" class="selected">對話</button><button data-kind="tools">工具呼叫</button></div><div id="records"></div><button id="more-records" hidden>載入更多</button></article></div></section><section id="request" role="tabpanel" hidden><div class="toolbar"><p id="request-meta">尚未有 CPA 請求快照。</p><button id="copy" disabled>複製去除附件內容的檢視 JSON</button><button id="download" disabled>下載去除附件內容的檢視 JSON</button></div><pre id="request-body"></pre></section></main></body></html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Butler 管理</title>
+  <link rel="stylesheet" href="style.css?v=20261014-transparent">
+  <script src="app.js?v=20261014-transparent" defer></script>
+</head>
+<body>
+<main>
+  <header class="page-header"><div class="brand"><p class="eyebrow">BUTLER</p><h1>管理</h1></div><button id="refresh" type="button">重新整理</button></header>
+  <nav role="tablist" aria-label="Butler 管理頁">
+    <button role="tab" id="tab-channels" aria-controls="channels" aria-selected="true" data-tab="channels">頻道</button>
+    <button role="tab" id="tab-history" aria-controls="history" aria-selected="false" data-tab="history">歷史紀錄</button>
+    <button role="tab" id="tab-request" aria-controls="request" aria-selected="false" data-tab="request">請求檢視</button>
+    <button role="tab" id="tab-google" aria-controls="google-auth" aria-selected="false" data-tab="google">Google 設定</button>
+  </nav>
+  <p id="status" aria-live="polite">載入中…</p>
+  <section id="channels" role="tabpanel" aria-labelledby="tab-channels">
+    <div class="channel-intro"><div><h2>頻道</h2><p>未勾選「寫入 Hindsight」時只讀，仍可查詢既有記憶。新增與恢復追蹤只能從此頁操作，@Butler 不會自動追蹤。停止追蹤不刪歷史；停止追蹤或停用寫入會清除尚未送出的記憶佇列，重新開啟不補送。不回應仍會保存訊息。</p></div><button id="channel-add-toggle" type="button" aria-expanded="false">新增頻道</button></div>
+    <form id="channel-add" hidden><label for="channel-new-id">Discord 頻道 ID</label><input id="channel-new-id" name="channelId" required autocomplete="off" spellcheck="false"><button type="submit">新增頻道</button></form>
+    <div class="channel-layout"><nav id="channel-tree" aria-label="頻道列表"></nav><div class="channel-workspace">
+      <nav class="subtabs channel-subtabs" aria-label="頻道工作區"><button type="button" data-channel-view="settings" class="selected" aria-pressed="true">設定</button><button type="button" data-channel-view="records" aria-pressed="false">歷史</button></nav>
+      <div id="channel-records-view" hidden><div id="channel-records-slot"></div></div>
+      <div id="channel-settings-view"><div id="channel-panel" aria-live="polite"><p class="empty-state">載入頻道後，選取左側頻道以檢視設定。</p></div></div>
+    </div></div>
+  </section>
+  <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden><div id="history-records-slot"></div></section>
+  <section id="request" role="tabpanel" aria-labelledby="tab-request" hidden><div class="request-toolbar"><div><h2>Latest Request</h2><p id="request-meta">尚未有 CPA 請求快照。</p></div><div class="request-actions"><button id="copy" disabled>複製 JSON</button><button id="download" disabled>下載 JSON</button></div></div><pre id="request-body"></pre></section>
+  <section id="google-auth" role="tabpanel" aria-labelledby="tab-google" hidden><h2>Google 連線設定</h2><p id="google-status">檢查連線狀態…</p><button id="google-start" type="button">開始授權</button><div id="google-complete" hidden><label for="google-url">貼上 Google 導回的完整網址</label><input id="google-url" type="url" autocomplete="off" spellcheck="false"><button id="google-submit" type="button">完成連線</button></div><p id="google-note">授權會保存 Google 憑證。請勿將授權網址分享或貼入對話。</p></section>
+</main>
+<template id="records-workspace-template"><div class="records-workspace"><div class="section-heading"><h2 data-session-heading>頻道 Session</h2><div class="session-filter"><button type="button" data-session-state="active" class="selected" aria-pressed="true">目前</button><button type="button" data-session-state="archived" aria-pressed="false">封存</button></div></div><div class="session-list-wrap"><div id="session-list"></div><button id="more-sessions" type="button" hidden>載入更多 Session</button></div><article class="conversation"><div class="conversation-toolbar"><h2 id="session-title">選擇一個 Session</h2><div class="subtabs"><button type="button" data-kind="messages" class="selected" aria-pressed="true">對話</button><button type="button" data-kind="tools" aria-pressed="false">工具呼叫</button></div></div><div id="records"></div><button id="more-records" type="button" hidden>載入更多紀錄</button></article></div></template>
+</body>
+</html>

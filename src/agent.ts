@@ -49,6 +49,7 @@ export interface AgentConfig {
   consumedSteerMessageIds?: ReadonlySet<string>;
   openingContext?: SessionOpeningContext;
   hindsight?: Hindsight;
+  memoryWriteAllowed?: () => boolean;
   discordTools?: DiscordToolRuntime;
   googleTools?: GoogleToolRuntime;
   localTools?: LocalToolRuntime;
@@ -182,10 +183,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
     const availableTools = (config.deploymentResultEvent
       ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
-      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
-    const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress) : '';
+    const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
     let stableInput: unknown[] = [...workspaceInput, ...runtimeInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
     const initialGroups = await Promise.all(sessionMessages.map(async message => {
       const inputMessage = message.id === config.storedInput!.id && message.content !== prompt ? { ...message, content: prompt } : message;
@@ -481,7 +482,8 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await listMemoryTagsTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'knowledge_page_create') {
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
-      result = await knowledgePageCreateTool(config.hindsight, runtimeArgs);
+      assertMemoryWriteAllowed(config.memoryWriteAllowed);
+      result = await knowledgePageCreateTool(config.hindsight, runtimeArgs, config.memoryWriteAllowed);
     } else if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       const query = requiredString(runtimeArgs.query, 'query');
@@ -506,7 +508,8 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await googleRuntime.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('people_')) {
       if (!config.peopleTools) throw new ToolUsageError('People tools are unavailable in this entry point');
-      result = await config.peopleTools.execute(call.name, runtimeArgs);
+      if (call.name === 'people_upsert') assertMemoryWriteAllowed(config.memoryWriteAllowed);
+      result = await config.peopleTools.execute(call.name, runtimeArgs, config.memoryWriteAllowed);
     } else if (call.name.startsWith('skills_')) {
       if (!config.skillsTools) throw new ToolUsageError('Skills tools are unavailable in this entry point');
       result = await config.skillsTools.execute(call.name, runtimeArgs);
@@ -539,6 +542,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   return { tool_history_id: id, ...asOutput(result) };
 }
 
+function assertMemoryWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new ToolUsageError('此頻道的 Hindsight 為只讀'); }
 function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   try { config.onProgress?.(event); }
   catch (error) { logWarn('Agent progress callback failed', error); }

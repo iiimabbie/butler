@@ -5,11 +5,13 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
+import type { ChannelManagement, ChannelSettingsPatch } from './channel-settings.js';
+import { logWarn } from './log.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../ui');
 const assets = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']]] as const);
 
-export function startUi(dbPath: string, port: number, options: { googleAuth?: GoogleAuth; publicOrigin?: string; cookiePath?: string; channelName?: (channelId: string) => Promise<string | undefined> } = {}): Promise<{ server: Server; close: () => Promise<void> }> {
+export function startUi(dbPath: string, port: number, options: { googleAuth?: GoogleAuth; publicOrigin?: string; cookiePath?: string; channelName?: (channelId: string) => Promise<string | undefined>; channelManagement?: ChannelManagement } = {}): Promise<{ server: Server; close: () => Promise<void> }> {
   const publicOrigin = options.publicOrigin ?? `http://127.0.0.1:${port}`;
   const originUrl = new URL(publicOrigin);
   if (originUrl.origin !== publicOrigin || !['http:', 'https:'].includes(originUrl.protocol)) throw new Error('UI publicOrigin must be an explicit HTTP(S) origin');
@@ -30,6 +32,63 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
       if (pathname === '/api/google/status' && req.method === 'GET') {
         const status = options.googleAuth ? await options.googleAuth.status() : 'not_configured';
         res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ status })); return;
+      }
+      if (pathname === '/api/channels' || pathname === '/api/models' || /^\/api\/channels\/[^/]+(?:\/tracking)?$/.test(pathname)) {
+        const management = options.channelManagement;
+        if (!management) { res.writeHead(503, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: '頻道管理服務尚未啟用' })); return; }
+        const respond = (status: number, value: unknown) => res.writeHead(status, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify(value));
+        const invalid = (message = '參數格式錯誤') => respond(400, { error: message });
+        const sendMutationError = (error: unknown) => {
+          if (error && typeof error === 'object' && ('status' in error) && ((error as { status?: unknown }).status === 400 || (error as { status?: unknown }).status === 409)) {
+            const message = 'message' in error && typeof (error as { message?: unknown }).message === 'string' ? (error as { message: string }).message : '操作無法完成';
+            respond((error as { status: 400 | 409 }).status, { error: message });
+          } else { logWarn('UI channel management request failed', error); respond(500, { error: '操作失敗' }); }
+        };
+        if (req.method === 'GET' && pathname === '/api/channels') { respond(200, { channels: await management.listChannels() }); return; }
+        if (req.method === 'GET' && pathname === '/api/models') { respond(200, await management.models()); return; }
+        if (pathname === '/api/channels' && req.method === 'POST') {
+          if (req.headers.origin !== publicOrigin) { respond(403, { error: '禁止的來源' }); return; }
+          if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') { respond(415, { error: '需要 application/json' }); return; }
+          try {
+            let body: Record<string, unknown>;
+            try { body = await readJsonBody(req); } catch (error) { if (error instanceof SyntaxError) { invalid(); return; } throw error; }
+            if (Object.keys(body).length !== 1 || Object.keys(body).some(key => key !== 'channelId') || typeof body.channelId !== 'string' || !/^\d{17,20}$/.test(body.channelId)) { invalid(); return; }
+            respond(200, { channel: await management.addChannel(body.channelId) });
+          } catch (error) { if (error instanceof URIError) invalid(); else sendMutationError(error); }
+          return;
+        }
+        const match = pathname.match(/^\/api\/channels\/([^/]+)(\/tracking)?$/);
+        if (match && ['PATCH', 'DELETE'].includes(req.method ?? '')) {
+          if (req.headers.origin !== publicOrigin) { respond(403, { error: '禁止的來源' }); return; }
+          let id: string;
+          try { id = decodeURIComponent(match[1]!); } catch { invalid(); return; }
+          if (!/^\d{17,20}$/.test(id)) { invalid(); return; }
+          try {
+            let channel;
+            if (req.method === 'DELETE') {
+              if (!match[2]) { respond(404, { error: '找不到路由' }); return; }
+              channel = await management.stopTracking(id);
+            } else {
+              if (match[2]) { respond(404, { error: '找不到路由' }); return; }
+              if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') { respond(415, { error: '需要 application/json' }); return; }
+              let body: Record<string, unknown>;
+              try { body = await readJsonBody(req); } catch (error) { if (error instanceof SyntaxError) { invalid(); return; } throw error; }
+              const allowed = new Set(['tracked', 'botReply', 'hindsightWrite', 'replyMode', 'mode', 'model', 'effort', 'imageModel']);
+              if (Object.keys(body).some(key => !allowed.has(key))) { invalid(); return; }
+              const booleanKeys = ['tracked', 'botReply', 'hindsightWrite'];
+              const enumValues: Record<string, string[]> = { replyMode: ['none', 'mention', 'all'], mode: ['queue', 'steer'], effort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] };
+              for (const [key, value] of Object.entries(body)) {
+                if (booleanKeys.includes(key) && value !== null && typeof value !== 'boolean') { invalid(); return; }
+                                if (key in enumValues && value !== null && (typeof value !== 'string' || !enumValues[key]!.includes(value))) { invalid(); return; }
+                if ((key === 'model' || key === 'imageModel') && value !== null && (typeof value !== 'string' || value.trim().length === 0)) { invalid(); return; }
+              }
+              channel = await management.updateChannel(id, body as ChannelSettingsPatch);
+            }
+            respond(200, { channel });
+          } catch (error) { if (error instanceof URIError) invalid(); else sendMutationError(error); }
+          return;
+        }
+        respond(405, { error: '方法不允許' }); return;
       }
       if (['/api/google/start', '/api/google/complete'].includes(pathname) && req.method === 'POST') {
         if (!options.googleAuth || req.headers.origin !== publicOrigin) { res.writeHead(403, headers).end(); return; }
@@ -58,11 +117,24 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
       if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405, headers).end(); return; }
       if (pathname === '/api/sessions') {
         const offset = numberParam(url.searchParams.get('offset'), 0);
+        const channelId = url.searchParams.get('channel_id');
+        const scope = url.searchParams.get('scope');
+        if (channelId !== null && (!/^\d{17,20}$/.test(channelId) || scope !== null)) throw new URIError('invalid session scope');
+        if (scope !== null && scope !== 'history') throw new URIError('invalid session scope');
         const state = url.searchParams.get('state') ?? 'active';
         if (state !== 'active' && state !== 'archived') throw new URIError('invalid session state');
         const stateFilter = state === 'active'
           ? 'EXISTS (SELECT 1 FROM channel_state cs WHERE cs.session_id=s.id)'
           : 'NOT EXISTS (SELECT 1 FROM channel_state cs WHERE cs.session_id=s.id)';
+        const filters = [stateFilter];
+        const params: (string | number)[] = [];
+        const latestChannel = '(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)';
+        if (channelId !== null) { filters.push(`${latestChannel}=?`); params.push(channelId); }
+        if (scope === 'history') {
+          if (!options.channelManagement) { res.writeHead(503, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: '頻道管理服務尚未啟用' })); return; }
+          const authorized = (await options.channelManagement.listChannels()).filter(channel => channel.authorized).map(channel => channel.channelId);
+          if (authorized.length) { filters.push(`(${latestChannel} IS NULL OR ${latestChannel} NOT IN (${authorized.map(() => '?').join(',')}))`); params.push(...authorized); }
+        }
         const rows = db.prepare(`SELECT s.id,s.created_at,(SELECT substr(content,1,120) FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest_preview,
           COALESCE((SELECT MAX(COALESCE(ms.event_time,m.created_at)) FROM messages m LEFT JOIN message_sources ms ON ms.message_id=m.id WHERE m.session_id=s.id),s.created_at) last_active_at,
           (SELECT channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) channel_id,
@@ -71,7 +143,7 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
           (SELECT NULLIF(bot_id,'') FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1) bot_id,
           (SELECT cs.model FROM channel_state cs WHERE cs.channel_id=(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)) current_model,
           (SELECT CASE WHEN cs.model IS NULL THEN 1 ELSE 0 END FROM channel_state cs WHERE cs.channel_id=(SELECT ss.channel_id FROM session_sources ss WHERE ss.session_id=s.id ORDER BY rowid DESC LIMIT 1)) uses_default_model
-          FROM sessions s WHERE ${stateFilter} ORDER BY s.rowid DESC LIMIT 51 OFFSET ?`).all(offset) as Record<string, unknown>[];
+          FROM sessions s WHERE ${filters.join(' AND ')} ORDER BY s.rowid DESC LIMIT 51 OFFSET ?`).all(...params, offset) as Record<string, unknown>[];
         const more = rows.length > 50;
         const items = rows.slice(0, 50);
         const channelIds = [...new Set(items.map(row => row.channel_id).filter((id): id is string => typeof id === 'string' && id.length > 0))];

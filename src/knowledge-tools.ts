@@ -47,12 +47,13 @@ export async function validateKnowledgeTags(hindsight: Pick<Hindsight, 'listMemo
   }
 }
 
-export async function resolveKnowledgeFolder(hindsight: Pick<Hindsight, 'getKnowledgeTree' | 'createKnowledgeFolder'>, name: string): Promise<string> {
+export async function resolveKnowledgeFolder(hindsight: Pick<Hindsight, 'getKnowledgeTree' | 'createKnowledgeFolder'>, name: string, writeAllowed?: () => boolean): Promise<string> {
   const lookup = async () => (await hindsight.getKnowledgeTree()).filter(node => node.kind === 'folder' && node.name === name && node.parent_id == null);
   const folders = await lookup();
   if (folders.length > 1) throw new Error(`Multiple root ${name} folders found; refusing to choose one`);
   if (folders[0]) return folders[0]!.id as string;
-  try { return (await hindsight.createKnowledgeFolder(name)).id as string; }
+  assertWriteAllowed(writeAllowed);
+  try { return (await hindsight.createKnowledgeFolder(name, writeAllowed)).id as string; }
   catch (error) {
     if (!isHttpStatus(error, 409)) throw error;
     const raced = await lookup();
@@ -64,9 +65,9 @@ export async function resolveKnowledgeFolder(hindsight: Pick<Hindsight, 'getKnow
 
 export async function createFixedKnowledgePage(hindsight: Hindsight, input: {
   name: string; source_query: string; max_tokens: number; tags: string[]; folder?: string; refresh?: RefreshConfig;
-}): Promise<Record<string, unknown>> {
+}, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {
   await validateKnowledgeTags(hindsight, input.tags);
-  const parentId = input.folder === undefined ? undefined : await resolveKnowledgeFolder(hindsight, input.folder);
+  const parentId = input.folder === undefined ? undefined : await resolveKnowledgeFolder(hindsight, input.folder, writeAllowed);
   const refresh = input.refresh ?? validateRefreshArgs({});
   const trigger = {
     fact_types: ['world', 'experience', 'observation'], exclude_mental_models: true, tags_match: 'any',
@@ -74,10 +75,12 @@ export async function createFixedKnowledgePage(hindsight: Hindsight, input: {
     reflect_search_observations_max_tokens: 3000, reflect_search_observations_include_entities: false,
     budget: 'high', ...refresh,
   };
-  return hindsight.createKnowledgePage({ name: input.name, ...(parentId === undefined ? {} : { parent_id: parentId }), source_query: input.source_query, tags: input.tags, max_tokens: input.max_tokens, trigger });
+  assertWriteAllowed(writeAllowed);
+  return hindsight.createKnowledgePage({ name: input.name, ...(parentId === undefined ? {} : { parent_id: parentId }), source_query: input.source_query, tags: input.tags, max_tokens: input.max_tokens, trigger }, writeAllowed);
 }
 
-export async function knowledgePageCreateTool(hindsight: Hindsight, args: Record<string, unknown>): Promise<unknown> {
+export async function knowledgePageCreateTool(hindsight: Hindsight, args: Record<string, unknown>, writeAllowed?: () => boolean): Promise<unknown> {
+  assertWriteAllowed(writeAllowed);
   const allowed = ['name', 'source_query', 'max_tokens', 'tags', 'folder', 'refresh_mode', 'refresh_cron', 'min_refresh_interval_seconds'];
   if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown knowledge_page_create argument');
   const name = singleLine(args.name, 'name', 100);
@@ -86,7 +89,7 @@ export async function knowledgePageCreateTool(hindsight: Hindsight, args: Record
   const tags = tagsArg(args.tags, false);
   const folder = args.folder === undefined ? undefined : singleLine(args.folder, 'folder', 100);
   const refresh = validateRefreshArgs(args);
-  await createFixedKnowledgePage(hindsight, { name, source_query: sourceQuery, max_tokens: maxTokens, tags, ...(folder === undefined ? {} : { folder }), refresh });
+  await createFixedKnowledgePage(hindsight, { name, source_query: sourceQuery, max_tokens: maxTokens, tags, ...(folder === undefined ? {} : { folder }), refresh }, writeAllowed);
   return { message: '知識頁新增成功，正在等待刷新。' };
 }
 
@@ -110,4 +113,5 @@ function integerArg(value: unknown, min: number, max: number, name: string): num
   if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`);
   return value as number;
 }
+function assertWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new ToolUsageError('此頻道的 Hindsight 為只讀'); }
 function isHttpStatus(error: unknown, status: number): boolean { return error instanceof Error && error.message.includes(`HTTP ${status}`); }

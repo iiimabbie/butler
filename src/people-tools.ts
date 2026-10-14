@@ -23,12 +23,13 @@ type KnowledgeNode = Record<string, unknown> & { id: string; kind: string; name:
 type PersonPage = KnowledgeNode & { mental_model_id: string; source_query: string };
 const fixedPrompt = '的人物頁。以 Renee 的第一人稱視角摘要包括身份/別名、偏好、個性與 Renee 對此人的主觀印象、關係及其有意義的由來、經歷、當時情緒等。紀錄此人與其他被提及人物的關係，不抄錄其他人無關個資。不把新聞/外部模型引文當成此人的政治立場或生活事實，也不把單次疲累當作永久習慣。正文使用第三人稱，以明確人物名稱記錄身份、經歷、情緒與關係；Renee 自己的感受或主觀印象也寫成「Renee 覺得……」，不以未標示的「我／你／姊姊／主人」代替人物。保留情感與關係的意義，區分此人表達的感受與 Renee 的解讀，不假定感情或關係是雙向的。依原始媒介與場景記錄事件：Discord 中實際發生的發言、親密互動、衝突與關係變化就是線上事件；參與者按自己的身份互動，除非原文明確設定其他角色或虛構框架，不預設任何人是在扮演角色。文字動作只在原文顯示已實際完成或承接時，記為該線上場景已發生；區分玩笑、願望、邀請、打算、假設、未完成動作與單純提及。區分互動本身與其中描述的身體行為或想像情節，不由文字推定線下身體事件；原文明確設定為角色扮演或虛構時才按該上下文描述，也保留互動實際發生及其情感意義。需要時交代媒介，不反覆加入「只是虛構」「不代表現實」「不能推定」等免責句。逐字引言可保留第一人稱，但須標明原始說話者；舊記憶中作者不明的「我」不能預設是 Renee 或人物頁主角。正文自然寫，正確區分發話者、受話者、被談論者、本人陳述、他人轉述、助理回報、工具驗證及推論。不迴避情色內容、個性差勁或色情等負面印象。';
 
-export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime {
+export function createPeopleToolRuntime(hindsight: Hindsight, writeAllowed?: () => boolean): PeopleToolRuntime {
   // Serialize local upserts so concurrent calls cannot create duplicate folders/pages.
   let pending: Promise<unknown> = Promise.resolve();
   return {
-    definitions: peopleDefinitions,
-    async execute(name, args) {
+    definitions: writeAllowed && !writeAllowed() ? peopleDefinitions.filter(tool => tool.name !== 'people_upsert') as typeof peopleDefinitions : peopleDefinitions,
+    async execute(name, args, ...context) {
+      const guard = (context.find(value => typeof value === 'function') as (() => boolean) | undefined) ?? writeAllowed;
       const allowed: Record<string, string[]> = {
         people_list: ['limit', 'offset'], people_get: ['key'], people_upsert: ['dcid', 'nickname', 'max_tokens', 'tags', ...Object.keys(refreshProperties)],
       };
@@ -45,6 +46,7 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
         return { people: rows, total, offset, limit, has_more: nextOffset < total, next_offset: nextOffset < total ? nextOffset : null };
       }
       if (name === 'people_upsert') {
+        assertWriteAllowed(guard);
         const dcid = text(args.dcid, 'dcid');
         if (!/^[0-9]{2,32}$/.test(dcid)) throw new ToolUsageError('dcid must be a raw Discord account ID (2–32 digits, no prefix)');
         const nickname = text(args.nickname, 'nickname');
@@ -53,7 +55,7 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
         const tokens = integerArg(args.max_tokens, 2048, 256, 8192, 'max_tokens');
         const tags = tagsArg(args.tags, true);
         const refresh = validateRefreshArgs(args);
-        const run = pending.then(() => upsertPerson(hindsight, personKey(dcid), nickname, tokens, tags, refresh));
+        const run = pending.then(() => upsertPerson(hindsight, personKey(dcid), nickname, tokens, tags, refresh, guard));
         pending = run.catch(() => undefined);
         return run;
       }
@@ -65,13 +67,14 @@ export function createPeopleToolRuntime(hindsight: Hindsight): PeopleToolRuntime
   };
 }
 
-async function upsertPerson(hindsight: Hindsight, key: string, nickname: string, maxTokens: number, tags: string[], refresh: ReturnType<typeof validateRefreshArgs>): Promise<unknown> {
+async function upsertPerson(hindsight: Hindsight, key: string, nickname: string, maxTokens: number, tags: string[], refresh: ReturnType<typeof validateRefreshArgs>, writeAllowed?: () => boolean): Promise<unknown> {
+  assertWriteAllowed(writeAllowed);
   let page: PersonPage | null = await uniquePerson(hindsight, key);
   const sourceQuery = makeSourceQuery(key);
   const pageName = `person｜${nickname}`;
   if (!page) {
     try {
-      await createFixedKnowledgePage(hindsight, { name: pageName, folder: 'person', source_query: sourceQuery, tags, max_tokens: maxTokens, refresh });
+      await createFixedKnowledgePage(hindsight, { name: pageName, folder: 'person', source_query: sourceQuery, tags, max_tokens: maxTokens, refresh }, writeAllowed);
       return { message: '人物頁新增成功，正在等待刷新。' };
     } catch (error) {
       if (!isHttpStatus(error, 409)) throw error;
@@ -80,19 +83,23 @@ async function upsertPerson(hindsight: Hindsight, key: string, nickname: string,
     }
   }
   await validateKnowledgeTags(hindsight, tags);
+  assertWriteAllowed(writeAllowed);
   const changes: Record<string, unknown> = { max_tokens: maxTokens, tags };
   if (pageName !== page.name) changes.name = pageName;
-  const parentId = await resolveKnowledgeFolder(hindsight, 'person');
+  const parentId = await resolveKnowledgeFolder(hindsight, 'person', writeAllowed);
   if (page.parent_id !== parentId) changes.parent_id = parentId;
+  assertWriteAllowed(writeAllowed);
   const sourceQueryChanged = page.source_query !== sourceQuery;
   if (sourceQueryChanged) changes.source_query = sourceQuery;
-  await hindsight.updateKnowledgePage(page.id, changes);
+  await hindsight.updateKnowledgePage(page.id, changes, writeAllowed);
   // The server automatically queues a refresh when source_query changes.
   if (sourceQueryChanged) return { message: '人物頁更新成功，正在等待刷新。' };
   try {
-    await hindsight.refreshKnowledgePage(page.mental_model_id);
+    assertWriteAllowed(writeAllowed);
+    await hindsight.refreshKnowledgePage(page.mental_model_id, writeAllowed);
     return { message: '人物頁更新成功，正在等待刷新。' };
   } catch (error) {
+    if (error instanceof Error && error.message === '此頻道的 Hindsight 為只讀') throw error;
     throw new Error(`Person page updates succeeded for key ${key} (page ${page.id}, model ${page.mental_model_id}), but refresh failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
@@ -156,4 +163,5 @@ function personKey(key: string): string {
   if (key.startsWith('discord:')) text(key.slice('discord:'.length), 'Discord account id');
   return key;
 }
+function assertWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new ToolUsageError('此頻道的 Hindsight 為只讀'); }
 function isHttpStatus(error: unknown, status: number): boolean { return error instanceof Error && error.message.includes(`HTTP ${status}`); }

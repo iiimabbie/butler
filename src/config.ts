@@ -1,7 +1,7 @@
-import { readFileSync, watch, type FSWatcher } from 'node:fs';
+import { readFileSync, watch, type FSWatcher, writeFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import { isAbsolute, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse } from 'yaml';
+import { parse, parseDocument } from 'yaml';
 import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 import type { LogMethods } from './log.js';
@@ -27,6 +27,10 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
   let raw: unknown;
   try { raw = parse(readFileSync(path, 'utf8'), { logLevel: 'silent' }); }
   catch { throw new Error('Butler config could not be read as YAML'); }
+  return validateConfig(raw);
+}
+
+function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
   for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
@@ -41,7 +45,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
     };
     if (name === 'discord') {
       const channelIds = section.channelIds;
-      if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
+      if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
       const errorWebhookUrl = string('errorWebhookUrl');
       if (errorWebhookUrl !== undefined && !/^https:\/\/discord\.com\/api\/(?:v10\/)?webhooks\/\d+\/[^/?#]+$/.test(errorWebhookUrl)) throw new Error('Butler config discord.errorWebhookUrl must be a Discord webhook URL without query or fragment');
       const errorWebhookMentionUserId = string('errorWebhookMentionUserId');
@@ -140,23 +144,62 @@ function valueAt(config: ButlerConfig, path: string): unknown {
 }
 function sameValue(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 
-export function watchConfig(options: { onCandidate(config: ButlerConfig): void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
+export class ConfigConflictError extends Error {
+  readonly status = 409;
+  constructor(message: string, readonly coldPaths?: readonly string[]) { super(message); this.name = 'ConfigConflictError'; }
+}
+
+class ConfigInputError extends Error {
+  readonly status = 400;
+  constructor(message: string) { super(message); this.name = 'ConfigInputError'; }
+}
+
+function validateCandidate(current: ButlerConfig, candidate: ButlerConfig): void {
+  const cold = coldPaths.filter(key => !sameValue(valueAt(current, key), valueAt(candidate, key)));
+  if (cold.length) throw new ConfigConflictError(`Config changes require restart: ${cold.join(', ')}`, cold);
+}
+
+function addChannelToFile(path: string, channelId: string): { candidate: ButlerConfig; original: Buffer } {
+  if (!/^\d{17,20}$/.test(channelId)) throw new ConfigInputError('Discord channel ID must be a snowflake');
+  const original = readFileSync(path);
+  const document = parseDocument(original.toString('utf8'), { logLevel: 'silent' });
+  if (document.errors.length) throw new Error('Butler config could not be read as YAML');
+  const raw = document.toJS() as unknown;
+  if (!isRecord(raw)) throw new Error('Butler config must be an object');
+  const discord: Record<string, unknown> = isRecord(raw.discord) ? raw.discord : {};
+  (raw as Record<string, unknown>).discord = discord;
+  const ids = discord.channelIds;
+  if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)))) throw new Error('Butler config discord.channelIds must contain snowflakes');
+  const channelIds = (ids ?? []) as string[];
+  if (channelIds.includes(channelId)) throw new ConfigConflictError('Discord channel is already allowed');
+  document.setIn(['discord', 'channelIds'], [...channelIds, channelId]);
+  return { candidate: validateConfig(document.toJS()), original };
+}
+
+export function watchConfig(options: { onCandidate(config: ButlerConfig): void; prepareCandidate?(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void; addChannel(channelId: string): void } {
   const path = options.path ?? CONFIG_PATH;
   let current = options.initial ?? readConfig(path);
   let timer: ReturnType<typeof setTimeout> | undefined;
   let watcher: FSWatcher | undefined;
   let closed = false;
+  const applyCandidate = (candidate: ButlerConfig) => {
+    validateCandidate(current, candidate);
+    const apply = options.prepareCandidate?.(candidate);
+    if (apply) apply(); else options.onCandidate(candidate);
+    current = candidate;
+  };
   const reload = () => {
     timer = undefined;
     if (closed) return;
-    let candidate: ButlerConfig;
-    try { candidate = readConfig(path); }
-    catch (error) { options.log.logWarn('Config reload rejected', error); return; }
-    const cold = coldPaths.filter(key => !sameValue(valueAt(current, key), valueAt(candidate, key)));
-    if (cold.length) { options.log.logWarn('Config reload rejected; restart required', undefined, { coldPaths: cold }); return; }
-    if (sameValue(current, candidate)) return;
-    try { options.onCandidate(candidate); current = candidate; options.log.logInfo('Config reload applied'); }
-    catch (error) { options.log.logWarn('Config reload rejected', error); }
+    try {
+      const candidate = readConfig(path);
+      if (sameValue(current, candidate)) return;
+      applyCandidate(candidate);
+      options.log.logInfo('Config reload applied');
+    } catch (error) {
+      if (error instanceof ConfigConflictError && error.coldPaths) options.log.logWarn('Config reload rejected; restart required', undefined, { coldPaths: error.coldPaths });
+      else options.log.logWarn('Config reload rejected', error);
+    }
   };
   const schedule = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { void reload(); }, options.debounceMs ?? 250); };
   try {
@@ -165,5 +208,24 @@ export function watchConfig(options: { onCandidate(config: ButlerConfig): void; 
     });
     watcher.on('error', () => options.log.logError('Config watcher failed; service continues without further reloads'));
   } catch { options.log.logError('Config watcher failed; service continues without further reloads'); }
-  return { close() { closed = true; if (timer) clearTimeout(timer); timer = undefined; watcher?.close(); watcher = undefined; } };
+  return {
+    close() { closed = true; if (timer) clearTimeout(timer); timer = undefined; watcher?.close(); watcher = undefined; },
+    addChannel(channelId: string) {
+      if (closed) throw new Error('Config watcher is closed');
+      const { candidate, original } = addChannelToFile(path, channelId);
+      validateCandidate(current, candidate);
+      const apply = options.prepareCandidate?.(candidate);
+      const currentBytes = readFileSync(path);
+      if (!currentBytes.equals(original)) throw new ConfigConflictError('Config file changed while adding channel');
+      const temp = `${path}.${process.pid}-${Date.now()}.tmp`;
+      const mode = statSync(path).mode & 0o777;
+      try {
+        writeFileSync(temp, (() => { const doc = parseDocument(original.toString('utf8'), { logLevel: 'silent' }); doc.setIn(['discord', 'channelIds'], candidate.discord?.channelIds); return doc.toString(); })(), { mode, flag: 'wx' });
+        if (!readFileSync(path).equals(original)) throw new ConfigConflictError('Config file changed while adding channel');
+        renameSync(temp, path);
+      } catch (error) { try { unlinkSync(temp); } catch {} throw error; }
+      if (apply) apply(); else options.onCandidate(candidate);
+      current = candidate;
+    },
+  };
 }
