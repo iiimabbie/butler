@@ -98,7 +98,11 @@ export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: st
               && results.length === 0
               && failure?.url === requestedUrl
               && failure.error.trim() === 'Error fetching content';
-            if (isKnownSinglePageFailure) throw new WebFetchExtractionError(redact(requestedUrl), redact(failure.error));
+            if (results.length === 0 && failed.length > 0) {
+              if (isKnownSinglePageFailure) throw new WebFetchExtractionError(redact(requestedUrl), redact(failure.error));
+              const details = failed.map(item => `${redact(item.url)}: ${redact(item.error)}`).join('; ');
+              throw new WebFetchExtractionError(redact(requestedUrl), redact(failure?.error ?? 'URL extraction failed'), `Tavily extract: URL extraction failed${details ? ` (${details})` : ''}`);
+            }
             const details = failed.map(item => `${redact(item.url)}: ${redact(item.error)}`).join('; ');
             throw new Error(`Tavily extract: URL extraction failed${details ? ` (${details})` : ''}`);
           }

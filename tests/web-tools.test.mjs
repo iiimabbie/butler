@@ -58,17 +58,23 @@ test('web_fetch exact single-URL extraction miss exposes a typed, actionable err
   });
 });
 
-test('web_fetch unknown or structurally inconsistent failure stays an ordinary error', async () => {
+test('web_fetch no-result Tavily extraction failures are typed while structurally inconsistent responses remain ordinary errors', async () => {
+  for (const errorText of ['unavailable', 'Request timed out', '404 page not found', 'Failed to fetch url']) {
+    const { runtime } = fakeRuntime(() => ({ results: [], failed_results: [{ url: 'https://example.test', error: errorText }] }));
+    await assert.rejects(runtime.execute('web_fetch', { url: 'https://example.test' }), error => {
+      assert.equal(error.name, 'WebFetchExtractionError');
+      assert.equal(error.code, 'WEB_FETCH_EXTRACTION_FAILED');
+      assert.equal(error.message, `Tavily extract: URL extraction failed (https://example.test: ${errorText})`);
+      return true;
+    });
+  }
   for (const response of [
-    { results: [], failed_results: [{ url: 'https://example.test', error: 'unavailable' }] },
-    { results: [], failed_results: [{ url: 'https://other.test', error: 'Error fetching content' }] },
     { results: [{ url: 'https://example.test', raw_content: 'unexpected' }], failed_results: [{ url: 'https://example.test', error: 'Error fetching content' }] },
-    { results: [], failed_results: [{ url: 'https://example.test', error: 'Error fetching content' }, { url: 'https://example.test', error: 'Error fetching content' }] },
+    { results: [], failed_results: [] },
   ]) {
     const { runtime } = fakeRuntime(() => response);
     await assert.rejects(runtime.execute('web_fetch', { url: 'https://example.test' }), error => {
       assert.notEqual(error.name, 'WebFetchExtractionError');
-      assert.match(error.message, /URL extraction failed/);
       return true;
     });
   }

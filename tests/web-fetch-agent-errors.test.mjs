@@ -64,19 +64,35 @@ test('unavailable tool request is audited without error notification or duplicat
   });
 });
 
-test('known web_fetch extraction failure suppresses webhook but remains failed and actionable for model', async () => {
+test('web_fetch extraction failures suppress webhook but remain locally logged, failed, and actionable for model', async () => {
   await withMockWebhook(async requests => {
-    const store = fakeStore();
-    const result = await executeCall(store, 'session-known', toolCall(), {
-      webTools: { execute: async () => { throw new WebFetchExtractionError('https://example.test/page', 'Error fetching content'); } },
-    });
-    assert.equal(requests.length, 0);
-    assert.equal(store.finished[0].status, 'failed');
-    assert.equal(store.finished[0].result.error, result.error);
-    assert.match(result.error, /https:\/\/example\.test\/page/);
-    assert.match(result.error, /Error fetching content/);
-    assert.match(result.error, /curl -fsSL.*local_read/);
-    assert.match(result.error, /not executed automatically.*not guaranteed to succeed/);
+    const errors = [
+      new WebFetchExtractionError('https://example.test/timeout', 'Request timed out', 'Tavily extract: URL extraction failed (https://example.test/timeout: Request timed out)'),
+      new WebFetchExtractionError('https://example.test/not-found', '404 page not found', 'Tavily extract: URL extraction failed (https://example.test/not-found: 404 page not found)'),
+      new WebFetchExtractionError('https://example.test/fetch', 'Failed to fetch url', 'Tavily extract: URL extraction failed (https://example.test/fetch: Failed to fetch url)'),
+      new WebFetchExtractionError('https://example.test/known', 'Error fetching content'),
+    ];
+    const originalError = console.error;
+    const localLogs = [];
+    console.error = (...args) => localLogs.push(args.join(' '));
+    try {
+      for (const [index, extractionError] of errors.entries()) {
+        const store = fakeStore();
+        const result = await executeCall(store, `session-fetch-${index}`, toolCall(), {
+          webTools: { execute: async () => { throw extractionError; } },
+        });
+        assert.equal(store.finished[0].status, 'failed');
+        assert.equal(store.finished[0].result.error, result.error);
+        assert.match(result.error, /https:\/\/example\.test/);
+        if (index === errors.length - 1) {
+          assert.match(result.error, /curl -fsSL.*local_read/);
+          assert.match(result.error, /not executed automatically.*not guaranteed to succeed/);
+        }
+      }
+      assert.equal(requests.length, 0);
+      assert.equal(localLogs.length, errors.length, 'each extraction error is still written to local error logging');
+      assert.match(localLogs[0], /Request timed out/);
+    } finally { console.error = originalError; }
   });
 });
 
