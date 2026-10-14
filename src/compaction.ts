@@ -62,7 +62,7 @@ async function requestSummary(options: CompactOptions, history: string, existing
   if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
   let response: Response;
   try {
-    response = await (options.fetcher ?? fetch)(`${options.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(options.timeoutMs ?? 60_000), body: JSON.stringify({ model: options.model, input: [{ role: 'user', content: prompt }], tools: [], ...(options.reasoningEffort === undefined ? {} : { reasoning: { effort: options.reasoningEffort } }), store: false }) });
+    response = await (options.fetcher ?? fetch)(`${options.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(options.timeoutMs ?? 60_000), body: JSON.stringify({ model: options.model, input: [{ role: 'user', content: prompt }], tools: [], ...(options.reasoningEffort === undefined || options.reasoningEffort === 'auto' ? {} : { reasoning: { effort: options.reasoningEffort } }), store: false }) });
   } catch { throw new Error('Compaction request outcome is unknown; existing context was preserved and it was not retried'); }
   const raw: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`Compaction request failed with HTTP ${response.status}; existing context was preserved`);
