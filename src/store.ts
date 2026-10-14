@@ -1,6 +1,6 @@
 import { logError } from './log.js';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
@@ -56,6 +56,12 @@ export interface ToolRecord {
   finished_at: string | null;
 }
 
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,sortJsonValue(item)]));
+  return value;
+}
+
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
 
@@ -87,7 +93,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, question_id TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deployment_requests(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, requester_id TEXT, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','interrupted','needs_reconciliation')), result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_idx ON deployment_requests((1)) WHERE status IN ('queued','running','needs_reconciliation');
-      CREATE TABLE IF NOT EXISTS deployment_result_events(id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE REFERENCES deployment_requests(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown','needs_reconciliation')), parent_input_id TEXT, delivery_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deployment_result_events(id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE REFERENCES deployment_requests(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown','needs_reconciliation')), parent_input_id TEXT, delivery_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, target_version TEXT, claimed_version TEXT, parent_input_version TEXT, delivered_version TEXT, send_attempt_id TEXT, send_phase TEXT);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
@@ -127,6 +133,15 @@ export class Store implements SchedulerStore {
     if (!replySql.includes("'none'")) {
       this.db.exec(`ALTER TABLE channel_reply_modes RENAME TO channel_reply_modes_old; CREATE TABLE channel_reply_modes(channel_id TEXT PRIMARY KEY,mode TEXT NOT NULL CHECK(mode IN ('all','mention','none'))); INSERT INTO channel_reply_modes SELECT * FROM channel_reply_modes_old; DROP TABLE channel_reply_modes_old;`);
     }
+    const deploymentEventColumns = new Set((this.db.prepare('PRAGMA table_info(deployment_result_events)').all() as Array<{ name: string }>).map(column => column.name));
+    for (const [name, definition] of [['target_version', 'TEXT'], ['claimed_version', 'TEXT'], ['parent_input_version', 'TEXT'], ['delivered_version', 'TEXT'], ['send_attempt_id', 'TEXT'], ['send_phase', 'TEXT']] as const) {
+      if (!deploymentEventColumns.has(name)) this.db.exec(`ALTER TABLE deployment_result_events ADD COLUMN ${name} ${definition}`);
+    }
+    // Existing events are baselined without replay: their current parent result is the known target.
+    for (const row of this.db.prepare('SELECT e.id,e.status,r.status AS result_status,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.target_version IS NULL').all() as Array<{id:string;status:string;result_status:string;result_json:string|null}>) {
+      const version=this.deploymentResultVersion(row.result_status,row.result_json);
+      this.db.prepare('UPDATE deployment_result_events SET target_version=?,delivered_version=CASE WHEN status=\'delivered\' THEN ? ELSE delivered_version END WHERE id=?').run(version,version,row.id);
+    }
     const attachmentColumns = new Set((this.db.prepare('PRAGMA table_info(message_input_attachments)').all() as Array<{ name: string }>).map(column => column.name));
     if (!attachmentColumns.has('origin')) this.db.exec('ALTER TABLE message_input_attachments ADD COLUMN origin TEXT');
     if (!attachmentColumns.has('memory_document_id')) this.db.exec('ALTER TABLE message_input_attachments ADD COLUMN memory_document_id TEXT');
@@ -145,7 +160,8 @@ export class Store implements SchedulerStore {
     if (!sourceColumns.has('author_name')) this.db.exec('ALTER TABLE message_sources ADD COLUMN author_name TEXT');
     if (!sourceColumns.has('forwarded_message_json')) this.db.exec('ALTER TABLE message_sources ADD COLUMN forwarded_message_json TEXT');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
-    this.db.exec("UPDATE deployment_result_events SET status='needs_reconciliation',updated_at=datetime('now') WHERE status='processing'");
+    // A claimed event without a durable send intent is safe to retry; intent-bearing rows are ambiguous.
+    this.db.exec("UPDATE deployment_result_events SET status=CASE WHEN send_phase='pre_send' THEN 'pending' ELSE 'needs_reconciliation' END,claimed_version=NULL,send_attempt_id=CASE WHEN send_phase='pre_send' THEN NULL ELSE send_attempt_id END,send_phase=CASE WHEN send_phase='pre_send' THEN NULL ELSE send_phase END,updated_at=datetime('now') WHERE status='processing'");
     const segmentColumns = new Set((this.db.prepare('PRAGMA table_info(discord_outgoing_segments)').all() as Array<{ name: string }>).map(column => column.name));
     if (!segmentColumns.has('reply_to_message_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_message_id TEXT');
     if (!segmentColumns.has('reply_to_channel_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_channel_id TEXT');
@@ -566,8 +582,17 @@ export class Store implements SchedulerStore {
     return Number(result.changes) === 1;
   }
   deploymentRequest(id: string): Record<string, unknown> | undefined { return this.db.prepare('SELECT * FROM deployment_requests WHERE id=?').get(id) as Record<string, unknown> | undefined; }
-  deploymentResultEvidence(id: string): { id: string; status: string; result_json: string | null; created_at: string; updated_at: string } | undefined {
-    return this.db.prepare('SELECT id,status,result_json,created_at,updated_at FROM deployment_requests WHERE id=?').get(id) as { id: string; status: string; result_json: string | null; created_at: string; updated_at: string } | undefined;
+  deploymentResultEvidence(id: string): { id: string; status: string; result_json: string | null; created_at: string; updated_at: string; version: string } | undefined {
+    const row = this.db.prepare('SELECT id,status,result_json,created_at,updated_at FROM deployment_requests WHERE id=?').get(id) as {id:string;status:string;result_json:string|null;created_at:string;updated_at:string}|undefined;
+    if (!row) return undefined;
+    return { ...row, version: this.deploymentResultVersion(row.status, row.result_json) };
+  }
+  private deploymentResultVersion(status: string, resultJson: string | null): string {
+    let normalized = resultJson;
+    if (resultJson !== null) {
+      try { normalized = JSON.stringify(sortJsonValue(JSON.parse(resultJson))); } catch { /* Preserve malformed evidence bytes as a distinct version. */ }
+    }
+    return createHash('sha256').update(JSON.stringify([status, normalized])).digest('hex');
   }
   activeDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status IN ('queued','running','needs_reconciliation') ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
   queuedDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status='queued' ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
@@ -588,29 +613,89 @@ export class Store implements SchedulerStore {
   }
   completeDeployment(id: string, status: 'completed'|'failed'|'interrupted'|'needs_reconciliation', result: unknown): void {
     this.db.exec('BEGIN IMMEDIATE'); try {
-      const now = new Date().toISOString();
-      this.db.prepare('UPDATE deployment_requests SET status=?,result_json=?,updated_at=? WHERE id=?').run(status,JSON.stringify(result),now,id);
-      this.db.prepare("INSERT OR IGNORE INTO deployment_result_events(id,deployment_id,status,created_at,updated_at) VALUES(?,?,'pending',?,?)").run(randomUUID(),id,now,now);
+      const now = new Date().toISOString(), resultJson = JSON.stringify(result);
+      const before = this.db.prepare('SELECT status,result_json FROM deployment_requests WHERE id=?').get(id) as {status:string;result_json:string|null}|undefined;
+      if (!before) throw new Error(`Unknown deployment ${id}`);
+      const priorFinal = before.status === 'completed' || before.status === 'failed';
+      if (before.status === 'needs_reconciliation' && before.result_json) {
+        try { const prior = JSON.parse(before.result_json); if (prior.reason === 'Conflicting terminal deployment evidence' && prior.incomingStatus === status && prior.incomingResult === resultJson) { this.db.exec('COMMIT'); return; } } catch { /* continue with explicit evidence */ }
+      }
+      if (priorFinal && (before.status !== status || before.result_json !== resultJson)) {
+        const conflict = JSON.stringify({status:'needs_reconciliation',reason:'Conflicting terminal deployment evidence',priorStatus:before.status,priorResult:before.result_json,incomingStatus:status,incomingResult:resultJson});
+        this.db.prepare("UPDATE deployment_requests SET status='needs_reconciliation',result_json=?,updated_at=? WHERE id=?").run(conflict,now,id);
+        const version=this.deploymentResultVersion('needs_reconciliation',conflict);
+        this.db.prepare("UPDATE deployment_result_events SET target_version=?,status=CASE WHEN status='delivered' THEN 'pending' ELSE status END,updated_at=? WHERE deployment_id=?").run(version,now,id);
+        this.db.exec('COMMIT');
+        return;
+      }
+      const version = this.deploymentResultVersion(status, resultJson);
+      this.db.prepare('UPDATE deployment_requests SET status=?,result_json=?,updated_at=? WHERE id=?').run(status,resultJson,now,id);
+      const event = this.db.prepare('SELECT status,target_version,delivered_version FROM deployment_result_events WHERE deployment_id=?').get(id) as {status:string;target_version:string|null;delivered_version:string|null}|undefined;
+      if (!event) this.db.prepare("INSERT INTO deployment_result_events(id,deployment_id,status,created_at,updated_at,target_version) VALUES(?,?,'pending',?,?,?)").run(randomUUID(),id,now,now,version);
+      else if (event.target_version !== version) {
+        const finalResult = status === 'completed' || status === 'failed';
+        const wasDelivered = event.delivered_version === event.target_version;
+        const eligible = finalResult && (event.status === 'processing' || wasDelivered || event.status === 'pending' || event.status === 'failed_unknown');
+        this.db.prepare("UPDATE deployment_result_events SET target_version=?,status=CASE WHEN status='processing' THEN status WHEN ? THEN 'pending' ELSE status END,next_attempt_at=CASE WHEN ? THEN NULL ELSE next_attempt_at END,updated_at=? WHERE deployment_id=?")
+          .run(version, eligible ? 1 : 0, eligible ? 1 : 0, now, id);
+      }
       this.db.exec('COMMIT');
     } catch(e) { this.db.exec('ROLLBACK'); throw e; }
   }
-  pendingDeploymentEvents(): Array<Record<string, unknown>> { return this.db.prepare("SELECT e.*,r.parent_session_id,r.channel_id,r.message_id,r.requester_id,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.status IN ('pending','failed_unknown') AND (e.next_attempt_at IS NULL OR e.next_attempt_at<=?) ORDER BY e.created_at").all(new Date().toISOString()) as Array<Record<string, unknown>>; }
-  claimDeploymentEvent(id: string): boolean { return Number(this.db.prepare("UPDATE deployment_result_events SET status='processing',attempts=attempts+1,updated_at=? WHERE id=? AND status IN ('pending','failed_unknown')").run(new Date().toISOString(),id).changes)===1; }
-  setDeploymentEvent(id: string,status:'pending'|'processing'|'delivered'|'failed_unknown'|'needs_reconciliation', inputId?:string, messageId?:string, nextAttemptAt?:string): void { this.db.prepare('UPDATE deployment_result_events SET status=?,parent_input_id=COALESCE(?,parent_input_id),delivery_message_id=COALESCE(?,delivery_message_id),next_attempt_at=?,updated_at=? WHERE id=?').run(status,inputId??null,messageId??null,nextAttemptAt??null,new Date().toISOString(),id); }
-
-  deploymentEventInput(eventId: string, session: string, content: string, source: MessageSource): StoredMessage {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const event = this.db.prepare('SELECT parent_input_id FROM deployment_result_events WHERE id=? AND deployment_id IN (SELECT id FROM deployment_requests WHERE parent_session_id=?)').get(eventId,session) as {parent_input_id:string|null}|undefined;
-      if (!event) throw new Error('Unknown deployment result event');
-      if (event.parent_input_id) { const message=this.messagesWithSourcesForId(event.parent_input_id); this.db.exec('COMMIT'); return message; }
-      const id=randomUUID(), now=new Date().toISOString();
+  pendingDeploymentEvents(): Array<Record<string, unknown>> { return this.db.prepare("SELECT e.*,r.parent_session_id,r.channel_id,r.message_id,r.requester_id,r.result_json,r.status AS result_status FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.status IN ('pending','failed_unknown') AND (e.next_attempt_at IS NULL OR e.next_attempt_at<=?) ORDER BY e.created_at").all(new Date().toISOString()) as Array<Record<string, unknown>>; }
+  claimDeploymentEvent(id: string): { version: string; attempts: number; attemptId: string } | undefined {
+    this.db.exec('BEGIN IMMEDIATE'); try {
+      const row=this.db.prepare("SELECT r.status,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.id=? AND e.status IN ('pending','failed_unknown')").get(id) as {status:string;result_json:string|null}|undefined;
+      if (!row) { this.db.exec('COMMIT'); return undefined; }
+      const version=this.deploymentResultVersion(row.status,row.result_json), now=new Date().toISOString(), attemptId=randomUUID();
+      this.db.prepare("UPDATE deployment_result_events SET status='processing',claimed_version=?,target_version=?,send_attempt_id=?,send_phase='pre_send',attempts=attempts+1,updated_at=? WHERE id=? AND status IN ('pending','failed_unknown')").run(version,version,attemptId,now,id);
+      const attempts=(this.db.prepare('SELECT attempts FROM deployment_result_events WHERE id=?').get(id) as {attempts:number}).attempts;
+      this.db.exec('COMMIT'); return {version,attempts,attemptId};
+    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  releaseDeploymentEventBeforeSend(id:string, version:string, attemptId:string): boolean {
+    const result=this.db.prepare("UPDATE deployment_result_events SET status='pending',claimed_version=NULL,send_attempt_id=NULL,send_phase=NULL,next_attempt_at=NULL,updated_at=? WHERE id=? AND status='processing' AND claimed_version=? AND send_attempt_id=? AND send_phase='pre_send'").run(new Date().toISOString(),id,version,attemptId);
+    return Number(result.changes)===1;
+  }
+  persistDeploymentSendIntent(id:string, version:string, attemptId:string): boolean {
+    const result=this.db.prepare("UPDATE deployment_result_events SET send_phase='send_intent',updated_at=? WHERE id=? AND status='processing' AND claimed_version=? AND send_attempt_id=? AND send_phase='pre_send'").run(new Date().toISOString(),id,version,attemptId);
+    return Number(result.changes)===1;
+  }
+  deploymentResultIsCurrent(id:string,version:string):boolean {
+    const row=this.db.prepare('SELECT e.status,e.claimed_version,r.status AS result_status,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.id=?').get(id) as {status:string;claimed_version:string|null;result_status:string;result_json:string|null}|undefined;
+    return Boolean(row&&row.status==='processing'&&row.claimed_version===version&&this.deploymentResultVersion(row.result_status,row.result_json)===version);
+  }
+  finishDeploymentEvent(id:string,version:string,messageId:string):void {
+    this.db.exec('BEGIN IMMEDIATE'); try {
+      const row=this.db.prepare('SELECT e.status,e.claimed_version,r.status AS result_status,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.id=?').get(id) as {status:string;claimed_version:string|null;result_status:string;result_json:string|null}|undefined;
+      if(!row||row.status!=='processing'||row.claimed_version!==version) throw new Error('Deployment event claim changed before delivery persistence');
+      const latest=this.deploymentResultVersion(row.result_status,row.result_json), newerFinal=latest!==version&&(row.result_status==='completed'||row.result_status==='failed');
+      this.db.prepare("UPDATE deployment_result_events SET status=?,delivered_version=?,delivery_message_id=?,target_version=?,claimed_version=NULL,send_phase='delivered',next_attempt_at=NULL,updated_at=? WHERE id=?").run(newerFinal?'pending':'delivered',version,messageId,latest,new Date().toISOString(),id);
+      this.db.exec('COMMIT');
+    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
+  }
+  setDeploymentEvent(id:string,status:'pending'|'processing'|'delivered'|'failed_unknown'|'needs_reconciliation',inputId?:string,messageId?:string,nextAttemptAt?:string,inputVersion?:string):void {
+    this.db.prepare("UPDATE deployment_result_events SET status=?,parent_input_id=COALESCE(?,parent_input_id),parent_input_version=COALESCE(?,parent_input_version),delivery_message_id=COALESCE(?,delivery_message_id),claimed_version=CASE WHEN ?='processing' THEN claimed_version ELSE NULL END,next_attempt_at=?,updated_at=? WHERE id=?").run(status,inputId??null,inputVersion??null,messageId??null,status,nextAttemptAt??null,new Date().toISOString(),id);
+  }
+  deploymentEventInput(eventId:string,session:string,content:string,source:MessageSource,version?:string):StoredMessage {
+    this.db.exec('BEGIN IMMEDIATE'); try {
+      const event=this.db.prepare('SELECT e.parent_input_id,e.parent_input_version,e.status AS event_status,r.status,r.result_json FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id WHERE e.id=? AND r.parent_session_id=?').get(eventId,session) as {parent_input_id:string|null;parent_input_version:string|null;event_status:string;status:string;result_json:string|null}|undefined;
+      if(!event) throw new Error('Unknown deployment result event');
+      version ??= this.deploymentResultVersion(event.status,event.result_json);
+      const currentVersion=this.deploymentResultVersion(event.status,event.result_json);
+      if(currentVersion!==version) throw new Error('Deployment result changed before notification input was stored');
+      if(event.event_status==='processing') this.db.prepare("UPDATE deployment_result_events SET claimed_version=?,target_version=? WHERE id=? AND status='processing'").run(version,version,eventId);
+      if(event.parent_input_id&&event.parent_input_version===version){const message=this.messagesWithSourcesForId(event.parent_input_id);this.db.exec('COMMIT');return message;}
+      const id=randomUUID(),now=new Date().toISOString();
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(id,session,'user',content,now);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,event_time,source_kind) VALUES(?,?,?,?,?)').run(id,source.authorId??null,source.channelId??null,now,'deployment_result');
+      const trigger = this.db.prepare('SELECT ms.message_id FROM deployment_result_events e JOIN deployment_requests r ON r.id=e.deployment_id JOIN message_sources ms ON ms.discord_message_id=r.message_id WHERE e.id=?').get(eventId) as { message_id: string } | undefined;
+      const writeToken = trigger ? this.messageMemoryWriteToken(trigger.message_id) ?? null : null;
+      this.db.prepare('INSERT INTO message_memory_tokens(message_id,token_json) VALUES(?,?)').run(id, JSON.stringify(writeToken));
       this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'ready',?)").run(id,now);
-      this.db.prepare('UPDATE deployment_result_events SET parent_input_id=? WHERE id=?').run(id,eventId);
-      const message=this.messagesWithSourcesForId(id); this.db.exec('COMMIT'); return message;
-    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
+      this.db.prepare('UPDATE deployment_result_events SET parent_input_id=?,parent_input_version=? WHERE id=?').run(id,version,eventId);
+      const message=this.messagesWithSourcesForId(id);this.db.exec('COMMIT');return message;
+    }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
 
   beginTool(session: string, name: string, args: unknown): string {

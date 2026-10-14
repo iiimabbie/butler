@@ -28,10 +28,31 @@ test('deployment request is durable, duplicate-safe, and result event targets or
     const eventInput = store.deploymentEventInput(String(event.id), 'session-origin', 'internal report', { sourceKind: 'deployment_result', channelId: 'channel-a' });
     assert.equal(eventInput.source.sourceKind, 'deployment_result');
     assert.equal(store.deploymentEventInput(String(event.id), 'session-origin', 'internal report', { sourceKind: 'deployment_result', channelId: 'channel-a' }).id, eventInput.id);
-    assert.equal(store.claimDeploymentEvent(String(event.id)), true);
-    assert.equal(store.claimDeploymentEvent(String(event.id)), false);
+    const claim = store.claimDeploymentEvent(String(event.id));
+    assert.ok(claim?.attemptId);
+    assert.equal(store.claimDeploymentEvent(String(event.id)), undefined);
     store.setDeploymentEvent(String(event.id), 'delivered', undefined, 'discord-msg-a');
     assert.equal(store.pendingDeploymentEvents().length, 0);
     store.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('conflicting terminal deployment evidence is durable reconciliation and duplicate handoff is idempotent',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'butler-deploy-conflict-')), path=join(dir,'store.sqlite');
+ try {
+  const store=new Store(path);
+  try {
+   store.createDeploymentRequest({id:'deploy-conflict',parentSession:'session',channelId:'channel'});
+   store.completeDeployment('deploy-conflict','completed',{status:'completed',buildId:'build-a'});
+   store.completeDeployment('deploy-conflict','failed',{status:'failed',phase:'candidate_start'});
+   let row=store.deploymentRequest('deploy-conflict');
+   assert.equal(row.status,'needs_reconciliation');
+   const evidence=JSON.parse(String(row.result_json));
+   assert.equal(evidence.reason,'Conflicting terminal deployment evidence');
+   store.completeDeployment('deploy-conflict','failed',{status:'failed',phase:'candidate_start'});
+   row=store.deploymentRequest('deploy-conflict');
+   assert.equal(row.status,'needs_reconciliation');
+   assert.equal(JSON.parse(String(row.result_json)).incomingStatus,'failed');
+  } finally {store.close();}
+ } finally {rmSync(dir,{recursive:true,force:true});}
 });

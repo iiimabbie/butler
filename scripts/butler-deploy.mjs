@@ -12,6 +12,7 @@ const lockFile = path.join(state, 'lock');
 const requestId = process.argv[2] === '--locked' ? process.argv[3] : (process.argv[2] || randomUUID());
 const logFile = path.join(deployDir, `${requestId}.log`);
 const resultFile = path.join(deployDir, `${requestId}-result.json`);
+const startedFile = path.join(deployDir, `${requestId}-runner-started`);
 const lastResultFile = path.join(deployDir, 'last-result.json');
 const node = process.env.BUTLER_NODE || process.execPath;
 const service = path.join(root, 'scripts/butler-service.sh');
@@ -39,6 +40,8 @@ if (process.argv[2] !== '--locked') {
   process.exit(locked.status ?? 1);
 }
 const id = process.argv[3];
+if (await exists(resultFile) || await exists(startedFile)) throw new Error(`Deployment ${id} already started or has a terminal result; runner replay refused`);
+await writeAtomic(startedFile, JSON.stringify({ id, pid: process.pid, startedAt: new Date().toISOString() }));
 await fs.mkdir(state, { recursive: true, mode: 0o700 });
 await fs.chmod(state, 0o700);
 const temp = path.join(deployDir, `dist-${id}`);
@@ -50,6 +53,7 @@ let oldStopped = false;
 let stopAttempted = false;
 let candidateStartAttempted = false;
 let rollbackStatus = 'not_needed';
+let previousBuild = { buildId: 'legacy-unverified', buildDigest: 'unknown', verified: false };
 let originalDigest;
 let lockDigest;
 let packageDigest;
@@ -94,6 +98,10 @@ try {
   if (await digest(sourceFiles) !== originalDigest || createHash('sha256').update(await fs.readFile(packageLock)).digest('hex') !== lockDigest || createHash('sha256').update(await fs.readFile(path.join(root, 'package.json'))).digest('hex') !== packageDigest) throw new Error('Build inputs changed while waiting for quiescence; deployment cancelled');
   const distStat = await fs.stat(candidate);
   if (!distStat.isDirectory()) throw new Error('Current dist is missing');
+  try {
+    const manifest = JSON.parse(await fs.readFile(path.join(candidate, 'build-manifest.json'), 'utf8'));
+    if (typeof manifest.buildId === 'string' && typeof manifest.buildDigest === 'string') previousBuild = { buildId: manifest.buildId, buildDigest: manifest.buildDigest, verified: true };
+  } catch { /* Legacy backup remains recoverable but cannot be claimed verified. */ }
   await fs.rm(backup, { recursive: true, force: true });
   await fs.rename(candidate, backup);
   oldDistMoved = true;
@@ -105,12 +113,12 @@ try {
   await fs.rm(path.join(state, 'deploy-candidate-ready'), { force: true });
   await fs.rm(path.join(state, 'deploy-request.json'), { force: true });
   candidateStartAttempted = true;
-  await command(['sh', service, 'deploy-start'], { BUTLER_BUILD_ID: id, BUTLER_BUILD_DIGEST: originalDigest });
-  const readyEvidence = JSON.parse(await fs.readFile(path.join(state, 'butler.ready'), 'utf8'));
-  if (readyEvidence.ready !== true || readyEvidence.buildId !== id || readyEvidence.buildDigest !== originalDigest) throw new Error('New service ready evidence did not match the requested build ID and digest');
+  await command(['sh', service, 'deploy-start'], { BUTLER_BUILD_ID: id, BUTLER_BUILD_DIGEST: originalDigest, BUTLER_EXPECTED_BUILD_ID: id, BUTLER_EXPECTED_BUILD_DIGEST: originalDigest });
+  const readyEvidence = await readReadyEvidence(id, originalDigest);
+  if (!readyEvidence.verified) throw new Error('New service ready evidence did not match the requested build ID, digest, and app PID');
   await writeAtomic(path.join(deployDir, 'baseline.json'), JSON.stringify({ lockDigest, packageDigest, buildDigest: originalDigest, updatedAt: new Date().toISOString() }));
   await fs.rm(path.join(state, 'deploy-quiesced.json'), { force: true });
-  const result = JSON.stringify({ id, status: 'completed', at: new Date().toISOString(), buildDigest: originalDigest, log: logFile });
+  const result = JSON.stringify({ id, status: 'completed', at: new Date().toISOString(), buildId: id, buildDigest: originalDigest, readyEvidence: { verified: true, pid: readyEvidence.pid }, log: logFile });
   await writeAtomic(resultFile, result);
   await writeAtomic(lastResultFile, result);
   await log('Deployment completed and ready');
@@ -139,8 +147,15 @@ try {
         await fs.rename(backup, candidate);
         oldDistMoved = false;
         candidateInstalled = false;
-        try { await command(['sh', service, 'deploy-start']); rollbackStatus = 'restored_and_started'; }
-        catch (restoreError) { rollbackStatus = 'restored_start_failed'; await log(`Rollback start failed: ${restoreError.message}`); }
+        try {
+          await command(['sh', service, 'deploy-start'], previousBuild.verified ? { BUTLER_EXPECTED_BUILD_ID: previousBuild.buildId, BUTLER_EXPECTED_BUILD_DIGEST: previousBuild.buildDigest } : { BUTLER_ALLOW_LEGACY_READY: '1' });
+          const rollbackEvidence = await readReadyEvidence(previousBuild.verified ? previousBuild.buildId : undefined, previousBuild.verified ? previousBuild.buildDigest : undefined);
+          const legacyReady = rollbackEvidence.ready === true && rollbackEvidence.liveness === 'ready' && rollbackEvidence.pid > 1 && rollbackEvidence.alive;
+          const expectedIdentityMatches = previousBuild.verified && rollbackEvidence.buildId === previousBuild.buildId && rollbackEvidence.buildDigest === previousBuild.buildDigest;
+          if (previousBuild.verified && !rollbackEvidence.verified && !(legacyReady && expectedIdentityMatches)) throw new Error('Rollback build identity/readiness evidence mismatch');
+          if (!previousBuild.verified && !legacyReady) throw new Error('Legacy rollback readiness evidence unavailable');
+          rollbackStatus = previousBuild.verified && rollbackEvidence.verified ? 'restored_and_verified' : 'restored_and_started_legacy_unverified';
+        } catch (restoreError) { rollbackStatus = 'restored_start_failed'; await log(`Rollback start failed: ${restoreError.message}`); }
       }
     }
   }
@@ -149,7 +164,7 @@ try {
   await fs.rm(path.join(state, 'deploy-candidate-ready'), { force: true });
   await fs.rm(path.join(state, 'deploy-quiesced.json'), { force: true });
   await log(`Deployment failed: ${error.message}`);
-  const resultRecord = { id, status: 'failed', phase: candidateStartAttempted ? 'candidate_start' : stopAttempted ? 'service_stop_or_start' : candidateInstalled ? 'install' : 'build_or_quiesce', error: error.message, rollback: oldDistMoved ? 'incomplete_or_refused' : rollbackStatus, at: new Date().toISOString(), log: logFile,
+  const resultRecord = { id, status: 'failed', phase: candidateStartAttempted ? 'candidate_start' : stopAttempted ? 'service_stop_or_start' : candidateInstalled ? 'install' : 'build_or_quiesce', error: error.message, rollback: oldDistMoved ? 'incomplete_or_refused' : rollbackStatus, rollbackBuild: previousBuild, at: new Date().toISOString(), log: logFile,
     alert_status: oldDistMoved || rollbackStatus === 'restored_start_failed' ? 'pending' : 'not_required' };
   await writeAtomic(resultFile, JSON.stringify(resultRecord));
   await writeAtomic(lastResultFile, JSON.stringify(resultRecord));
@@ -157,11 +172,26 @@ try {
   process.exitCode = 1;
 }
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
+async function readReadyEvidence(expectedBuildId, expectedBuildDigest) {
+  const rawEvidence = await fs.readFile(path.join(state, 'butler.ready'), 'utf8');
+  const liveness = String(await fs.readFile(path.join(state, 'butler.liveness'), 'utf8')).trim();
+  const appPid = Number(String(await fs.readFile(path.join(state, 'app.pid'), 'utf8')).trim());
+  let evidence;
+  try { evidence = JSON.parse(rawEvidence); }
+  catch (error) {
+    if (expectedBuildId !== undefined || expectedBuildDigest !== undefined || rawEvidence.trim() !== 'ready' || liveness !== 'ready') throw error;
+    let alive = false; try { process.kill(appPid, 0); alive = appPid > 1; } catch {}
+    return { ready: alive, pid: appPid, alive, legacy: true, verified: false, liveness };
+  }
+  let alive = false;
+  try { process.kill(appPid, 0); alive = Number.isSafeInteger(appPid) && appPid > 1; } catch {}
+  const verified = liveness === 'ready' && evidence.ready === true && typeof evidence.startupId === 'string' && evidence.startupId.length > 0 && evidence.buildId === expectedBuildId && evidence.buildDigest === expectedBuildDigest && evidence.pid === appPid && alive;
+  return { ...evidence, liveness, alive, verified };
+}
 async function sendEmergencyFailureAlert(result) {
-  // Record intent before notifying; a crash after webhook acceptance must not cause a blind resend.
-  result.alert_status = 'attempted_unknown';
-  await writeAtomic(resultFile, JSON.stringify(result));
-  await writeAtomic(lastResultFile, JSON.stringify(result));
+  // The terminal deployment result is immutable; alert delivery has a separate intent/outcome record.
+  const alertFile = path.join(deployDir, `${result.id}-alert.json`);
+  await writeAtomic(alertFile, JSON.stringify({ id: result.id, status: 'attempted_unknown', at: new Date().toISOString() }));
   try {
     const configModule = await import(pathToFileURL(path.join(root, 'dist/config.js')).href).catch(() => import(pathToFileURL(path.join(deployDir, 'previous-dist/config.js')).href));
     const loggerModule = await import(pathToFileURL(path.join(root, 'dist/log.js')).href).catch(() => import(pathToFileURL(path.join(deployDir, 'previous-dist/log.js')).href));
@@ -173,8 +203,7 @@ async function sendEmergencyFailureAlert(result) {
     await logger.flushLogs();
     result.alert_status = await delivered ? 'delivered' : 'failed';
   } catch (alertError) { result.alert_status = 'failed'; await log(`Emergency alert setup failed: ${alertError instanceof Error ? alertError.message : 'unknown error'}`); }
-  await writeAtomic(resultFile, JSON.stringify(result));
-  await writeAtomic(lastResultFile, JSON.stringify(result));
+  await writeAtomic(alertFile, JSON.stringify({ id: result.id, status: result.alert_status, at: new Date().toISOString() }));
 }
 
 async function writeAtomic(file, content) {

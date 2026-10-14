@@ -72,7 +72,10 @@ export class DiscordHandler {
   private deployRequest?: { id: string; nonce: string; workerPid: number };
   private deploySchedulerPaused = false;
   private deployCheckRunning = false;
-  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning) { this.deployCheckRunning = true; void this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { notify: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); } }, 250); timer.unref(); return timer; })();
+  private deploymentPollPromise?: Promise<void>;
+  private notificationClaimsPaused = false;
+  private readonly deploymentNotifications = new Set<Promise<boolean>>();
+  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning && !this.stopping) { this.deployCheckRunning = true; const poll = this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { notify: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); this.deploymentPollPromise = poll; void poll; } }, 250); timer.unref(); return timer; })();
   constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) {
     this.outputChannel = options.outputChannel ?? (async () => undefined);
     this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
@@ -108,6 +111,9 @@ export class DiscordHandler {
   async close(): Promise<void> {
     clearInterval(this.deployPoll);
     this.stopping = true;
+    this.notificationClaimsPaused = true;
+    await this.deploymentPollPromise?.catch(() => undefined);
+    await Promise.allSettled([...this.deploymentNotifications]);
     this.subagentCoordinator.freeze();
     await this.memoryCoordinator?.quiesce();
     await this.scheduler?.stop();
@@ -131,9 +137,9 @@ export class DiscordHandler {
   }
 
   private async publishQuiesced(): Promise<void> {
-    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0) return;
+    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
     await this.memoryCoordinator?.quiesce();
-    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0) return;
+    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
     const state = fileURLToPath(new URL('../.data/service/', import.meta.url));
     const temporary = `${state}deploy-quiesced-${this.deployRequest.id}.tmp`;
     writeFileSync(temporary, JSON.stringify({ ...this.deployRequest, pid: process.pid }), { mode: 0o600 });
@@ -153,7 +159,7 @@ export class DiscordHandler {
     const valid = (value: typeof request) => Boolean(value && typeof value.id === 'string' && /^[a-f0-9-]{20,40}$/.test(value.id) && value.pid === process.pid && typeof value.workerPid === 'number' && Number.isSafeInteger(value.workerPid) && value.workerPid > 1 && isProcessAlive(value.workerPid) && typeof value.nonce === 'string' && value.nonce === `${value.id}:${value.workerPid}` && existsSync(candidatePath) && readFileSync(candidatePath, 'utf8') === value.id);
     if (this.deploying) {
       if (!request || request.id !== this.deployRequest?.id || request.nonce !== this.deployRequest?.nonce || request.workerPid !== this.deployRequest?.workerPid || !valid(request)) {
-        this.deploying = false; this.deploySchedulerPaused = false; this.deployRequest = undefined;
+        this.deploying = false; this.deploySchedulerPaused = false; this.notificationClaimsPaused = false; this.deployRequest = undefined;
         this.subagentCoordinator.unfreeze();
         await this.scheduler?.resume();
         await this.memoryCoordinator?.resume();
@@ -170,6 +176,7 @@ export class DiscordHandler {
       return;
     }
     this.deploying = true;
+    this.notificationClaimsPaused = true;
     this.deployRequest = { id: request!.id as string, nonce: request!.nonce as string, workerPid: request!.workerPid as number };
     this.subagentCoordinator.freeze();
     await this.scheduler?.pause();
@@ -670,11 +677,15 @@ export class DiscordHandler {
         } catch (error) { logError('Could not read deployment result record', error, { notify: false }); }
       }
     }
+    if (this.notificationClaimsPaused || this.stopping || this.deploying) return;
     for (const event of this.store.pendingDeploymentEvents()) {
+      if (this.notificationClaimsPaused || this.stopping || this.deploying) return;
       const runtime = this.getRuntime();
       try {
-        await processDeploymentResultEvent(this.store, event as unknown as DeploymentResultEventRow, {
+        let deploymentWriteToken: import('./store.js').MemoryWriteToken | null = null;
+        const notification = processDeploymentResultEvent(this.store, event as unknown as DeploymentResultEventRow, {
           ask: async (input, content, options) => {
+            deploymentWriteToken = this.store.messageMemoryWriteToken(input.id) ?? null;
             const channel = String(event.channel_id);
             const state = this.store.channelState(channel, runtime.discord.defaultModel, runtime.discord.ownerId);
             await this.runAsk(this.store, String(event.parent_session_id), content, {
@@ -683,25 +694,31 @@ export class DiscordHandler {
               transcriptTimezone: runtime.settings.schedule?.timezone, workspaceDirectory: DEFAULT_WORKSPACE,
               storedInput: input, messageSource: { sourceKind: 'deployment_result', channelId: channel,
                 authorId: typeof event.requester_id === 'string' ? event.requester_id : undefined },
+              memoryWriteAllowed: () => deploymentWriteToken !== null && this.store.validMemoryWriteToken(deploymentWriteToken),
               deploymentResultEvent: true,
               deploymentResultStatus: options.readDeploymentStatus,
               onResponseReady: options.onResponseReady,
             });
           },
-          send: async (channelId, content, onAttempt) => {
+          canSend: () => !this.stopping && !this.notificationClaimsPaused && !this.deploying,
+          persistSendIntent: (eventId, version, attemptId) => this.store.persistDeploymentSendIntent(eventId, version, attemptId),
+          send: async (channelId, content, beforeRestSend) => {
             const target = await this.outputChannel(channelId);
             if (!target) throw new Error('Deployment result channel unavailable');
-            onAttempt?.();
+            if (!await beforeRestSend()) return { messageId: '' };
             const sent = await target.send(content);
             if (!isRecord(sent) || typeof sent.id !== 'string') throw new Error('Discord send result did not return a message ID');
             return { messageId: sent.id, sent };
           },
           recordOutgoing: (sessionId, content, sent) => {
-            const saved = this.recordOutgoingSegment(sessionId, content, sent);
+            const saved = this.recordOutgoingSegment(sessionId, content, sent, undefined, 'butler_reply', deploymentWriteToken);
             if (saved) this.store.finalizeOutgoing(saved.id, content);
           },
           logSupplementError: error => logError(`Deployment result verification failed id=${event.id}`, error, { notify: false }),
         });
+        this.deploymentNotifications.add(notification);
+        try { await notification; }
+        finally { this.deploymentNotifications.delete(notification); if (this.deploying) void this.publishQuiesced(); }
       } catch (error) {
         logError(`Deployment result notification failed id=${event.id}`, error, { notify: false });
       }
@@ -1186,7 +1203,9 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     if (serviceReadyFile) { try {
       const manifestPath = join(dirname(fileURLToPath(import.meta.url)), 'build-manifest.json');
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { buildId?: string; buildDigest?: string };
-      writeFileSync(serviceReadyFile, JSON.stringify({ ready: true, buildId: manifest.buildId ?? 'unknown', buildDigest: manifest.buildDigest ?? 'unknown' }), { mode: 0o600 });
+      const temporary = `${serviceReadyFile}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify({ ready: true, buildId: manifest.buildId ?? 'unknown', buildDigest: manifest.buildDigest ?? 'unknown', pid: process.pid, startupId: randomUUID(), startedAt: new Date().toISOString() }), { mode: 0o600 });
+      renameSync(temporary, serviceReadyFile);
     } catch (error) {
       try { writeFileSync(serviceReadyFile, JSON.stringify({ ready: true, buildId: 'unknown', buildDigest: 'unknown' }), { mode: 0o600 }); } catch { /* service wrapper reports readiness timeout */ }
       logWarn('Service build manifest unavailable at readiness', error);

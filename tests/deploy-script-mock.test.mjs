@@ -17,11 +17,12 @@ function setup(mode = 'success') {
   writeFileSync(join(root,'mock-dist','config.js'),`export function readConfig(){ return { discord: { errorWebhookUrl: 'https://discord.com/api/webhooks/123/secret-test-only' } }; }`);
   writeFileSync(join(root,'fake-preload.mjs'),`globalThis.fetch = async (_url, init) => { if(process.env.ALERT_FAIL==='1') throw new Error('mock network failure'); await import('node:fs/promises').then(({appendFile})=>appendFile(process.env.ROOT+'/.data/deploy/alert.jsonl', init.body)); return new Response('',{status:200}); };`);
   writeFileSync(join(root,'dist','main.js'),'old build');
+  writeFileSync(join(root,'dist','build-manifest.json'),JSON.stringify({buildId:'old-build',buildDigest:'old-digest'}));
   copyFileSync(join(root,'mock-dist','log.js'),join(root,'dist','log.js'));
   copyFileSync(join(root,'mock-dist','config.js'),join(root,'dist','config.js'));
   writeFileSync(join(root,'package.json'),'{"type":"module"}'); writeFileSync(join(root,'package-lock.json'),'{}'); writeFileSync(join(root,'tsconfig.json'),'{}');
   writeFileSync(join(root,'.data/service/app.pid'),String(process.pid));
-  writeFileSync(join(root,'scripts/butler-service.sh'),`#!/bin/sh\nset -eu\ncase "$1" in\n deploy-stop) ${mode==='stop-fail'?'exit 21':'exit 0'};;\n deploy-start)\n  if [ -f "$ROOT/.data/deploy/start-count" ]; then n=$(cat "$ROOT/.data/deploy/start-count"); else n=0; fi; n=$((n+1)); echo $n > "$ROOT/.data/deploy/start-count"\n  ${mode==='start-fail'?'if [ "$n" -eq 1 ]; then exit 22; fi':mode.startsWith('rollback-fail')?'exit 22':''}\n  ${mode==='ready-timeout'?'exit 0':`printf '{"ready":true,"buildId":"%s","buildDigest":"%s"}' "${'${BUTLER_BUILD_ID:-}'}" "${mode==='build-mismatch'?'wrong-digest':'${BUTLER_BUILD_DIGEST:-}'}" > "$ROOT/.data/service/butler.ready"`}\n  exit 0;;\nesac\n`);
+  writeFileSync(join(root,'scripts/butler-service.sh'),`#!/bin/sh\nset -eu\ncase "$1" in\n deploy-stop) ${mode==='stop-fail'?'exit 21':'exit 0'};;\n deploy-start)\n  if [ -f "$ROOT/.data/deploy/start-count" ]; then n=$(cat "$ROOT/.data/deploy/start-count"); else n=0; fi; n=$((n+1)); echo $n > "$ROOT/.data/deploy/start-count"\n  ${mode==='start-fail'?'if [ "$n" -eq 1 ]; then exit 22; fi':mode.startsWith('rollback-fail')?'exit 22':''}\n  ${mode==='ready-timeout'?'exit 0':`pid=$(cat "$ROOT/.data/service/app.pid"); printf '{"ready":true,"buildId":"%s","buildDigest":"%s","pid":%s,"startupId":"mock-start"}' "${'${BUTLER_EXPECTED_BUILD_ID:-${BUTLER_BUILD_ID:-old-build}}'}" "${mode==='build-mismatch'?'wrong-digest':'${BUTLER_EXPECTED_BUILD_DIGEST:-${BUTLER_BUILD_DIGEST:-old-digest}}'}" "$pid" > "$ROOT/.data/service/butler.ready"; echo ready > "$ROOT/.data/service/butler.liveness"`}\n  exit 0;;\nesac\n`);
   // service mock gets a stable root without exposing any real service endpoint.
   const service=readFileSync(join(root,'scripts/butler-service.sh'),'utf8').replace('set -eu','set -eu\nROOT="'+root+'"'); writeFileSync(join(root,'scripts/butler-service.sh'),service); chmodSync(join(root,'scripts/butler-service.sh'),0o700);
   const fakeNode=join(root,'fake-node');
@@ -46,21 +47,35 @@ async function run(mode) {
 }
 
 test('mock deploy script success writes request-specific result and compatibility result', async()=>{
- const r=await run('success'); try { assert.equal(r.status,0); assert.equal(r.result.status,'completed'); assert.ok(r.result.buildDigest); assert.equal(JSON.parse(readFileSync(join(r.root,'.data/deploy/last-result.json'))).id,'test-success'); } finally {r.cleanup();}
+ const r=await run('success'); try { assert.equal(r.status,0); assert.equal(r.result.status,'completed'); assert.ok(r.result.buildDigest); assert.equal(JSON.parse(readFileSync(join(r.root,'.data/deploy/last-result.json'))).id,'test-success'); const file=join(r.root,'.data/deploy/test-success-result.json'), before=readFileSync(file,'utf8'); const replay=spawnSync(process.execPath,[join(r.root,'scripts/butler-deploy.mjs'),'test-success'],{cwd:r.root,env:{...process.env,BUTLER_NODE:join(r.root,'fake-node')},encoding:'utf8'}); assert.notEqual(replay.status,0); assert.equal(readFileSync(file,'utf8'),before); } finally {r.cleanup();}
 });
 for (const mode of ['compile-fail','stop-fail','start-fail','ready-timeout','build-mismatch','quiesce-timeout','rollback-fail','rollback-fail-alert-fail']) test(`mock deploy script records ${mode}`,async()=>{
  const r=await run(mode); try {
    assert.equal(r.status,1); assert.equal(r.result.status,'failed'); assert.ok(r.result.phase);
-   if(mode==='start-fail') assert.equal(r.result.rollback,'restored_and_started');
+   if(mode==='start-fail') assert.equal(r.result.rollback,'restored_and_verified');
    if(mode==='rollback-fail') {
-     assert.equal(r.result.rollback,'restored_start_failed'); assert.equal(r.result.alert_status,'delivered');
+     assert.equal(r.result.rollback,'restored_start_failed'); assert.equal(JSON.parse(readFileSync(join(r.root,'.data/deploy','test-rollback-fail-alert.json'))).status,'delivered');
      const alert=JSON.parse(readFileSync(join(r.root,'.data/deploy/alert.jsonl'),'utf8'));
      assert.ok(alert.embeds[0].description.includes('deployment_id="test-rollback-fail"'));
      assert.doesNotMatch(JSON.stringify(alert),/secret-test-only|package.json|source|error:/i);
    }
    if(mode==='rollback-fail-alert-fail') {
-     assert.equal(r.result.alert_status,'failed');
+     assert.equal(JSON.parse(readFileSync(join(r.root,'.data/deploy','test-rollback-fail-alert-fail-alert.json'))).status,'failed');
      assert.equal(JSON.parse(readFileSync(join(r.root,'.data/deploy','test-rollback-fail-alert-fail-result.json'))).status,'failed');
    }
  } finally {r.cleanup();}
+});
+
+test('restart wrapper keeps JSON build evidence separate from liveness marker',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'butler-ready-contract-'));
+ mkdirSync(join(root,'scripts'),{recursive:true}); mkdirSync(join(root,'dist'),{recursive:true}); mkdirSync(join(root,'.data/service'),{recursive:true}); mkdirSync(join(root,'.data/deploy'),{recursive:true});
+ copyFileSync(resolve('scripts/discord-restart.sh'),join(root,'scripts/discord-restart.sh'));
+ const fake=join(root,'fake-node');
+ writeFileSync(fake,`#!/bin/sh\ncase "$*" in\n *dist/main.js*) printf 'ready\\n' > "$BUTLER_RESTART_READY_FILE"; printf '{"ready":true,"buildId":"fixture","buildDigest":"abc","pid":1,"startupId":"test"}' > "$BUTLER_SERVICE_READY_FILE"; exec sleep 30;;\n *--record-baseline*) exit 0;;\nesac\nexit 0\n`); chmodSync(fake,0o700);
+ const child=spawn('sh',[join(root,'scripts/discord-restart.sh')],{cwd:root,env:{...process.env,BUTLER_NODE:fake,BUTLER_SERVICE_READY_FILE:join(root,'.data/service/butler.ready'),BUTLER_SERVICE_LIVENESS_FILE:join(root,'.data/service/butler.liveness'),BUTLER_READY_TIMEOUT_SECONDS:'5'},stdio:'ignore'});
+ try {
+  for(let i=0;i<100&&!existsSync(join(root,'.data/service/butler.liveness'));i++) await delay(20);
+  assert.equal(readFileSync(join(root,'.data/service/butler.liveness'),'utf8').trim(),'ready');
+  assert.deepEqual(JSON.parse(readFileSync(join(root,'.data/service/butler.ready'),'utf8')),{ready:true,buildId:'fixture',buildDigest:'abc',pid:1,startupId:'test'});
+ } finally { child.kill('SIGTERM'); await new Promise(resolve=>child.once('exit',resolve)); rmSync(root,{recursive:true,force:true}); }
 });
