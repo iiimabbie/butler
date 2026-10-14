@@ -13,7 +13,7 @@ const store = new Store(join(root, 'test.sqlite'));
 try {
   const session = store.newSession();
   const input = store.addMessage(session, 'user', 'test');
-  const runtime = createScheduleToolRuntime({ store, sourceChannelId: '123', creatorId: '456', isOutputChannelAllowed: () => true, now: () => new Date('2026-10-10T00:00:00Z') });
+  const runtime = createScheduleToolRuntime({ store, creatorId: '456', isOutputChannelAllowed: () => true, now: () => new Date('2026-10-10T00:00:00Z') });
   const before = JSON.stringify(scheduleToolDefinitions);
   let requests = 0;
   const fetcher = async (url, options) => {

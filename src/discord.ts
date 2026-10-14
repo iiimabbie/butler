@@ -280,7 +280,7 @@ export class DiscordHandler {
             weatherTools: this.weatherTools,
             peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight) : undefined,
             skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
-            scheduleTools: this.scheduleTools(message.channelId, message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+            scheduleTools: this.scheduleTools(message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
             imageTools: this.imageTools(attachmentFiles, message.channelId, runtime.settings.image, config.attachmentDir),
             reasoningEffort: this.store.channelReasoningEffort(message.channelId),
             onProgress: event => progress?.event(event),
@@ -556,7 +556,7 @@ export class DiscordHandler {
     return message;
   }
 
-  private scheduleTools(sourceChannelId: string, creatorId: string, defaultTimezone: string) { return this.store ? createScheduleToolRuntime({ store: this.store, sourceChannelId, creatorId, defaultTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
+  private scheduleTools(creatorId: string, defaultTimezone: string) { return this.store ? createScheduleToolRuntime({ store: this.store, creatorId, defaultTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
   private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string, image: ButlerConfig['image'], attachmentDir: string) { return image ? createImageToolRuntime({ config: { ...image, model: this.store.channelImageModel(channelId) ?? image.model }, attachmentDir, attachmentFiles }) : undefined; }
 
   private async runScheduled(request: ScheduledTaskRequest): Promise<void> {
@@ -564,27 +564,14 @@ export class DiscordHandler {
     const config = commandRuntime.discord;
     const attachmentFiles: Array<{ attachment: string; name: string }> = [];
     const attachmentToolCallIds: string[] = [];
-    const state = this.store.channelState(request.job.sourceChannelId, commandRuntime.discord.defaultModel, commandRuntime.discord.ownerId);
+    const state = this.store.channelState(request.outputChannelId, commandRuntime.discord.defaultModel, commandRuntime.discord.ownerId);
     const session = this.store.newSession();
-    const scheduledInput = this.store.addMessageOnce(session, 'user', request.prompt, { sourceKind: 'scheduled_input', authorId: request.job.creatorId, channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt }, []);
+    const scheduledInput = this.store.addMessageOnce(session, 'user', request.prompt, { sourceKind: 'scheduled_input', authorId: request.job.creatorId, channelId: request.outputChannelId, eventTime: request.run.scheduledAt }, []);
     this.store.updateAttachments(scheduledInput.message.id, []);
     this.memoryCoordinator?.notifyReady();
     const storedInput = this.store.messagesWithSources(session).find(item => item.id === scheduledInput.message.id)!;
     const target = await this.outputChannel(request.outputChannelId);
     if (!target) throw new Error('Scheduled output channel is unavailable');
-    const progress = new ProgressRenderer({
-      send: async content => {
-        const sent = await target.send(formatDiscordUrls(content));
-        return { edit: async updated => {
-          if (sent && typeof sent === 'object' && 'edit' in sent) await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated));
-          else throw new Error('Progress message is not editable');
-        }, delete: async () => {
-          if (sent && typeof sent === 'object' && 'delete' in sent) await (sent as { delete(): Promise<unknown> }).delete();
-          else throw new Error('Progress message is not deletable');
-        } };
-      },
-      log: { logInfo, logWarn, logError },
-    });
     let askSucceeded = false;
     let filesDelivered = false;
     let deliveryAuditAttempted = false;
@@ -598,7 +585,7 @@ export class DiscordHandler {
         transcription: commandRuntime.settings.transcription,
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
-        reasoningEffort: this.store.channelReasoningEffort(request.job.sourceChannelId),
+        reasoningEffort: this.store.channelReasoningEffort(request.outputChannelId),
         hindsight: commandRuntime.hindsight,
         discordTools: createDiscordToolRuntime({
           token: config.token,
@@ -612,15 +599,14 @@ export class DiscordHandler {
         weatherTools: this.weatherTools,
         peopleTools: commandRuntime.hindsight ? createPeopleToolRuntime(commandRuntime.hindsight) : undefined,
         skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
-        scheduleTools: this.scheduleTools(request.job.sourceChannelId, request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
-        imageTools: this.imageTools(attachmentFiles, request.job.sourceChannelId, commandRuntime.settings.image, config.attachmentDir),
+        scheduleTools: this.scheduleTools(request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+        imageTools: this.imageTools(attachmentFiles, request.outputChannelId, commandRuntime.settings.image, config.attachmentDir),
         workspaceDirectory: DEFAULT_WORKSPACE,
         subagent: commandRuntime.settings.subagent,
         subagentCoordinator: this.subagentCoordinator,
-        subagentOrigin: { channelId: request.job.sourceChannelId, outputChannelId: request.outputChannelId, entryKind: 'scheduled', requesterId: request.job.creatorId, triggerInputId: storedInput.id },
-        messageSource: { sourceKind: 'scheduled_input', channelId: request.job.sourceChannelId, eventTime: request.run.scheduledAt },
+        subagentOrigin: { channelId: request.outputChannelId, outputChannelId: request.outputChannelId, entryKind: 'scheduled', requesterId: request.job.creatorId, triggerInputId: storedInput.id },
+        messageSource: { sourceKind: 'scheduled_input', channelId: request.outputChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
-        onProgress: event => progress.event(event),
         onResponseReady: async text => {
           if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
             logInfo('no_reply', { text, replyTo: { channelId: request.outputChannelId, inputId: storedInput.id } });
@@ -647,7 +633,6 @@ export class DiscordHandler {
         },
       });
       askSucceeded = true;
-      await progress.finish('completed');
     } catch (error) {
       let auditError: unknown;
       if (attachmentToolCallIds.length && !deliveryAuditAttempted) {
@@ -655,7 +640,6 @@ export class DiscordHandler {
         try { this.store.updateAttachmentDelivery(attachmentToolCallIds, askSucceeded ? (filesDelivered ? 'delivered' : 'failed_or_unknown') : 'not_sent'); }
         catch (failure) { auditError = failure; }
       }
-      await progress.finish('failed');
       throw auditError ?? error;
     }
   }
@@ -745,7 +729,7 @@ export class DiscordHandler {
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.channelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
           hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight) : undefined,
-          skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.channelId, origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+          skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
           imageTools: this.imageTools(attachmentFiles, origin.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
           subagentCoordinator: this.subagentCoordinator, subagentOrigin: origin, subagentEvent: true,
           discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: origin.outputChannelId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),

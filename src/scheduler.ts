@@ -7,7 +7,6 @@ export type ScheduleRunStatus = 'running' | 'completed' | 'failed' | 'unknown';
 
 export interface ScheduleJob {
   id: string;
-  sourceChannelId: string;
   outputChannelId: string;
   creatorId: string;
   kind: ScheduleKind;
@@ -32,7 +31,6 @@ export interface ScheduleRun {
 }
 
 export interface CreateScheduleInput {
-  sourceChannelId: string;
   outputChannelId: string;
   creatorId: string;
   kind: ScheduleKind;
@@ -46,7 +44,7 @@ export interface CreateScheduleInput {
 export interface SchedulerStore {
   createSchedule(job: ScheduleJob): ScheduleJob;
   getSchedule(id: string): ScheduleJob | undefined;
-  listSchedules(sourceChannelId: string): ScheduleJob[];
+  listSchedules(): ScheduleJob[];
   updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun'>>): ScheduleJob | undefined;
   deleteSchedule(id: string): boolean;
   /** Transaction: if due and eligible, insert running execution (unique job/time) and update nextRun; return undefined if already claimed/not due/disabled. */
@@ -186,7 +184,7 @@ export class Scheduler {
 
   private async execute(job: ScheduleJob, run: ScheduleRun): Promise<void> {
     try {
-      await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}, created in channel ${job.sourceChannelId}. Send the result only to the configured output channel.\n\n${job.content}` });
+      await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}. Send the result only to the configured output channel ${job.outputChannelId}.\n\n${job.content}` });
       this.options.store.finishScheduleRun(run.id, 'completed');
     } catch (error) {
       this.options.log.logError('Scheduled task execution failed', error, { notify: !isHttp429(error), fields: { scheduleId: job.id, runId: run.id } });
