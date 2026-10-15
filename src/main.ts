@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { Hindsight } from './hindsight.js';
 import { MemoryCoordinator } from './memory-coordinator.js';
 import { createWebToolRuntime } from './web-tools.js';
+import { createFireflyToolRuntime } from './firefly-tools.js';
 import { configureLogging, flushLogs, logError, logInfo, logWarn } from './log.js';
 import { isHttp429 } from './tool-errors.js';
 
@@ -29,7 +30,7 @@ try {
     prepareDatabaseDirectory(dbPath);
     const store = new Store(dbPath);
     let current: RuntimeBundle;
-    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
+    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), fireflyTools: createFireflyToolRuntime(candidate.firefly ?? { enabled:false, baseUrl:'http://127.0.0.1:9000', credentialFile:'/nonexistent', allowedOwnerId:'100000000000000001', allowedChannelId:'1557273986780368938' }, store), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;

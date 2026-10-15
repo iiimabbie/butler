@@ -11,6 +11,7 @@ export type ButlerConfig = {
   discord?: { token?: string; ownerId?: string; channelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
+  firefly?: { enabled: boolean; baseUrl: string; credentialFile: string; allowedOwnerId: string; allowedChannelId: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
   google?: GoogleClientConfig;
@@ -33,7 +34,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
 function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'ui', 'paths', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'firefly', 'ui', 'paths', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -61,6 +62,17 @@ function validateConfig(raw: unknown): ButlerConfig {
       const modelContextTokens = section.modelContextTokens;
       if (modelContextTokens !== undefined && (!isRecord(modelContextTokens) || Object.entries(modelContextTokens).some(([model, limit]) => !model.trim() || !Number.isSafeInteger(limit) || (limit as number) <= 0))) throw new Error('Butler config llm.modelContextTokens must map model IDs to positive integers');
       config.llm = { baseUrl, apiKey: string('apiKey'), model: string('model'), maxContextTokens: (maxContextTokens as number | undefined) ?? 150000, modelContextTokens: (modelContextTokens as Record<string, number> | undefined) ?? {} };
+    } else if (name === 'firefly') {
+      const enabled = section.enabled;
+      if (typeof enabled !== 'boolean') throw new Error('Butler config firefly.enabled must be boolean');
+      const baseUrl = requireSetting(string('baseUrl'), 'firefly.baseUrl');
+      if (baseUrl !== 'http://127.0.0.1:9000') throw new Error('Butler config firefly.baseUrl must be http://127.0.0.1:9000');
+      const credentialFile = requireSetting(string('credentialFile'), 'firefly.credentialFile');
+      if (!isAbsolute(credentialFile)) throw new Error('Butler config firefly.credentialFile must be an absolute path');
+      const allowedOwnerId = requireSetting(string('allowedOwnerId'), 'firefly.allowedOwnerId');
+      const allowedChannelId = requireSetting(string('allowedChannelId'), 'firefly.allowedChannelId');
+      if (allowedOwnerId !== '100000000000000001' || allowedChannelId !== '1557273986780368938') throw new Error('Butler config Firefly requester restrictions are fixed');
+      config.firefly = { enabled, baseUrl, credentialFile, allowedOwnerId, allowedChannelId };
     } else if (name === 'web') {
       if (section.provider !== 'tavily') throw new Error('Butler config web.provider must be tavily');
       const baseUrl = string('baseUrl');

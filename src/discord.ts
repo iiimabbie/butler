@@ -17,6 +17,7 @@ import { Hindsight } from './hindsight.js';
 import { ProgressRenderer } from './progress.js';
 import { Scheduler, type ScheduledTaskRequest } from './scheduler.js';
 import { createScheduleToolRuntime } from './schedule-tools.js';
+import { fireflyInteractiveOrigin, fireflyNonInteractiveOrigin } from './firefly-tools.js';
 import { createPeopleToolRuntime } from './people-tools.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
@@ -37,7 +38,7 @@ export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
-export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hindsight?: Hindsight };
+export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; fireflyTools: import('./firefly-tools.js').FireflyRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
@@ -291,6 +292,8 @@ export class DiscordHandler {
             googleTools: this.googleTools,
             localTools: this.localTools,
             webTools: runtime.webTools,
+            fireflyTools: runtime.fireflyTools,
+            executionOrigin: fireflyInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
             weatherTools: this.weatherTools,
             peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => { const token = this.store.messageMemoryWriteToken(stored.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
             memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(stored.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
@@ -615,6 +618,8 @@ export class DiscordHandler {
         googleTools: this.googleTools,
         localTools: this.localTools,
         webTools: commandRuntime.webTools,
+        fireflyTools: commandRuntime.fireflyTools,
+        executionOrigin: fireflyNonInteractiveOrigin('scheduler'),
         weatherTools: this.weatherTools,
         peopleTools: commandRuntime.hindsight ? createPeopleToolRuntime(commandRuntime.hindsight, () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
         memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
@@ -758,7 +763,7 @@ export class DiscordHandler {
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
-          hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
+          hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, fireflyTools: runtime.fireflyTools, executionOrigin: fireflyNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
           memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),

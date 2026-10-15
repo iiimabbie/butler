@@ -16,6 +16,7 @@ import type { PeopleToolRuntime } from './people-tools.js';
 import type { SkillsToolRuntime } from './skills.js';
 import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
+import { isAuthorizedFireflyOrigin, type FireflyRuntime, type FireflyIdentity } from './firefly-tools.js';
 import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
 import { Hindsight } from './hindsight.js';
@@ -59,6 +60,8 @@ export interface AgentConfig {
   skillsTools?: SkillsToolRuntime;
   scheduleTools?: ScheduleToolRuntime;
   imageTools?: ImageToolRuntime;
+  fireflyTools?: FireflyRuntime;
+  executionOrigin?: FireflyIdentity;
   reasoningEffort?: ReasoningEffort;
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
@@ -137,7 +140,7 @@ function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Reco
           description: '用使用者對話語言（預設繁體中文）寫此次操作的簡短任務標籤，例如「查找會議相關郵件」。只描述動作與對象；不要寫工具名、原始參數或密鑰、狀態符號、尚未發生的結果。',
         },
       },
-      required: [...((parameters.required as string[] | undefined) ?? []), 'label'],
+      required: Array.from(new Set([...((parameters.required as string[] | undefined) ?? []), 'label'])),
     },
   };
 }
@@ -183,7 +186,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
     const availableTools = (config.deploymentResultEvent
       ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
-      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFireflyOrigin(config.executionOrigin) && config.fireflyTools ? config.fireflyTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
     const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
@@ -490,6 +493,9 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = call.name === 'memory_recall'
         ? await config.hindsight.recall(query)
         : await config.hindsight.reflect(query);
+    } else if (call.name.startsWith('firefly_')) {
+      if (executionSource !== 'agent' || !config.fireflyTools || !isAuthorizedFireflyOrigin(config.executionOrigin)) throw new ToolUsageError('Firefly tools are unavailable for this execution origin');
+      result = await config.fireflyTools.execute(call.name, runtimeArgs, config.executionOrigin!);
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
       result = await config.weatherTools.execute(call.name, runtimeArgs);

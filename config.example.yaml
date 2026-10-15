@@ -25,6 +25,14 @@ web:
   baseUrl: https://api.tavily.com
   apiKey: YOUR_TAVILY_API_KEY
 
+# Optional Firefly III tools. Disabled unless explicitly enabled.
+firefly:
+  enabled: false
+  baseUrl: http://127.0.0.1:9000
+  credentialFile: /absolute/path/to/private/firefly-api.env
+  allowedOwnerId: "100000000000000001"
+  allowedChannelId: "1557273986780368938"
+
 # Optional. Omit to disable the web UI.
 ui:
   port: 3211
