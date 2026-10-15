@@ -35,7 +35,7 @@ test('ask exposes only scoped status tool for deployment events and keeps genera
   const scoped=await inspect({deploymentResultEvent:true,deploymentResultStatus:()=>f.store.deploymentResultEvidence('dep-x')});
   assert.deepEqual(scoped.map(tool=>tool.name),['deployment_result_status']);
   const none=await inspect({deploymentResultEvent:true}); assert.deepEqual(none,[]);
-  const general=await inspect({}); assert.ok(general.some(tool=>tool.name==='current_time'));
+  const general=await inspect({}); assert.ok(!general.some(tool=>tool.name==='current_time'));
  } finally { f.close(); }
 });
 

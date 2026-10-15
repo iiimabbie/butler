@@ -107,10 +107,6 @@ const tools = [
   memoryTagsDefinition,
   knowledgePageCreateDefinition,
   {
-    type: 'function', name: 'current_time', description: 'Get the current local time.',
-    parameters: { type: 'object', properties: {}, required: [], additionalProperties: false },
-  },
-  {
     type: 'function', name: 'history_list', description: 'List stored tool-call records for a session, newest first; Omit session_id or pass an empty string ("") to use the current session; a non-empty string selects that session. Use this to locate earlier operations and their record IDs. offset counts records (default 0); limit defaults to 20, maximum 100. Each result contains a 500-character preview; use the page next_offset for more records and history_get with the record id for the remaining result.',
     parameters: { type: 'object', properties: { ...historyPageSchema.properties, session_id: { type: 'string' } }, required: [], additionalProperties: false },
   },
@@ -555,7 +551,6 @@ function emitProgress(config: AgentConfig, event: ProgressEvent): void {
 }
 
 function runTool(store: Store, session: string, name: string, args: Record<string, unknown>, transcriptTimezone: string): unknown {
-  if (name === 'current_time') return { iso: new Date().toISOString(), local: new Date().toString() };
   if (name === 'journal_transcript_by_date') {
     const date = validateTranscriptDate(args.date);
     const { offset, limit } = pageArgs(args, 4000, 100_000);
