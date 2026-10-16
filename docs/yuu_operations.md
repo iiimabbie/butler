@@ -43,18 +43,18 @@ tail -n 80 .data/service/butler.log
 tail -f .data/service/butler.log
 ```
 
-第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。每次部署 log 位於 `.data/deploy/<UUID>.log`，最近一次結果位於 `.data/deploy/last-result.json`；worker 啟動錯誤資訊位於 `.data/service/deploy-start-error.json`。
+第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。每次部署 log 位於 `.data/deploy/runs/<UUID>/deploy.log`，最近一次結果仍位於 `.data/deploy/last-result.json`；worker 啟動錯誤資訊位於 `.data/service/deploy-start-error.json`。部署紀錄會自動保留最近 3 次已結束（completed 或 failed）的部署；執行中、待核對及無法確認狀態的紀錄不會刪除。
 
 ```sh
 jq . .data/deploy/last-result.json
 jq . .data/service/deploy-start-error.json
-DEPLOY_LOG="$(ls -t .data/deploy/*.log | head -n 1)" && tail -n 80 "$DEPLOY_LOG"
+DEPLOY_LOG="$(jq -r '.log' .data/deploy/last-result.json)" && tail -n 80 "$DEPLOY_LOG"
 ```
 
 ## 簡單故障處理
 
 1. 先看 `npm run status`，確認服務狀態與 PID 資訊。
-2. 用 `tail -n 80 .data/service/butler.log` 看服務錯誤；部署問題再查看 `.data/deploy/last-result.json`、最近的 `.data/deploy/<UUID>.log`，或 `.data/service/deploy-start-error.json`。
+2. 用 `tail -n 80 .data/service/butler.log` 看服務錯誤；部署問題再查看 `.data/deploy/last-result.json`、最近的 `.data/deploy/runs/<UUID>/deploy.log`，或 `.data/service/deploy-start-error.json`。
 3. 確認沒有工作要保留後，才考慮 `npm restart`；要切換新版時使用 `npm run deploy`。若 `package.json` 或 `package-lock.json` 與 ready baseline 不同，部署會拒絕自動進行。
 
 不要用 `killall` 或不分辨程序的強制終止命令，也不要 reset/清空資料庫。服務不會開機自啟，也不會自動 crash-replay；一般異常不會自動重啟或重播未完成請求。

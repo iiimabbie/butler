@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { DatabaseSync } from 'node:sqlite';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pruneDeploymentRuns } from './deployment-runs.mjs';
 
 const root = path.resolve(process.env.BUTLER_DEPLOY_ROOT || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'));
 const data = path.join(root, '.data');
@@ -10,9 +12,6 @@ const state = path.join(data, 'service');
 const deployDir = path.join(data, 'deploy');
 const lockFile = path.join(state, 'lock');
 const requestId = process.argv[2] === '--locked' ? process.argv[3] : (process.argv[2] || randomUUID());
-const logFile = path.join(deployDir, `${requestId}.log`);
-const resultFile = path.join(deployDir, `${requestId}-result.json`);
-const startedFile = path.join(deployDir, `${requestId}-runner-started`);
 const lastResultFile = path.join(deployDir, 'last-result.json');
 const node = process.env.BUTLER_NODE || process.execPath;
 const service = path.join(root, 'scripts/butler-service.sh');
@@ -40,11 +39,22 @@ if (process.argv[2] !== '--locked') {
   process.exit(locked.status ?? 1);
 }
 const id = process.argv[3];
+if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(id)) throw new Error('Deployment id must be a safe single path segment');
+const runsDir = path.join(deployDir, 'runs');
+const runDir = path.join(runsDir, id);
+const logFile = path.join(runDir, 'deploy.log');
+const resultFile = path.join(runDir, 'result.json');
+const startedFile = path.join(runDir, 'runner-started');
+const alertFile = path.join(runDir, 'alert.json');
 if (await exists(resultFile) || await exists(startedFile)) throw new Error(`Deployment ${id} already started or has a terminal result; runner replay refused`);
+await fs.mkdir(runsDir, { recursive: true, mode: 0o700 });
+await fs.chmod(runsDir, 0o700);
+await fs.mkdir(runDir, { recursive: false, mode: 0o700 });
+await fs.chmod(runDir, 0o700);
 await writeAtomic(startedFile, JSON.stringify({ id, pid: process.pid, startedAt: new Date().toISOString() }));
 await fs.mkdir(state, { recursive: true, mode: 0o700 });
 await fs.chmod(state, 0o700);
-const temp = path.join(deployDir, `dist-${id}`);
+const temp = path.join(runDir, 'build');
 const backup = path.join(deployDir, 'previous-dist');
 const candidate = path.join(root, 'dist');
 let oldDistMoved = false;
@@ -171,6 +181,26 @@ try {
   if (resultRecord.alert_status === 'pending') await sendEmergencyFailureAlert(resultRecord);
   process.exitCode = 1;
 }
+try {
+  const protectedIds = new Set([id]);
+  try {
+    const latest = JSON.parse(await fs.readFile(lastResultFile, 'utf8'));
+    if (typeof latest.id === 'string') protectedIds.add(latest.id);
+  } catch {}
+  const database = path.join(data, 'butler.sqlite');
+  try {
+    await fs.access(database);
+    const db = new DatabaseSync(database, { readOnly: true });
+    try {
+      for (const row of db.prepare("SELECT id FROM deployment_requests WHERE status IN ('queued','running','needs_reconciliation')").all()) {
+        if (typeof row.id === 'string') protectedIds.add(row.id);
+      }
+    } finally { db.close(); }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  await pruneDeploymentRuns(deployDir, [...protectedIds]);
+} catch (error) { console.warn(`Deployment run pruning skipped: ${error instanceof Error ? error.message : String(error)}`); }
 async function exists(file) { try { await fs.access(file); return true; } catch { return false; } }
 async function readReadyEvidence(expectedBuildId, expectedBuildDigest) {
   const rawEvidence = await fs.readFile(path.join(state, 'butler.ready'), 'utf8');
@@ -190,7 +220,6 @@ async function readReadyEvidence(expectedBuildId, expectedBuildDigest) {
 }
 async function sendEmergencyFailureAlert(result) {
   // The terminal deployment result is immutable; alert delivery has a separate intent/outcome record.
-  const alertFile = path.join(deployDir, `${result.id}-alert.json`);
   await writeAtomic(alertFile, JSON.stringify({ id: result.id, status: 'attempted_unknown', at: new Date().toISOString() }));
   try {
     const configModule = await import(pathToFileURL(path.join(root, 'dist/config.js')).href).catch(() => import(pathToFileURL(path.join(deployDir, 'previous-dist/config.js')).href));

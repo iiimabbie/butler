@@ -690,7 +690,7 @@ export class DiscordHandler {
     const active = this.store.activeDeploymentRequest();
     if (active?.status === 'queued' && !this.stopping && !this.deploying) this.localTools?.startQueuedDeploy();
     if (active?.status === 'running' || active?.status === 'needs_reconciliation') {
-      const resultPath = join(root, '.data/deploy', `${active.id}-result.json`);
+      const resultPath = join(root, '.data/deploy/runs', String(active.id), 'result.json');
       if (existsSync(resultPath)) {
         try {
           const result = JSON.parse(readFileSync(resultPath, 'utf8')) as { id: string; status: string; [key: string]: unknown };
