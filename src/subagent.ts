@@ -48,6 +48,57 @@ const CLOSEOUT_TURNS = 4;
 const parentMessageDefinition = { type: 'function', name: 'subagent_parent_message', description: 'Child-only communication with the parent. Report meaningful progress with wait_for_reply=false. If blocked, missing essential information or needing a decision, send a concrete question with true and wait for the parent response; do not guess or address the end user. Explain the blocker, what you already checked, and exactly what answer you need.', parameters: { type: 'object', properties: { message: string, wait_for_reply: { type: 'boolean' } }, required: ['message', 'wait_for_reply'], additionalProperties: false } };
 const busy = new Set<string>();
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const ERROR_BODY_LIMIT = 8 * 1024;
+function safeIdentifier(value: unknown, maxLength: number): string | undefined {
+  return typeof value === 'string' && value.length <= maxLength && /^[A-Za-z0-9_.-]+$/.test(value) ? value : undefined;
+}
+function safeParameter(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length <= 64 && /^[A-Za-z0-9_.-]+(?:\[[0-9]+\][A-Za-z0-9_.-]*)*$/.test(value) ? value : undefined;
+}
+async function readErrorMetadata(response: Response): Promise<void> {
+  let text = '';
+  let responseBytes = 0;
+  let truncated = false;
+  try {
+    const reader = response.body?.getReader();
+    if (reader) {
+      const decoder = new TextDecoder();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const remaining = ERROR_BODY_LIMIT + 1 - responseBytes;
+        const part = value.subarray(0, Math.max(0, remaining));
+        responseBytes += part.byteLength;
+        text += decoder.decode(part, { stream: true });
+        if (value.byteLength > part.byteLength || responseBytes > ERROR_BODY_LIMIT) {
+          truncated = true;
+          await reader.cancel().catch(() => undefined);
+          break;
+        }
+      }
+      text += decoder.decode();
+    }
+  } catch { /* metadata collection must not replace the fixed HTTP failure */ }
+  let parsed: unknown;
+  let validJson = false;
+  if (!truncated) {
+    try { parsed = JSON.parse(text); validJson = true; } catch { /* non-JSON error response */ }
+  }
+  const error = isRecord(parsed) && isRecord(parsed.error) ? parsed.error : undefined;
+  const upstreamRequestId = safeIdentifier(response.headers.get('x-request-id') ?? response.headers.get('request-id'), 128);
+  try {
+    logInfo('subagent_http_error', {
+      status: response.status,
+      ...(upstreamRequestId ? { upstreamRequestId } : {}),
+      responseBytes,
+      truncated,
+      validJson,
+      ...(error && safeIdentifier(error.code, 64) ? { errorCode: safeIdentifier(error.code, 64) } : {}),
+      ...(error && safeIdentifier(error.type, 64) ? { errorType: safeIdentifier(error.type, 64) } : {}),
+      ...(error && safeParameter(error.param) ? { errorParam: safeParameter(error.param) } : {}),
+    });
+  } catch { /* logging must not mask the original HTTP error */ }
+}
 const refusal = (output: Record<string, unknown>[]) => output.some(item => item.type === 'refusal' || item.status === 'incomplete' || (item.type === 'message' && Array.isArray(item.content) && item.content.some(block => isRecord(block) && block.type === 'refusal')));
 function validateOutput(value: unknown): Record<string, unknown>[] {
   if (!Array.isArray(value) || value.some(item => !isRecord(item))) throw new Error('Subagent response output must contain only objects');
@@ -114,7 +165,10 @@ export async function runSubagent(config: SubagentConfig, options: SubagentRunCo
       const timeout = AbortSignal.timeout(config.timeoutMs ?? 120000);
       const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
       const response = await fetcher(`${options.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers: { 'content-type': 'application/json', ...(options.apiKey ? { authorization: `Bearer ${options.apiKey}` } : {}) }, body: JSON.stringify({ model, input, tools: stopping ? tools.filter(tool => closeoutTools.has(tool.name) || tool.name === 'subagent_parent_message') : tools, store: false }), signal });
-      if (!response.ok) throw new Error(`Subagent Responses request failed with HTTP ${response.status}`);
+      if (!response.ok) {
+        await readErrorMetadata(response);
+        throw new Error(`Subagent Responses request failed with HTTP ${response.status}`);
+      }
       const body: unknown = await response.json();
       if (!isRecord(body) || body.status !== 'completed' || (body.output_text !== undefined && typeof body.output_text !== 'string')) throw new Error('Subagent response is incomplete or malformed');
       const output = validateOutput(body.output);
