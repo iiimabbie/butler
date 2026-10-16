@@ -1,0 +1,17 @@
+FROM ghcr.io/vectorize-io/hindsight:1.0.0@sha256:a88678c038b0e4340822b02a5efc566c56d8176b5bffa731bc433fd37f978e4c
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir --target=/app/api/.venv/lib/python3.11/site-packages PyMuPDF==1.26.7
+USER hindsight
+
+COPY --chown=hindsight:hindsight butler-file-parser.py /tmp/butler.py
+COPY --chown=hindsight:hindsight patch-butler-parser-v1.py /tmp/patch-butler-parser.py
+RUN python /tmp/patch-butler-parser.py && rm /tmp/patch-butler-parser.py /tmp/butler.py
+
+COPY --chown=hindsight:hindsight patch-request-defaults-v1.py /tmp/patch-request-defaults.py
+RUN python /tmp/patch-request-defaults.py && rm /tmp/patch-request-defaults.py
+
+COPY --chown=hindsight:hindsight task-recovery.py /app/api/hindsight_api/engine/task_recovery.py
+COPY --chown=hindsight:hindsight patch-task-recovery-v1.py /tmp/patch-task-recovery.py
+RUN python /tmp/patch-task-recovery.py && rm /tmp/patch-task-recovery.py

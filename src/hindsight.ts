@@ -136,8 +136,10 @@ export class Hindsight {
   async getKnowledgePage(pageId: string): Promise<Record<string, unknown>> {
     const result = await this.get(`${this.bankUrl()}/knowledge-base/pages/${encodeURIComponent(pageId)}`);
     const page = asRecord(result);
-    if (!page || page.id !== pageId || typeof page.name !== 'string' || !(page.body === null || typeof page.body === 'string') || typeof page.markdown !== 'string' || typeof page.description !== 'string') throw new Error('Hindsight knowledge page response is invalid');
-    return page;
+    if (!page || page.id !== pageId || typeof page.name !== 'string' || !(page.body === null || typeof page.body === 'string') || typeof page.markdown !== 'string' || !(page.description === null || typeof page.description === 'string')) throw new Error('Hindsight knowledge page response is invalid');
+    // Hindsight 1.0.0 permits null for a page without a source description; keep
+    // Butler's downstream string contract while rejecting missing/invalid fields.
+    return { ...page, description: page.description ?? '' };
   }
 
   async createKnowledgeFolder(name: string, writeAllowed?: () => boolean): Promise<Record<string, unknown>> {

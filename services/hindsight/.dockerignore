@@ -1,5 +1,9 @@
 *
 !Dockerfile
+!Dockerfile.v1.0.0
+!patch-request-defaults-v1.py
+!patch-task-recovery-v1.py
+!patch-butler-parser-v1.py
 
 !patch-request-defaults.py
 !task-recovery.py

@@ -7,7 +7,7 @@ Local Hindsight service for Butler shared memory and isolated evaluation. Butler
 - Docker Engine with Compose
 - A private `.env` populated from the specifically authorized local CPA and Umiro embedding settings
 
-The pinned image is `ghcr.io/vectorize-io/hindsight:0.10.2`. The API binds only to `127.0.0.1:18888`; embedded PostgreSQL is published only on host loopback at `127.0.0.1:15432`. The named volume `butler-hindsight-evaluation-data` persists embedded PostgreSQL state. The CPU reranker uses Hindsight's local `cross-encoder/ms-marco-MiniLM-L-6-v2` model. The official image includes local ML support and model preload.
+The 2026-10-05 evaluation used the pinned `ghcr.io/vectorize-io/hindsight:0.10.2` image, with API/PostgreSQL bound to `127.0.0.1:18888` and `127.0.0.1:15432`, and data persisted in `butler-hindsight-evaluation-data`. This is historical evaluation configuration, not a statement of the current deployed version. The checked-in `compose.yaml` now builds the 1.0.0 candidate; see the isolated-upgrade section below. The 0.10.2 CPU reranker used Hindsight's local `cross-encoder/ms-marco-MiniLM-L-6-v2` model.
 
 ## Local PostgreSQL connection
 
@@ -53,7 +53,7 @@ docker volume rm butler-hindsight-evaluation-data
 
 Butler no longer sends `budget` or `max_tokens` on automatic recall, memory tools or people recall/reflect. Its old `memory.recallBudget`, `reflectBudget`, `maxTokens` keys are ignored; transport timeout remains client-owned.
 
-This deployment uses `butler-hindsight:0.10.2-central-defaults`. Stock 0.10.2 HTTP request models hard-code defaults (Recall mid/4096; Reflect low/4096); `recall_max_tokens` in bank configuration is not the HTTP Recall request default. `patch-request-defaults.py` exposes **local extension variables**, not stock upstream settings:
+Historical 2026-10-08 0.10.2 deployment note: that deployment used `butler-hindsight:0.10.2-central-defaults`. Stock 0.10.2 HTTP request models hard-code defaults (Recall mid/4096; Reflect low/4096); `recall_max_tokens` in bank configuration is not the HTTP Recall request default. `patch-request-defaults.py` exposed **local extension variables**, not stock upstream settings. The current checked-in compose build uses the v1 candidate and its `patch-request-defaults-v1.py` installer; the historical 0.10.2 deployment claim does not describe current deployment state. The defaults below are the historical 0.10.2 extension values:
 
 - `HINDSIGHT_API_REQUEST_RECALL_BUDGET=mid`
 - `HINDSIGHT_API_REQUEST_RECALL_MAX_TOKENS=1200`
@@ -68,7 +68,7 @@ Verified: live parameter-free Recall used budget=60, merged 246 candidates, rera
 
 Both image patches assert exact upstream matches and fail build on version drift. Recheck them before upgrading. Source and bank backups for this change are in `.data/hindsight-central-20261008-085612/`; the previous image is `butler-hindsight:0.10.2-jev20k`.
 
-## Task recovery (2026-10-08)
+## Historical 0.10.2 task recovery (2026-10-08)
 
 The pinned 0.10.2 image retains its native short worker retry schedule (three retries, 60 seconds by default). After that schedule is exhausted, only `batch_retain` and `refresh_mental_model` tasks with confirmed transient remote-provider errors are rescheduled as the same persistent operation: 300 seconds, then 900 seconds, then at least 1800 seconds for every later retry. The poller persists the pending status, retry count, and next retry time; it releases the worker slot and resumes the existing payload and operation after the delay. A blocked retain therefore continues to preserve same-document ordering; new chat remains collected by Butler and is not resent as an alternate recovery path.
 
@@ -80,7 +80,14 @@ Classification delegates to the image's existing typed `remote_retry` classifier
 
 `compose.yaml` sets `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE=Traditional Chinese (Taiwan)` as the single output-language policy for retain, observations, reflect, and their generated summaries. Missions and Butler's person-summary prompt describe content and attribution, not output language. Changing this system-level environment setting requires recreating the Hindsight container; it does not rewrite existing memories. Butler does not supply missions or language overrides when creating banks.
 
-### Knowledge perspective (2026-10-10)
+### Isolated Hindsight 1.0.0 upgrade candidate
+
+The checked-in `compose.yaml` also builds `butler-hindsight:1.0.0-central-defaults` from `Dockerfile.v1.0.0`; it uses the evaluation container name, ports `127.0.0.1:18888`/`127.0.0.1:15432`, and `butler-hindsight-evaluation-data` volume. `compose.upgrade.yaml` uses the same image build but a separate container, ports `127.0.0.1:28889`/`127.0.0.1:25433`, and only the separately restored `butler-hindsight-restore-verify-data` volume, with the worker disabled during startup/migration validation. These checked-in configurations describe candidate/evaluation setups and do not establish which version is currently deployed. Do not use the upgrade compose against the production volume or enable its worker while copied queued tasks may exist.
+
+The v1 patch installers fail closed on exact upstream anchors. They preserve the Butler parser, 20k context guard, request defaults, global reranker cap, and typed transient long-retry extension. Validate each patch in the image after build; a successful Docker build alone is not proof of behavioral compatibility. The candidate environment must retain the existing Voyage `voyage/voyage-4` / 1024-dimension embedding configuration; no model or dimension switch is part of this upgrade.
+
+The consistency backup for this rehearsal is stored under the restricted local path `backups/hindsight/upgrade-v1.0.0-20261015T023205Z/`; it contains sensitive database and configuration material and must not be copied into reports or committed. It was made from the stopped production volume, checksum verified, restored into a separate Docker volume, and opened successfully with the old image before the v1 migration test. This is a rehearsal backup, not authorization to switch production.
+
 
 The formal `butler-discord` bank stores `retain_mission`, `observations_mission`, and `reflect_mission` as bank configuration overrides (persisted by Hindsight, not injected by Butler or compose). Retain and observations use explicit third-person subjects, including Renee's own experiences. Reflect uses third person for reusable knowledge, Mental Models and person pages; Renee dialogue may use first person without changing event participants. Original quotations and diaries retain their authors' pronouns. Legacy ambiguous pronouns must not be assumed to refer to Renee.
 

@@ -1,8 +1,9 @@
 services:
   hindsight:
-    image: butler-hindsight:0.10.2-central-defaults
+    image: butler-hindsight:1.0.0-central-defaults
     build:
       context: .
+      dockerfile: Dockerfile.v1.0.0
     container_name: butler-hindsight-evaluation
     restart: unless-stopped
     env_file:
