@@ -56,6 +56,8 @@ export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(rout
 
 export class DiscordHandler {
   private readonly queues = new Map<string, Promise<void>>();
+  private readonly backgroundQueues = new Map<string, Promise<void>>();
+  private readonly backgroundOutputChannels = new Map<string, string>();
   private readonly ingressTails = new Map<string, Promise<void>>();
   private readonly activeIngestions = new Set<Promise<void>>();
   private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number }>();
@@ -102,7 +104,7 @@ export class DiscordHandler {
       persistAnswer: (id, callId, answer, stopRequested) => { this.store.answerSubagentQuestion(id, callId, answer, stopRequested); },
       onIdle: () => { if (this.deploying) void this.publishQuiesced(); else if (!this.stopping) this.localTools?.startQueuedDeploy(); },
     }, this.store.allSubagentRuns() as unknown as import('./subagent-coordinator.js').SubagentSnapshot[], this.store.pendingSubagentEvents() as unknown as SubagentEvent[]);
-    this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0 && this.subagentCoordinator.prepareQueuedDeploy());
+    this.localTools?.setDeploymentQueueIdleCheck(() => this.queues.size === 0 && this.backgroundQueues.size === 0 && this.subagentCoordinator.prepareQueuedDeploy());
   }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
@@ -121,14 +123,14 @@ export class DiscordHandler {
     await this.memoryCoordinator?.quiesce();
     await this.scheduler?.stop();
     await Promise.allSettled([...this.activeIngestions]);
-    await Promise.allSettled([...this.queues.values()]);
+    await Promise.allSettled([...this.queues.values(), ...this.backgroundQueues.values()]);
     await this.memoryCoordinator?.close();
     await this.localTools?.close();
     await this.subagentCoordinator.drain();
   }
 
   queueStatus(channelId: string): 'idle' | 'busy' { return this.queues.has(channelId) ? 'busy' : 'idle'; }
-  canStopChannel(channelId: string): boolean { return !this.queues.has(channelId) && !this.ingressTails.has(channelId) && !this.activeAsk.has(channelId) && (this.workCounts.get(channelId) ?? 0) === 0; }
+  canStopChannel(channelId: string): boolean { return !this.queues.has(channelId) && !this.ingressTails.has(channelId) && !this.activeAsk.has(channelId) && (this.workCounts.get(channelId) ?? 0) === 0 && ![...this.backgroundOutputChannels.values()].includes(channelId); }
 
   private reserveIngress(channelId: string): { ready: Promise<void>; release: () => void } {
     const ready = this.ingressTails.get(channelId) ?? Promise.resolve();
@@ -140,9 +142,9 @@ export class DiscordHandler {
   }
 
   private async publishQuiesced(): Promise<void> {
-    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
+    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.backgroundQueues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
     await this.memoryCoordinator?.quiesce();
-    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
+    if (!this.deployRequest || !this.deploySchedulerPaused || this.queues.size !== 0 || this.backgroundQueues.size !== 0 || this.activeIngestions.size !== 0 || this.localTools?.activeCount !== 0 || this.subagentCoordinator.activeCount !== 0 || this.deploymentNotifications.size !== 0) return;
     const state = fileURLToPath(new URL('../.data/service/', import.meta.url));
     const temporary = `${state}deploy-quiesced-${this.deployRequest.id}.tmp`;
     writeFileSync(temporary, JSON.stringify({ ...this.deployRequest, pid: process.pid }), { mode: 0o600 });
@@ -561,7 +563,7 @@ export class DiscordHandler {
     });
   }
 
-  enqueueScheduled(request: ScheduledTaskRequest): Promise<void> { const writeToken = this.store.memoryWriteToken(request.outputChannelId, request.outputChannelId) ?? null; return this.enqueue(request.outputChannelId, () => this.runScheduled(request, writeToken)); }
+  enqueueScheduled(request: ScheduledTaskRequest): Promise<void> { const writeToken = this.store.memoryWriteToken(request.outputChannelId, request.outputChannelId) ?? null; return this.enqueueBackground(request.job.id, request.outputChannelId, () => this.runScheduled(request, writeToken)); }
 
   private startTyping(channelId: string, sendTyping?: () => Promise<unknown>): () => void {
     if (!sendTyping) return () => {};
@@ -643,9 +645,6 @@ export class DiscordHandler {
         scheduleTools: this.scheduleTools(request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
         imageTools: this.imageTools(attachmentFiles, request.outputChannelId, commandRuntime.settings.image, config.attachmentDir),
         workspaceDirectory: DEFAULT_WORKSPACE,
-        subagent: commandRuntime.settings.subagent,
-        subagentCoordinator: this.subagentCoordinator,
-        subagentOrigin: { channelId: request.outputChannelId, outputChannelId: request.outputChannelId, entryKind: 'scheduled', requesterId: request.job.creatorId, triggerInputId: storedInput.id, memoryWriteToken: this.store.messageMemoryWriteToken(storedInput.id) ?? null } as import('./subagent-coordinator.js').SubagentSnapshot['origin'],
         messageSource: { sourceKind: 'scheduled_input', channelId: request.outputChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
         onResponseReady: async text => {
@@ -750,7 +749,7 @@ export class DiscordHandler {
     if (this.stopping || this.deploying) return;
     const origin = this.subagentCoordinator.status(event.subagentId, event.parentSession)?.origin;
     if (!origin) return;
-    void this.enqueue(origin.channelId, async () => {
+    const work = async () => {
       if (this.stopping || this.deploying) return;
       const current = this.subagentCoordinator.event(event.id);
       const snapshot = this.subagentCoordinator.status(event.subagentId, event.parentSession);
@@ -811,7 +810,25 @@ export class DiscordHandler {
         if (started) this.subagentCoordinator.updateEvent(event.id, 'failed_unknown');
         logError(`Subagent parent event failed event=${event.id}`, error, { mention: !isHttp429(error) });
       }
-    }).catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
+    };
+    const queued = this.enqueue(origin.channelId, work);
+    void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
+  }
+
+  private enqueueBackground(key: string, outputChannelId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.backgroundQueues.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      this.backgroundOutputChannels.set(key, outputChannelId);
+      try { await work(); }
+      finally { this.backgroundOutputChannels.delete(key); }
+    });
+    this.backgroundQueues.set(key, next);
+    void next.finally(() => {
+      if (this.backgroundQueues.get(key) === next) this.backgroundQueues.delete(key);
+      if (this.deploying) void this.publishQuiesced();
+      if (this.backgroundQueues.size === 0 && this.queues.size === 0 && !this.stopping) this.localTools?.startQueuedDeploy();
+    }).catch(() => undefined);
+    return next;
   }
 
   private enqueue(channelId: string, work: () => Promise<void>): Promise<void> {
@@ -825,7 +842,7 @@ export class DiscordHandler {
       else this.workCounts.delete(channelId);
       if (this.queues.get(channelId) === next) this.queues.delete(channelId);
       if (this.deploying) void this.publishQuiesced();
-      if (this.queues.size === 0) this.localTools?.startQueuedDeploy();
+      if (this.queues.size === 0 && this.backgroundQueues.size === 0) this.localTools?.startQueuedDeploy();
     }).catch(() => undefined);
     return next;
   }

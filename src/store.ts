@@ -34,11 +34,11 @@ export interface MemoryBatch { operationId: string; payload: string; sourceMessa
 
 export interface SessionOpeningContext { channelId: string; messageId: string; authorId: string; createdAt: string; content: string; attachments: Array<{ filename: string; mimeType: string }> }
 
-type ScheduleDbRow = { id: string; output_channel_id: string; creator_id: string; kind: 'cron' | 'reminder'; content: string; cron: string | null; run_at: string | null; timezone: string; enabled: number; next_run: string | null; created_at: string; updated_at: string };
+type ScheduleDbRow = { id: string; output_channel_id: string; creator_id: string; kind: 'cron' | 'reminder'; notify: 'always' | 'on_event'; content: string; cron: string | null; run_at: string | null; timezone: string; enabled: number; next_run: string | null; created_at: string; updated_at: string };
 type ScheduleRunDbRow = { id: string; job_id: string; scheduled_at: string; status: 'running' | 'completed' | 'failed' | 'unknown'; claimed_at: string; finished_at: string | null; error: string | null };
 
 function scheduleFromRow(row: ScheduleDbRow): ScheduleJob {
-  return { id: row.id, outputChannelId: row.output_channel_id, creatorId: row.creator_id, kind: row.kind, content: row.content, cron: row.cron, runAt: row.run_at, timezone: row.timezone, enabled: row.enabled === 1, nextRun: row.next_run, createdAt: row.created_at, updatedAt: row.updated_at };
+  return { id: row.id, outputChannelId: row.output_channel_id, creatorId: row.creator_id, kind: row.kind, notify: row.notify, content: row.content, cron: row.cron, runAt: row.run_at, timezone: row.timezone, enabled: row.enabled === 1, nextRun: row.next_run, createdAt: row.created_at, updatedAt: row.updated_at };
 }
 
 function runFromRow(row: ScheduleRunDbRow): ScheduleRun {
@@ -103,7 +103,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS discord_settings(id INTEGER PRIMARY KEY CHECK(id=1), bot_reply INTEGER NOT NULL CHECK(bot_reply IN (0,1)));
       CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
       CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, output_channel_id TEXT NOT NULL, creator_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('cron','reminder')), content TEXT NOT NULL, cron TEXT, run_at TEXT, timezone TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), next_run TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, output_channel_id TEXT NOT NULL, creator_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('cron','reminder')), content TEXT NOT NULL, cron TEXT, run_at TEXT, timezone TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), next_run TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notify TEXT NOT NULL DEFAULT 'always' CHECK(notify IN ('always','on_event')));
       CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules(enabled,next_run);
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
@@ -118,6 +118,7 @@ export class Store implements SchedulerStore {
     this.db.exec('BEGIN IMMEDIATE');
     try {
     const scheduleColumns = new Set((this.db.prepare('PRAGMA table_info(schedules)').all() as Array<{ name: string }>).map(column => column.name));
+    if (!scheduleColumns.has('notify')) this.db.exec("ALTER TABLE schedules ADD COLUMN notify TEXT NOT NULL DEFAULT 'always'");
     if (scheduleColumns.has('source_channel_id')) this.db.exec('ALTER TABLE schedules DROP COLUMN source_channel_id');
     const jobColumns = new Set((this.db.prepare('PRAGMA table_info(attachment_memory_jobs)').all() as Array<{ name: string }>).map(column => column.name));
     if (jobColumns.size && !String((this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='attachment_memory_jobs'").get() as {sql:string}|undefined)?.sql??'').includes("'suppressed'")) {
@@ -997,8 +998,8 @@ export class Store implements SchedulerStore {
   }
 
   createSchedule(job: ScheduleJob): ScheduleJob {
-    this.db.prepare(`INSERT INTO schedules(id,output_channel_id,creator_id,kind,content,cron,run_at,timezone,enabled,next_run,created_at,updated_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.id, job.outputChannelId, job.creatorId, job.kind, job.content, job.cron, job.runAt, job.timezone, job.enabled ? 1 : 0, job.nextRun, job.createdAt, job.updatedAt);
+    this.db.prepare(`INSERT INTO schedules(id,output_channel_id,creator_id,kind,content,cron,run_at,timezone,enabled,next_run,created_at,updated_at,notify)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.id, job.outputChannelId, job.creatorId, job.kind, job.content, job.cron, job.runAt, job.timezone, job.enabled ? 1 : 0, job.nextRun, job.createdAt, job.updatedAt, job.notify);
     return job;
   }
 
@@ -1011,8 +1012,8 @@ export class Store implements SchedulerStore {
     return (this.db.prepare('SELECT * FROM schedules ORDER BY created_at,id').all() as ScheduleDbRow[]).map(scheduleFromRow);
   }
 
-  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun'>>): ScheduleJob | undefined {
-    const fields: Array<[keyof typeof patch, string]> = [['outputChannelId','output_channel_id'],['content','content'],['cron','cron'],['runAt','run_at'],['timezone','timezone'],['enabled','enabled'],['nextRun','next_run']];
+  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>>): ScheduleJob | undefined {
+    const fields: Array<[keyof typeof patch, string]> = [['outputChannelId','output_channel_id'],['content','content'],['cron','cron'],['runAt','run_at'],['timezone','timezone'],['enabled','enabled'],['nextRun','next_run'],['notify','notify']];
     const selected = fields.filter(([key]) => Object.prototype.hasOwnProperty.call(patch, key));
     if (!selected.length) return this.getSchedule(id);
     const assignments = selected.map(([, column]) => `${column}=?`).join(',');

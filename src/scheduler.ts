@@ -3,6 +3,7 @@ import type { LogMethods } from './log.js';
 import { Cron } from 'croner';
 
 export type ScheduleKind = 'cron' | 'reminder';
+export type ScheduleNotify = 'always' | 'on_event';
 export type ScheduleRunStatus = 'running' | 'completed' | 'failed' | 'unknown';
 
 export interface ScheduleJob {
@@ -10,6 +11,7 @@ export interface ScheduleJob {
   outputChannelId: string;
   creatorId: string;
   kind: ScheduleKind;
+  notify: ScheduleNotify;
   content: string;
   cron: string | null;
   runAt: string | null;
@@ -34,6 +36,7 @@ export interface CreateScheduleInput {
   outputChannelId: string;
   creatorId: string;
   kind: ScheduleKind;
+  notify?: ScheduleNotify;
   content: string;
   cron?: string;
   runAt?: string;
@@ -45,7 +48,7 @@ export interface SchedulerStore {
   createSchedule(job: ScheduleJob): ScheduleJob;
   getSchedule(id: string): ScheduleJob | undefined;
   listSchedules(): ScheduleJob[];
-  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun'>>): ScheduleJob | undefined;
+  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>>): ScheduleJob | undefined;
   deleteSchedule(id: string): boolean;
   /** Transaction: if due and eligible, insert running execution (unique job/time) and update nextRun; return undefined if already claimed/not due/disabled. */
   claimScheduleRun(id: string, scheduledAt: string, nextRun: string | null, now: string): { job: ScheduleJob; run: ScheduleRun } | undefined;
@@ -102,6 +105,7 @@ export function scheduleNextRun(input: { kind: ScheduleKind; cron?: string | nul
 export class Scheduler {
   private timer: ReturnType<typeof setInterval> | undefined;
   private readonly pending = new Set<Promise<void>>();
+  private readonly inFlight = new Set<string>();
   private stopped = true;
   private polling = false;
   private readonly now: () => Date;
@@ -168,6 +172,10 @@ export class Scheduler {
         if (this.stopped) break;
         const scheduled = job.nextRun;
         if (!scheduled || Date.parse(scheduled) > nowDate.getTime()) continue;
+        if (this.inFlight.has(job.id)) {
+          if (job.kind === 'cron') this.options.store.updateSchedule(job.id, { nextRun: scheduleNextRun(job, new Date(nowDate.getTime() + 1)) });
+          continue;
+        }
         let nextRun: string | null = null;
         if (job.kind === 'cron') {
           try { nextRun = scheduleNextRun({ kind: 'cron', cron: job.cron ?? undefined, timezone: job.timezone }, new Date(Math.max(nowDate.getTime(), Date.parse(scheduled)) + 1)); }
@@ -175,7 +183,8 @@ export class Scheduler {
         }
         const claimed = this.options.store.claimScheduleRun(job.id, scheduled, nextRun, now);
         if (!claimed) continue;
-        const work = this.execute(claimed.job, claimed.run).finally(() => this.pending.delete(work));
+        this.inFlight.add(job.id);
+        const work = this.execute(claimed.job, claimed.run).finally(() => { this.inFlight.delete(job.id); this.pending.delete(work); });
         this.pending.add(work);
       }
     } catch (error) { this.options.log.logError('Scheduler polling failed', error, { mention: !isHttp429(error) }); }
@@ -184,7 +193,8 @@ export class Scheduler {
 
   private async execute(job: ScheduleJob, run: ScheduleRun): Promise<void> {
     try {
-      await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}. Send the result only to the configured output channel ${job.outputChannelId}.\n\n${job.content}` });
+      const notificationRule = job.notify === 'on_event' ? 'If the task completes normally and there is nothing noteworthy, reply exactly [no_reply]. If there is a noteworthy event, provide its details.' : 'Provide the task result normally.';
+      await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}. Send the result only to the configured output channel ${job.outputChannelId}. ${notificationRule}\n\n${job.content}` });
       this.options.store.finishScheduleRun(run.id, 'completed');
     } catch (error) {
       this.options.log.logError('Scheduled task execution failed', error, { mention: !isHttp429(error), fields: { scheduleId: job.id, runId: run.id } });

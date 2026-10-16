@@ -1,15 +1,15 @@
 import { ToolUsageError } from './tool-errors.js';
 import { randomUUID } from 'node:crypto';
-import { DEFAULT_SCHEDULE_TIMEZONE, scheduleNextRun, type CreateScheduleInput, type ScheduleJob, type SchedulerStore } from './scheduler.js';
+import { DEFAULT_SCHEDULE_TIMEZONE, scheduleNextRun, type CreateScheduleInput, type ScheduleJob, type SchedulerStore, type ScheduleNotify } from './scheduler.js';
 
 const idSchema = { type: 'string', minLength: 1, maxLength: 200 };
 const textSchema = { type: 'string', minLength: 1, maxLength: 4000 };
-const properties = { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: { type: 'string', minLength: 1, maxLength: 120 }, runAt: { type: 'string', minLength: 1, maxLength: 80 }, timezone: { type: 'string', minLength: 1, maxLength: 100 }, enabled: { type: 'boolean' } };
+const properties = { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: { type: 'string', minLength: 1, maxLength: 120 }, runAt: { type: 'string', minLength: 1, maxLength: 80 }, timezone: { type: 'string', minLength: 1, maxLength: 100 }, enabled: { type: 'boolean' }, notify: { type: 'string', enum: ['always', 'on_event'] } };
 
 export const scheduleToolDefinitions = [
-  { type: 'function', name: 'schedule_create', description: 'Create a persistent independent cron task with a five-field cron expression or one-time reminder with a valid ISO runAt. It is not tied to the channel where it was created and can be managed from any channel. outputChannelId may be any text channel the bot can send to and can be changed later; timezone defaults to the configured schedule timezone.', parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['cron', 'reminder'] }, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone }, required: ['kind', 'outputChannelId', 'content'], additionalProperties: false } },
+  { type: 'function', name: 'schedule_create', description: 'Create a persistent independent cron task with a five-field cron expression or one-time reminder with a valid ISO runAt. It is not tied to the channel where it was created and can be managed from any channel. outputChannelId may be any text channel the bot can send to and can be changed later; timezone defaults to the configured schedule timezone. notify defaults to always; on_event suppresses routine no-event results.', parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['cron', 'reminder'] }, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, notify: properties.notify }, required: ['kind', 'outputChannelId', 'content'], additionalProperties: false } },
   { type: 'function', name: 'schedule_list', description: 'List all independent schedules across channels.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
-  { type: 'function', name: 'schedule_update', description: 'Update any independent schedule by ID, including its output channel.', parameters: { type: 'object', properties: { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, enabled: properties.enabled }, required: ['id'], additionalProperties: false } },
+  { type: 'function', name: 'schedule_update', description: 'Update any independent schedule by ID, including its output channel and notify policy (always or on_event).', parameters: { type: 'object', properties: { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, enabled: properties.enabled, notify: properties.notify }, required: ['id'], additionalProperties: false } },
   { type: 'function', name: 'schedule_enable', description: 'Enable any independent schedule by ID.', parameters: { type: 'object', properties: { id: idSchema }, required: ['id'], additionalProperties: false } },
   { type: 'function', name: 'schedule_disable', description: 'Disable any independent schedule by ID.', parameters: { type: 'object', properties: { id: idSchema }, required: ['id'], additionalProperties: false } },
   { type: 'function', name: 'schedule_delete', description: 'Delete any independent schedule by ID.', parameters: { type: 'object', properties: { id: idSchema }, required: ['id'], additionalProperties: false } },
@@ -46,6 +46,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
           outputChannelId,
           creatorId: options.creatorId,
           kind,
+          notify: notifyArg(args.notify, 'always'),
           content: stringArg(args.content, 'content'),
           timezone: args.timezone === undefined ? (options.defaultTimezone ?? DEFAULT_SCHEDULE_TIMEZONE) : stringArg(args.timezone, 'timezone'),
           ...(args.cron === undefined ? {} : { cron: stringArg(args.cron, 'cron') }),
@@ -54,7 +55,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         if (kind === 'reminder' && input.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
         if (kind === 'cron' && input.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
         const timestamp = now();
-        const job: ScheduleJob = { id: randomUUID(), ...input, timezone: input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, cron: input.cron ?? null, runAt: input.runAt ?? null, enabled: true, nextRun: scheduleNextRun(input, timestamp), createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString() };
+        const job: ScheduleJob = { id: randomUUID(), ...input, notify: input.notify ?? 'always', timezone: input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, cron: input.cron ?? null, runAt: input.runAt ?? null, enabled: true, nextRun: scheduleNextRun(input, timestamp), createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString() };
         return options.store.createSchedule(job);
       }
       if (name === 'schedule_list') return options.store.listSchedules();
@@ -67,22 +68,29 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         return options.store.updateSchedule(id, { enabled, nextRun: enabled ? scheduleNextRun(current, now()) : null });
       }
       if (name === 'schedule_update') {
-        const patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun'>> = {};
+        const patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>> = {};
         if (args.outputChannelId !== undefined) { patch.outputChannelId = stringArg(args.outputChannelId, 'outputChannelId'); await assertOutput(patch.outputChannelId); }
         if (args.content !== undefined) patch.content = stringArg(args.content, 'content');
         if (args.cron !== undefined) patch.cron = stringArg(args.cron, 'cron');
         if (args.runAt !== undefined) patch.runAt = stringArg(args.runAt, 'runAt');
         if (args.timezone !== undefined) patch.timezone = stringArg(args.timezone, 'timezone');
         if (args.enabled !== undefined) { if (typeof args.enabled !== 'boolean') throw new ToolUsageError('enabled must be boolean'); patch.enabled = args.enabled; }
+        if (args.notify !== undefined) patch.notify = notifyArg(args.notify);
         const candidate = { ...current, ...patch };
         if (candidate.kind === 'cron' && patch.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
         if (candidate.kind === 'reminder' && patch.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
-        patch.nextRun = candidate.enabled ? scheduleNextRun(candidate, now()) : null;
+        if (['cron', 'runAt', 'timezone', 'enabled'].some(key => Object.prototype.hasOwnProperty.call(patch, key))) patch.nextRun = candidate.enabled ? scheduleNextRun(candidate, now()) : null;
         return options.store.updateSchedule(id, patch);
       }
       throw new ToolUsageError(`Unknown schedule tool: ${name}`);
     },
   };
+}
+
+function notifyArg(value: unknown, fallback?: ScheduleNotify): ScheduleNotify {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (value !== 'always' && value !== 'on_event') throw new ToolUsageError('notify must be always or on_event');
+  return value;
 }
 
 function stringArg(value: unknown, name: string): string {
