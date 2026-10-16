@@ -217,11 +217,25 @@ export class DiscordHandler {
         ...(message.reference ? { replyToMessageId: message.reference.messageId, replyToChannelId: message.reference.channelId } : {}),
         ...(message.forwardedMessage ? { forwardedMessage: message.forwardedMessage } : {}),
       };
-      if (!this.store.channelPolicy(message.channelId)) { releaseIngress(); return; }
-      if (message.parentChannelId && this.store.channelPolicy(message.channelId)?.parentChannelId !== message.parentChannelId) this.store.setChannelPolicy(message.channelId, { parentChannelId: message.parentChannelId });
-      const policy = this.store.effectiveChannelPolicy(message.channelId, message.parentChannelId);
+      const rootChannelIds = ingressRuntime.discord.channelIds;
+      const parentIsAuthorized = Boolean(message.parentChannelId && rootChannelIds.includes(message.parentChannelId));
+      let channelPolicy = this.store.channelPolicy(message.channelId);
+      if (parentIsAuthorized && channelPolicy?.parentChannelId !== message.parentChannelId) {
+        this.store.setChannelPolicy(message.channelId, { parentChannelId: message.parentChannelId });
+        channelPolicy = this.store.channelPolicy(message.channelId);
+      } else if (!channelPolicy && message.parentChannelId && rootChannelIds.includes(message.channelId)) {
+        // A thread explicitly authorized by its own ID must not inherit from an unauthorized parent.
+        this.store.setChannelPolicy(message.channelId, { parentChannelId: null });
+        channelPolicy = this.store.channelPolicy(message.channelId);
+      }
+      if (!channelPolicy) { releaseIngress(); return; }
+      const policyParentChannelId = parentIsAuthorized ? message.parentChannelId : message.parentChannelId ? message.channelId : channelPolicy.parentChannelId ?? undefined;
+      const policy = this.store.effectiveChannelPolicy(message.channelId, policyParentChannelId);
       if (!policy.tracked) { releaseIngress(); return; }
-      const writeToken = this.store.memoryWriteToken(message.channelId, message.channelId) ?? null;
+      const candidateWriteToken = this.store.memoryWriteToken(message.channelId, message.channelId);
+      const writeToken = message.parentChannelId && !parentIsAuthorized
+        ? candidateWriteToken && candidateWriteToken.originPolicyChannelId === message.channelId && candidateWriteToken.sourcePolicyChannelId === message.channelId ? candidateWriteToken : null
+        : candidateWriteToken ?? null;
       const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments, writeToken);
@@ -237,9 +251,9 @@ export class DiscordHandler {
       })();
       this.activeIngestions.add(preparation);
       void preparation.finally(() => { this.activeIngestions.delete(preparation); if (this.deploying) void this.publishQuiesced(); }).catch(() => undefined);
-      const shouldAsk = () => Boolean(content || message.hasAttachments) && !deploymentPassive && !this.deploying && !this.stopping && this.store.effectiveChannelPolicy(message.channelId, message.parentChannelId).replyMode !== 'none' && (botInput
-        ? Boolean(message.mentionsBot && this.store.effectiveChannelPolicy(message.channelId, message.parentChannelId).botReply)
-        : this.store.effectiveChannelPolicy(message.channelId, message.parentChannelId).replyMode === 'all' || (this.store.effectiveChannelPolicy(message.channelId, message.parentChannelId).replyMode === 'mention' && Boolean(message.mentionsBot)));
+      const shouldAsk = () => Boolean(content || message.hasAttachments) && !deploymentPassive && !this.deploying && !this.stopping && this.store.effectiveChannelPolicy(message.channelId, policyParentChannelId).replyMode !== 'none' && (botInput
+        ? Boolean(message.mentionsBot && this.store.effectiveChannelPolicy(message.channelId, policyParentChannelId).botReply)
+        : this.store.effectiveChannelPolicy(message.channelId, policyParentChannelId).replyMode === 'all' || (this.store.effectiveChannelPolicy(message.channelId, policyParentChannelId).replyMode === 'mention' && Boolean(message.mentionsBot)));
       if (!shouldAsk()) { releaseIngress(); await preparation; stored = this.store.messagesWithSources(stored.sessionId).find(item => item.id === stored.id)!; this.memoryCoordinator?.notifyReady(); return; }
       const prepared = preparation.then(() => {
         stored = this.store.messagesWithSources(stored.sessionId).find(item => item.id === stored.id)!;
