@@ -52,7 +52,7 @@ const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 function isProcessAlive(pid: number): boolean { try { process.kill(pid, 0); return (readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').some(arg => arg.endsWith('/scripts/butler-deploy.mjs')) && readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes('--locked')); } catch { return false; } }
-export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
+export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
   private readonly queues = new Map<string, Promise<void>>();
@@ -952,6 +952,78 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
   };
 }
 
+type DiscordCommandSyncCounts = { guildCount: number; created: number; updated: number; unchanged: number };
+
+const DISCORD_COMMAND_METADATA_FIELDS = new Set(['id', 'application_id', 'guild_id', 'version']);
+
+function isDefaultDiscordCommandValue(key: string, value: unknown): boolean {
+  if (['default_member_permissions', 'name_localizations', 'description_localizations'].includes(key) && value === null) return true;
+  if (['name_localizations', 'description_localizations'].includes(key) && isRecord(value) && Object.keys(value).length === 0) return true;
+  if (key === 'default_permission' || key === 'dm_permission') return value === true;
+  if (key === 'nsfw' || key === 'autocomplete' || key === 'required') return value === false;
+  if ((key === 'contexts' && Array.isArray(value)) || (key === 'integration_types' && Array.isArray(value))) {
+    const values = JSON.stringify(value);
+    return key === 'contexts' ? values === '[0]' || values === '[0,1,2]' : values === '[0]' || values === '[0,1]';
+  }
+  return false;
+}
+
+function canonicalDiscordCommandValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalDiscordCommandValue);
+  if (!isRecord(value)) return value;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(value).sort()) {
+    if (DISCORD_COMMAND_METADATA_FIELDS.has(key) || isDefaultDiscordCommandValue(key, value[key])) continue;
+    result[key] = canonicalDiscordCommandValue(value[key]);
+  }
+  return result;
+}
+
+export function normalizeDiscordCommandSchema(command: unknown): string {
+  if (!isRecord(command) || typeof command.name !== 'string') throw new Error('Discord command schema is invalid');
+  return JSON.stringify(canonicalDiscordCommandValue(command));
+}
+
+function commandType(command: { type?: unknown }): number {
+  return typeof command.type === 'number' ? command.type : 1;
+}
+
+export async function synchronizeDiscordGuildCommands(applicationId: string, guildId: string, api: DiscordCommandApi): Promise<Omit<DiscordCommandSyncCounts, 'guildCount'>> {
+  const route = Routes.applicationGuildCommands(applicationId, guildId);
+  const current = await api.get(route);
+  if (!Array.isArray(current) || current.some(command => !isRecord(command) || typeof command.name !== 'string')) throw new Error('Discord guild command list is invalid');
+  const counts = { created: 0, updated: 0, unchanged: 0 };
+  for (const desired of commands) {
+    const matching = current.filter(command => isRecord(command) && command.name === desired.name && commandType(command) === commandType(desired));
+    if (matching.length > 1) throw new Error(`Multiple matching Discord commands: ${desired.name}`);
+    const existing = matching[0] as Record<string, unknown> | undefined;
+    if (!existing) {
+      if (!api.post) throw new Error('Discord command API cannot create a missing command');
+      await api.post(route, { body: desired });
+      counts.created++;
+    } else if (normalizeDiscordCommandSchema(existing) === normalizeDiscordCommandSchema(desired)) {
+      counts.unchanged++;
+    } else {
+      if (typeof existing.id !== 'string') throw new Error(`Discord command ID is missing: ${desired.name}`);
+      await api.put(Routes.applicationGuildCommand(applicationId, guildId, existing.id), { body: desired });
+      counts.updated++;
+    }
+  }
+  return counts;
+}
+
+export async function synchronizeDiscordCommands(applicationId: string, guildIds: string[], api: DiscordCommandApi): Promise<DiscordCommandSyncCounts> {
+  const uniqueGuildIds = [...new Set(guildIds)];
+  const total: DiscordCommandSyncCounts = { guildCount: uniqueGuildIds.length, created: 0, updated: 0, unchanged: 0 };
+  for (const guildId of uniqueGuildIds) {
+    const result = await synchronizeDiscordGuildCommands(applicationId, guildId, api);
+    total.created += result.created;
+    total.updated += result.updated;
+    total.unchanged += result.unchanged;
+  }
+  return total;
+}
+
 export async function registerDiscordCommands(config: ButlerConfig, testApi?: DiscordCommandApi): Promise<void> {
   const token = requireSetting(config.discord?.token, 'discord.token');
   const api = testApi ?? (new REST({ version: '10', retries: 0 }).setToken(token) as unknown as DiscordCommandApi);
@@ -968,27 +1040,7 @@ export async function registerDiscordCommands(config: ButlerConfig, testApi?: Di
       guildIds = [...client.guilds.cache.keys()];
     } finally { await client.destroy(); }
   }
-  const uniqueGuildIds = [...new Set(guildIds)];
-  const globalRoute = Routes.applicationCommands(applicationId);
-  const globalCommands = await api.get(globalRoute);
-  if (!Array.isArray(globalCommands)) throw new Error('Discord global command list is invalid');
-  for (const guildId of uniqueGuildIds) {
-    const guildCommands = await api.get(Routes.applicationGuildCommands(applicationId, guildId));
-    if (!Array.isArray(guildCommands)) throw new Error(`Discord guild command list is invalid for guild ${guildId}`);
-  }
-  await api.put(globalRoute, { body: [] });
-  await clearAndRegisterGuildCommands(applicationId, uniqueGuildIds, api);
-}
-
-async function clearAndRegisterGuildCommands(applicationId: string, guildIds: string[], api: DiscordCommandApi): Promise<void> {
-  for (const guildId of guildIds) {
-    await api.put(Routes.applicationGuildCommands(applicationId, guildId), { body: [] });
-    await registerGuildCommands(applicationId, guildId, api);
-  }
-}
-
-async function registerGuildCommands(applicationId: string, guildId: string, api: DiscordCommandApi): Promise<void> {
-  await api.put(Routes.applicationGuildCommands(applicationId, guildId), { body: commands });
+  await synchronizeDiscordCommands(applicationId, [...new Set(guildIds)], api);
 }
 
 export async function handleInteraction(handler: DiscordHandler, interaction: import('discord.js').ChatInputCommandInteraction): Promise<void> {
@@ -1243,16 +1295,26 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   });
   const commandApi = new REST({ version: '10', retries: 0 }).setToken(config.token) as unknown as DiscordCommandApi;
   let discordReady = false;
-  const registerGuild = async (guildId: string) => {
-    const application = await commandApi.get('/applications/@me');
+  let commandApplicationId: string | undefined;
+  let commandApplicationIdPromise: Promise<string> | undefined;
+  const getCommandApplicationId = () => commandApplicationIdPromise ??= commandApi.get('/applications/@me').then(application => {
     if (!isRecord(application) || typeof application.id !== 'string') throw new Error('Discord application metadata is missing application.id');
-    await registerGuildCommands(application.id, guildId, commandApi);
+    commandApplicationId = application.id;
+    return application.id;
+  }).catch(error => { commandApplicationIdPromise = undefined; throw error; });
+  const syncGuildCommands = async (guildIds: string[], scope: 'startup' | 'guild_join') => {
+    const counts = await synchronizeDiscordCommands(await getCommandApplicationId(), guildIds, commandApi);
+    logInfo('Discord slash command sync complete', { scope, ...counts });
   };
-  client.on('guildCreate', guild => { if (discordReady) void registerGuild(guild.id).catch(error => logError(`Discord command registration failed for joined guild ${guild.id}`, error, { mention: !isHttp429(error) })); });
+  const reportCommandSyncFailure = (scope: 'startup' | 'guild_join', error: unknown) => {
+    logWarn('Discord slash command sync failed', undefined, { scope, errorType: error instanceof Error ? error.name : typeof error });
+  };
+  client.on('guildCreate', guild => { if (discordReady) void syncGuildCommands([guild.id], 'guild_join').catch(error => reportCommandSyncFailure('guild_join', error)); });
   client.once('clientReady', readyClient => {
     discordReady = true;
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
     logInfo('Discord ready', { botId: readyClient.user.id });
+    void syncGuildCommands([...readyClient.guilds.cache.keys()], 'startup').catch(error => reportCommandSyncFailure('startup', error));
     const notice = store.restartNotice();
     if (notice) {
       void (async () => {
