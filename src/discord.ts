@@ -6,7 +6,7 @@ import type { ChannelManagement, ChannelSettings, ChannelSettingsPatch } from '.
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
 import { requireSetting, type ButlerConfig } from './config.js';
-import { createWebToolRuntime, type WebToolRuntime } from './web-tools.js';
+import type { WebToolRuntime } from './web-tools.js';
 import { createWeatherToolRuntime, type WeatherToolRuntime } from './weather-tools.js';
 import { startUi } from './ui.js';
 import { GoogleAuth } from './google-auth.js';
@@ -17,7 +17,7 @@ import { Hindsight } from './hindsight.js';
 import { ProgressRenderer } from './progress.js';
 import { Scheduler, type ScheduledTaskRequest } from './scheduler.js';
 import { createScheduleToolRuntime } from './schedule-tools.js';
-import { fireflyInteractiveOrigin, fireflyNonInteractiveOrigin } from './firefly-tools.js';
+import { financeInteractiveOrigin, financeNonInteractiveOrigin } from './finance-origin.js';
 import { createPeopleToolRuntime } from './people-tools.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
@@ -33,12 +33,13 @@ import { logError, logInfo, logWarn, withoutLogMention } from './log.js';
 import { isHttp429, ToolUsageError } from './tool-errors.js';
 import { SubagentCoordinator, type SubagentEvent } from './subagent-coordinator.js';
 import { processDeploymentResultEvent, type DeploymentResultEventRow } from './deployment-notifications.js';
+import { logTrace, traceTextMetadata } from './model-request.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
-export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; fireflyTools: import('./firefly-tools.js').FireflyRuntime; hindsight?: Hindsight };
+export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
@@ -59,6 +60,7 @@ export class DiscordHandler {
   private readonly activeIngestions = new Set<Promise<void>>();
   private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number }>();
   private readonly activeAsk = new Set<string>();
+  private readonly activeAskIds = new Map<string, string>();
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource; attachments?: import('./store.js').MessageInputAttachment[]; stored: import('./store.js').StoredMessage }>>>();
   private readonly consumedSteerMessageIds = new Map<string, Set<string>>();
   private readonly workCounts = new Map<string, number>();
@@ -221,6 +223,8 @@ export class DiscordHandler {
       const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments, writeToken);
+      const traceId = randomUUID();
+      logTrace('discord_ingress', { traceId, inputMessageId: message.messageId ?? ingestion.message.id, sessionId: stateAtIngestion.sessionId, channelId: message.channelId, persisted: ingestion.created, contentLength: effectiveContent.length });
       if (!ingestion.created) { releaseIngress(); return; }
       let stored = ingestion.message;
       let attachments: import('./store.js').MessageInputAttachment[];
@@ -244,16 +248,17 @@ export class DiscordHandler {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
+        logTrace('steer_enqueue', { traceId, parentAskId: this.activeAskIds.get(message.channelId), inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, queueLength: pending.length, queueIndex: pending.length - 1 });
         releaseIngress();
         return;
       }
+      const askId = randomUUID();
       const stopTyping = this.startTyping(message.channelId, message.sendTyping);
       const queued = this.enqueue(message.channelId, async () => {
         const runtime = this.getRuntime();
         const config = runtime.discord;
         if (!shouldAsk()) { await preparation; this.memoryCoordinator?.notifyReady(); return; }
         const preparedInput = await prepared;
-        let sessionId: string | undefined = stored.sessionId;
         let attachmentFiles: Array<{ attachment: string; name: string }> = [];
         const attachmentToolCallIds: string[] = [];
         let progress: ProgressRenderer | undefined;
@@ -264,13 +269,14 @@ export class DiscordHandler {
           const prepared = preparedInput;
           const userContent = prepared.content;
           const state = { ...stateAtIngestion, model: this.store.channelState(message.channelId, config.defaultModel, config.ownerId).model };
-          sessionId = stored.sessionId;
           let openingContext = this.store.sessionOpeningContext(state.sessionId);
           if (!openingContext) {
             try { openingContext = await this.readOpeningMessage(message.channelId); if (openingContext) this.store.saveSessionOpeningContext(state.sessionId, openingContext); }
             catch (error) { logWarn('Discord opening message lookup failed', error); }
           }
           this.activeAsk.add(message.channelId);
+          this.activeAskIds.set(message.channelId, askId);
+          logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(formatDiscordUrls(content)); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryWriteToken: this.store.messageMemoryWriteToken(stored.id) ?? null, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
@@ -282,6 +288,7 @@ export class DiscordHandler {
             transcriptTimezone: runtime.settings.schedule?.timezone,
             messageSource: prepared.source,
             storedInput: stored,
+            askId, traceId,
             consumedSteerMessageIds: this.consumedSteerMessageIds.get(stored.sessionId),
             openingContext,
             initialAttachments: prepared.attachments,
@@ -292,8 +299,8 @@ export class DiscordHandler {
             googleTools: this.googleTools,
             localTools: this.localTools,
             webTools: runtime.webTools,
-            fireflyTools: runtime.fireflyTools,
-            executionOrigin: fireflyInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
+            hledgerTools: runtime.hledgerTools,
+            executionOrigin: financeInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
             weatherTools: this.weatherTools,
             peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => { const token = this.store.messageMemoryWriteToken(stored.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
             memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(stored.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
@@ -314,13 +321,14 @@ export class DiscordHandler {
               consumed.add(storedMessageId);
               const pending = this.pendingSteer.get(message.channelId);
               if (pending?.length) pending.shift();
+              logTrace('steer_dequeue', { askId, traceId, sessionId: stored.sessionId, storedMessageId, remaining: pending?.length ?? 0 });
               if (!pending?.length) this.pendingSteer.delete(message.channelId);
             },
             onAskFinishing: () => this.activeAsk.delete(message.channelId),
             onResponseReady: async text => {
               stopTyping?.();
               if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
-                logInfo('no_reply', { text, replyTo: message.messageId ? { channelId: message.channelId, messageId: message.messageId } : { channelId: message.channelId, inputId: stored.id } });
+                logInfo('no_reply', { ...traceTextMetadata(text), replyTo: message.messageId ? { channelId: message.channelId, messageId: message.messageId } : { channelId: message.channelId, inputId: stored.id } });
                 if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
                 return;
               }
@@ -337,9 +345,14 @@ export class DiscordHandler {
                       delivered.push(content);
                       deliveredAttachments.push(...await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id));
                     }
-                  });
+                  }, { askId, traceId, sessionId: state.sessionId });
                 } finally {
-                  if (outgoing) { if (deliveredAttachments.length) this.store.updateAttachments(outgoing.id, deliveredAttachments); this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); this.memoryCoordinator?.notifyReady(); }
+                  let finalized = false;
+                  try {
+                    if (outgoing) { if (deliveredAttachments.length) this.store.updateAttachments(outgoing.id, deliveredAttachments); this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); finalized = true; this.memoryCoordinator?.notifyReady(); }
+                  } finally {
+                    logTrace('discord_persistence_finalize', { askId, traceId, sessionId: state.sessionId, storedMessageId: outgoing?.id, finalized, persistedChunks: delivered.length, ...traceTextMetadata(delivered.join('\n')) });
+                  }
                   if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
                 }
               }
@@ -355,10 +368,13 @@ export class DiscordHandler {
           const failureKind = error instanceof AttachmentInputError ? ` (${error.code}${error.code === 'request_rejected' && error.status ? ` HTTP ${error.status}` : ''})` : '';
           logError(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { notify: !isHttp429(error) && !isHttp429(failureKind), deduplicationKey: discordAskDeduplicationKey(message.channelId, failureKind) });
           const pending = this.pendingSteer.get(message.channelId) ?? [];
+          logTrace('steer_queue_discard', { askId, traceId, sessionId: stored.sessionId, count: pending.length, reason: 'ask_error_cleanup' });
           pending.splice(0);
           this.pendingSteer.delete(message.channelId);
         } finally {
           this.activeAsk.delete(message.channelId);
+          this.activeAskIds.delete(message.channelId);
+          logTrace('discord_ask_end', { askId, traceId, sessionId: stored.sessionId, succeeded: askSucceeded, pendingSteer: this.pendingSteer.get(message.channelId)?.length ?? 0 });
           if (!this.pendingSteer.get(message.channelId)?.length) this.pendingSteer.delete(message.channelId);
         }
         await progress?.finish(askSucceeded ? 'completed' : 'failed');
@@ -618,8 +634,8 @@ export class DiscordHandler {
         googleTools: this.googleTools,
         localTools: this.localTools,
         webTools: commandRuntime.webTools,
-        fireflyTools: commandRuntime.fireflyTools,
-        executionOrigin: fireflyNonInteractiveOrigin('scheduler'),
+        hledgerTools: commandRuntime.hledgerTools,
+        executionOrigin: financeNonInteractiveOrigin('scheduler'),
         weatherTools: this.weatherTools,
         peopleTools: commandRuntime.hindsight ? createPeopleToolRuntime(commandRuntime.hindsight, () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
         memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
@@ -763,7 +779,7 @@ export class DiscordHandler {
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
-          hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, fireflyTools: runtime.fireflyTools, executionOrigin: fireflyNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
+          hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
           memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
@@ -835,13 +851,29 @@ export function splitDiscordText(text: string): string[] {
   return chunks;
 }
 
-async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void | Promise<void>): Promise<void> {
+async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void | Promise<void>, trace?: { askId?: string; traceId?: string; sessionId?: string }): Promise<void> {
+  const deliveryId = randomUUID();
+  const context = { ...trace, deliveryId, channelId: message.channelId, inputMessageId: message.messageId };
   const chunks = splitDiscordText(formatDiscordUrls(text || (files?.length ? ' ' : DELIVERY_ERROR)));
+  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), formatted: traceTextMetadata(chunks.join('')), chunks: chunks.length });
   for (let index = 0; index < chunks.length; index++) {
-    const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
-    if (index === 0 && files?.length) onFilesDelivered?.();
-    await onDelivered?.(chunks[index]!, result);
+    const segment = { ...context, index, total: chunks.length, ...traceTextMetadata(chunks[index]!) };
+    let stage = 'send';
+    logTrace('discord_segment_start', segment);
+    try {
+      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
+      const discordMessageId = isRecord(result) && typeof result.id === 'string' && /^[0-9]{2,32}$/.test(result.id) ? result.id : undefined;
+      logTrace('discord_segment_sent', { ...segment, discordMessageId });
+      stage = 'persistence_callback';
+      if (index === 0 && files?.length) onFilesDelivered?.();
+      await onDelivered?.(chunks[index]!, result);
+      logTrace('discord_segment_recorded', { ...segment, discordMessageId, callbackPresent: Boolean(onDelivered) });
+    } catch (error) {
+      logTrace('discord_segment_failed', { ...segment, stage });
+      throw error;
+    }
   }
+  logTrace('discord_delivery_complete', { ...context, chunks: chunks.length });
 }
 
 async function archiveDeliveredAttachments(result: unknown, files: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {

@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import type { MessageInputAttachment, StoredMessage } from './store.js';
 import { transcribeAudio, type AudioTranscriptionConfig } from './audio-transcription.js';
-import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
+import { AttachmentImageTypeConflictError, resolveSupportedImageType } from './attachment-image-type.js';
 import { getVideoAttachmentResult, isVideoAttachment } from './video-attachments.js';
 
 export type DiscordAttachmentInput = { id: string; url: string; name: string; contentType?: string | null; size?: number };

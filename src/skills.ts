@@ -1,7 +1,6 @@
 import { ToolUsageError } from './tool-errors.js';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
 import { parse } from 'yaml';

@@ -87,7 +87,6 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS memory_batches(operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, source_message_ids TEXT NOT NULL, document_id TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, batch_order INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('frozen','submitting','unknown','pending','processing','completed','failed','cancelled','not_found','needs_clarification','suppressed')), submit_intended_at TEXT, last_poll_at TEXT, next_poll_at TEXT, error TEXT, created_at TEXT NOT NULL, UNIQUE(document_id,batch_order));
       CREATE TABLE IF NOT EXISTS memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id));
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
-      CREATE TABLE IF NOT EXISTS firefly_operations(operation_key TEXT PRIMARY KEY, arguments_hash TEXT NOT NULL, tool_name TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','unknown','rejected','completed')), resource_id TEXT, result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_windows(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, input_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
@@ -697,21 +696,6 @@ export class Store implements SchedulerStore {
       this.db.prepare('UPDATE deployment_result_events SET parent_input_id=?,parent_input_version=? WHERE id=?').run(id,version,eventId);
       const message=this.messagesWithSourcesForId(id);this.db.exec('COMMIT');return message;
     }catch(e){this.db.exec('ROLLBACK');throw e;}
-  }
-
-  beginFireflyOperation(key: string, argsHash: string, toolName: string): { kind: 'new' } | { kind: 'completed'; result: unknown } | { kind: 'pending' | 'unknown' | 'rejected' } {
-    const now = new Date().toISOString();
-    try { this.db.prepare('INSERT INTO firefly_operations(operation_key,arguments_hash,tool_name,status,created_at,updated_at) VALUES(?,?,?,\'pending\',?,?)').run(key,argsHash,toolName,now,now); return { kind: 'new' }; }
-    catch {
-      const row = this.db.prepare('SELECT arguments_hash,tool_name,status,resource_id,result_json FROM firefly_operations WHERE operation_key=?').get(key) as {arguments_hash:string;tool_name:string;status:string;resource_id:string|null;result_json:string|null}|undefined;
-      if (!row || row.arguments_hash !== argsHash || row.tool_name !== toolName) throw new Error('Firefly operation ledger conflict');
-      if (row.status === 'completed') return { kind:'completed', result: row.result_json ? JSON.parse(row.result_json) : {id:row.resource_id} };
-      return { kind: row.status as 'pending'|'unknown'|'rejected' };
-    }
-  }
-  finishFireflyOperation(key:string,status:'unknown'|'rejected'|'completed',resourceId:string|null,result:unknown):void {
-    const r=this.db.prepare('UPDATE firefly_operations SET status=?,resource_id=?,result_json=?,updated_at=? WHERE operation_key=? AND status=\'pending\'').run(status,resourceId,status==='completed'?JSON.stringify(result):null,new Date().toISOString(),key);
-    if(Number(r.changes)!==1)throw new Error('Could not persist Firefly operation outcome');
   }
 
   beginTool(session: string, name: string, args: unknown): string {

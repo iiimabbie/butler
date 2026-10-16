@@ -2,10 +2,10 @@ import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
 import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
-import { requestModel } from './model-request.js';
+import { requestModel, logTrace, traceTextMetadata } from './model-request.js';
 import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagnostic.js';
 import type { Store, ToolRecord } from './store.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { DiscordToolRuntime } from './discord-tools.js';
 import { loadWorkspaceContext } from './context.js';
 import type { GoogleToolRuntime } from './google-tools.js';
@@ -16,7 +16,8 @@ import type { PeopleToolRuntime } from './people-tools.js';
 import type { SkillsToolRuntime } from './skills.js';
 import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
-import { isAuthorizedFireflyOrigin, type FireflyRuntime, type FireflyIdentity } from './firefly-tools.js';
+import { isAuthorizedFinanceOrigin, type FinanceIdentity } from './finance-origin.js';
+import type { HledgerRuntime } from './hledger-tools.js';
 import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
 import { Hindsight } from './hindsight.js';
@@ -29,6 +30,7 @@ import { DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
 import { runSubagent, subagentDefinitions, subagentSystem, type SubagentConfig } from './subagent.js';
 import type { SubagentCoordinator } from './subagent-coordinator.js';
+import { createToolCatalog, residentToolNames, type ToolCatalog } from './tool-catalog.js';
 
 export interface AgentConfig {
   baseUrl: string;
@@ -39,6 +41,7 @@ export interface AgentConfig {
   modelContextTokens?: Record<string, number>;
   fetcher?: typeof fetch;
   timeoutMs?: number;
+  askId?: string; traceId?: string;
   consumeSteer?: () => { content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined | Promise<{ content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined>;
   initialAttachments?: MessageInputAttachment[];
   attachmentDir?: string;
@@ -60,8 +63,8 @@ export interface AgentConfig {
   skillsTools?: SkillsToolRuntime;
   scheduleTools?: ScheduleToolRuntime;
   imageTools?: ImageToolRuntime;
-  fireflyTools?: FireflyRuntime;
-  executionOrigin?: FireflyIdentity;
+  hledgerTools?: HledgerRuntime;
+  executionOrigin?: FinanceIdentity;
   reasoningEffort?: ReasoningEffort;
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
@@ -103,7 +106,7 @@ const transcriptPageSchema = {
 
 const WRAP_UP_REMINDER_TURN = 45;
 
-const tools = [
+export const tools = [
   memoryTagsDefinition,
   knowledgePageCreateDefinition,
   {
@@ -180,13 +183,20 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const availableTools = (config.deploymentResultEvent
+    const fullAvailableTools = (config.deploymentResultEvent
       ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
-      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFireflyOrigin(config.executionOrigin) && config.fireflyTools ? config.fireflyTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const catalog = config.deploymentResultEvent ? undefined : createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
+    const toolsForRequest = () => {
+      if (!catalog) return fullAvailableTools;
+      const loaded = catalog.loadedDefinitions();
+      return [...fullAvailableTools.filter(tool => residentToolNames.has(String(tool.name)) || loaded.some(item => item.name === tool.name)), ...catalog.definitions];
+    };
+    const toolIndexInput: unknown[] = catalog ? [{ role: 'developer', content: `Available tools (name — short purpose; full definitions load by exact name via tools_catalog):\n${catalog.index().map(item => `${item.name} — ${item.description}`).join('\n')}` }] : [];
     const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
     const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
     const memory = config.hindsight && !['subagent_event', 'deployment_result'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
-    let stableInput: unknown[] = [...workspaceInput, ...runtimeInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
+    let stableInput: unknown[] = [...workspaceInput, ...runtimeInput, ...toolIndexInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
     const initialGroups = await Promise.all(sessionMessages.map(async message => {
       const inputMessage = message.id === config.storedInput!.id && message.content !== prompt ? { ...message, content: prompt } : message;
       let items: unknown[];
@@ -239,6 +249,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     for (let turn = 0; ; turn++) {
       const steered = await config.consumeSteer?.();
       if (steered) {
+        logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: steered.stored?.source?.discordMessageId ?? steered.stored?.id, status: 'consumed' });
         if (!steered.stored) throw new Error('steer input must already be persisted');
         const savedSteer = steered.stored;
         fresh.push(savedSteer);
@@ -259,7 +270,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       let priorUsage = store.contextUsage(session);
       const limit = config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000;
       const countAndCalibrate = async () => {
-        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: availableTools, fetcher });
+        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: toolsForRequest(), fetcher });
         localCountEstimate = local.inputTokens;
         localCountSource = local.source;
         const attachmentSignature = nativeAttachmentSignature(input);
@@ -293,7 +304,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
                 store.clearContextUsage(session);
                 priorUsage = undefined;
                 compactInput = [{ role: 'user', content: `Prior conversation summary (historical background):\n${checkpoint.summary}` }];
-                stableInput = [...workspaceInput, ...runtimeInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
+                stableInput = [...workspaceInput, ...runtimeInput, ...toolIndexInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
                 const checkpointIndex = storedHistory.findIndex(message => message.id === checkpoint.throughMessageId);
                 const retained = liveGroups.map((group, index) => ({ group, protected: liveGroupProtected[index] ?? false }))
                   .filter(({ group }) => { const messageId = initialGroupReferences.get(group); return messageId === undefined || storedHistory.findIndex(message => message.id === messageId) > checkpointIndex; });
@@ -330,9 +341,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
         }
       }
       if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${config.modelContextTokens?.[config.model] ? 'model limit' : 'configured budget'}; stopping before request.`);
-      const requestBody = JSON.stringify({ model: config.model, input, tools: availableTools, ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
+      const requestBody = JSON.stringify({ model: config.model, input, tools: toolsForRequest(), ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       store.saveLatestRequest(session, JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), new Date().toISOString());
-      const { response, raw, requestId } = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher });
+      const { response, raw, requestId } = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher, askId: config.askId, traceId: config.traceId });
       if (!response.ok) {
         const serviceError = isRecord(raw) ? raw.error : undefined;
         const details = typeof serviceError === 'string' ? serviceError : isRecord(serviceError) ? ['type', 'code', 'message'].filter(key => typeof serviceError[key] === 'string').map(key => `${key}=${serviceError[key]}`).join(' ') : '';
@@ -340,17 +351,31 @@ export async function ask(store: Store, session: string, prompt: string, config:
         throw new Error(`LLM HTTP ${response.status}${details ? `: ${details}` : ''}`);
       }
       const body = parseResponse(raw);
+      const safeMeta = (value: unknown): string | undefined => typeof value === 'string' && /^[a-zA-Z0-9_.:-]{1,64}$/.test(value) ? value : undefined;
+      const outputMeta = body.output.map((item: unknown) => {
+        if (!isRecord(item)) return { type: 'unknown' };
+        const base = { ...(safeMeta(item.type) ? { type: safeMeta(item.type) } : {}), ...(safeMeta(item.id) ? { id: safeMeta(item.id) } : {}), ...(safeMeta(item.status) ? { status: safeMeta(item.status) } : {}), ...(safeMeta(item.channel) ? { channel: safeMeta(item.channel) } : {}) };
+        if (item.type === 'reasoning') return { ...base, present: true, summaryCount: Array.isArray(item.summary) ? item.summary.length : undefined };
+        if (item.type === 'message') return { ...base, content: Array.isArray(item.content) ? item.content.map(part => isRecord(part) ? { type: safeMeta(part.type) ?? 'unknown', ...(typeof part.text === 'string' ? { textLength: part.text.length } : {}) } : { type: 'unknown' }) : undefined };
+        if (item.type === 'function_call') return { ...base, name: safeMeta(item.name), callId: safeMeta(item.call_id) };
+        return base;
+      });
+      logTrace('model_response_items', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, output: outputMeta, finishReason: safeMeta(isRecord(raw) ? raw.finish_reason : undefined), status: safeMeta(isRecord(raw) ? raw.status : undefined) });
       if (isRecord(raw) && isRecord(raw.usage) && Number.isSafeInteger(raw.usage.input_tokens) && Number.isSafeInteger(raw.usage.output_tokens)) {
         store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localCountEstimate, countSource: localCountSource, contextLimit: config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000, limitSource: config.modelContextTokens?.[config.model] ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString(), attachmentSignature: nativeAttachmentSignature(input), checkpointThroughMessageId: store.compactCheckpoint(session)?.throughMessageId });
       } else store.clearContextUsage(session);
       const calls = body.output.filter(isFunctionCall);
       const responseInputStart = input.length;
+      const responseCandidate = responseText(body);
+      logTrace('model_candidate', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(responseCandidate), disposition: calls.length ? 'context_only_not_delivered' : 'candidate_for_selection', reason: calls.length ? 'tool_calls_present' : 'no_tool_calls' });
       input.push(...body.output);
       if (calls.length === 0) {
         liveGroups.push(input.slice(responseInputStart)); liveGroupProtected.push(false);
-        const text = responseText(body);
+        const text = responseCandidate;
         const lateSteer = await config.consumeSteer?.();
         if (lateSteer) {
+          logTrace('model_candidate_deferred', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), reason: 'late_steer_context_only' });
+          logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: lateSteer.stored?.source?.discordMessageId ?? lateSteer.stored?.id, status: 'consumed_late' });
           if (!lateSteer.stored) throw new Error('late steer input must already be persisted');
           const savedLateSteer = lateSteer.stored;
           fresh.push(savedLateSteer);
@@ -385,6 +410,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
           throw new Error('LLM response has no assistant text');
         }
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
+        logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'not_delivered' : 'selected', reason: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'no_reply_marker' : 'final_text' });
         config.onAskFinishing?.();
         await config.onResponseReady?.(text);
         return text;
@@ -393,10 +419,19 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
       if (config.deploymentResultEvent && calls.some(call => call.name !== 'deployment_result_status' || !config.deploymentResultStatus)) throw new Error('Deployment result event tool call is not authorized');
       for (const call of calls) {
-        const output = await executeCall(store, session, call, config, googleRuntime);
-        if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
-        input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
-        await appendDiscordInput(false);
+        const toolTrace = { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id };
+        logTrace('model_tool_start', toolTrace);
+        let toolCompleted = false;
+        try {
+          const output = await executeCall(store, session, call, config, googleRuntime, 'agent', catalog);
+          if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
+          input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
+          toolCompleted = true;
+          logTrace('model_tool_output_appended', { ...toolTrace, status: isRecord(output) && 'error' in output ? 'tool_error' : 'returned' });
+          await appendDiscordInput(false);
+        } finally {
+          logTrace('model_tool_end', { ...toolTrace, outputAppended: toolCompleted });
+        }
       }
       liveGroups.push(input.slice(responseInputStart)); liveGroupProtected.push(false);
     }
@@ -427,7 +462,7 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
   };
 }
 
-export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, executionSource: 'agent' | 'subagent' = 'agent'): Promise<unknown> {
+export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, executionSource: 'agent' | 'subagent' = 'agent', catalog?: ToolCatalog): Promise<unknown> {
   if (executionSource !== 'subagent') logInfo('tool_call', { tool: call.name, source: executionSource, sessionId: session, callId: call.call_id });
   let args: Record<string, unknown>;
   try {
@@ -450,7 +485,10 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args: runtimeArgs, ...(label ? { description: label } : {}) });
   let result: unknown;
   try {
-    if (call.name === 'deployment_result_status') {
+    if (call.name === 'tools_catalog') {
+      if (!catalog) throw new ToolUsageError('Tool catalog is unavailable in this execution');
+      result = catalog.execute(runtimeArgs);
+    } else if (call.name === 'deployment_result_status') {
       if (!config.deploymentResultEvent || !config.deploymentResultStatus) throw new ToolUsageError('Deployment result status is unavailable');
       result = config.deploymentResultStatus();
     } else if (call.name === 'subagent_run') {
@@ -489,9 +527,9 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = call.name === 'memory_recall'
         ? await config.hindsight.recall(query)
         : await config.hindsight.reflect(query);
-    } else if (call.name.startsWith('firefly_')) {
-      if (executionSource !== 'agent' || !config.fireflyTools || !isAuthorizedFireflyOrigin(config.executionOrigin)) throw new ToolUsageError('Firefly tools are unavailable for this execution origin');
-      result = await config.fireflyTools.execute(call.name, runtimeArgs, config.executionOrigin!);
+    } else if (call.name.startsWith('hledger_')) {
+      if (executionSource !== 'agent' || !config.hledgerTools || !isAuthorizedFinanceOrigin(config.executionOrigin)) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
+      result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!);
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
       result = await config.weatherTools.execute(call.name, runtimeArgs);
@@ -629,13 +667,6 @@ function safePage(value: unknown, fallback: number, maximum: number, minimum = 0
 
 function asOutput(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : { value };
-}
-
-function isProtectedRequestInput(value: unknown, protectedTexts: ReadonlySet<string>): boolean {
-  if (!isRecord(value) || value.role !== 'user') return false;
-  if (typeof value.content === 'string') return protectedTexts.has(value.content);
-  if (Array.isArray(value.content)) return value.content.some(part => isRecord(part) && typeof part.text === 'string' && protectedTexts.has(part.text));
-  return false;
 }
 
 function nativeAttachmentSignature(input: unknown[]): string {
