@@ -15,7 +15,7 @@ import { isHttp429 } from './tool-errors.js';
 try {
   const config = readConfig();
   configureLogging(config);
-  process.on('uncaughtExceptionMonitor', error => logError('Uncaught exception monitor', error, { notify: !isHttp429(error) }));
+  process.on('uncaughtExceptionMonitor', error => logError('Uncaught exception monitor', error, { mention: !isHttp429(error) }));
   if (process.argv[2] === 'register-discord-commands') {
     await registerDiscordCommands(config);
   } else {
@@ -44,7 +44,7 @@ try {
     }
   }
 } catch (error) {
-  logError('Butler startup/runtime failed', error, { notify: !isHttp429(error) });
+  logError('Butler startup/runtime failed', error, { mention: !isHttp429(error) });
   process.exitCode = 1;
 } finally {
   await flushLogs();

@@ -78,7 +78,7 @@ export class DiscordHandler {
   private deploymentPollPromise?: Promise<void>;
   private notificationClaimsPaused = false;
   private readonly deploymentNotifications = new Set<Promise<boolean>>();
-  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning && !this.stopping) { this.deployCheckRunning = true; const poll = this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { notify: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); this.deploymentPollPromise = poll; void poll; } }, 250); timer.unref(); return timer; })();
+  private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning && !this.stopping) { this.deployCheckRunning = true; const poll = this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { mention: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); this.deploymentPollPromise = poll; void poll; } }, 250); timer.unref(); return timer; })();
   constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) {
     this.outputChannel = options.outputChannel ?? (async () => undefined);
     this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
@@ -361,12 +361,12 @@ export class DiscordHandler {
           this.activeAsk.delete(message.channelId);
         } catch (error) {
           if (attachmentToolCallIds.length) {
-            try { this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : deliveryAttempted ? 'failed_or_unknown' : 'not_sent'); } catch (error) { logError('Discord attachment delivery status persistence failed', error, { notify: !isHttp429(error) }); }
+            try { this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : deliveryAttempted ? 'failed_or_unknown' : 'not_sent'); } catch (error) { logError('Discord attachment delivery status persistence failed', error, { mention: !isHttp429(error) }); }
           }
           attachmentFiles = [];
           this.activeAsk.delete(message.channelId);
           const failureKind = error instanceof AttachmentInputError ? ` (${error.code}${error.code === 'request_rejected' && error.status ? ` HTTP ${error.status}` : ''})` : '';
-          logError(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { notify: !isHttp429(error) && !isHttp429(failureKind), deduplicationKey: discordAskDeduplicationKey(message.channelId, failureKind) });
+          logError(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { mention: !isHttp429(error) && !isHttp429(failureKind), deduplicationKey: discordAskDeduplicationKey(message.channelId, failureKind) });
           const pending = this.pendingSteer.get(message.channelId) ?? [];
           logTrace('steer_queue_discard', { askId, traceId, sessionId: stored.sessionId, count: pending.length, reason: 'ask_error_cleanup' });
           pending.splice(0);
@@ -391,7 +391,7 @@ export class DiscordHandler {
     if (split < 1) return;
     const actionId = customId.slice(0, split);
     const action = this.store.discordAction(actionId);
-    const respond = async (content: string) => { try { await interaction.followUp({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS }); } catch (error) { logError('Discord button result delivery failed', error, { notify: !isHttp429(error) }); } };
+    const respond = async (content: string) => { try { await interaction.followUp({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS }); } catch (error) { logError('Discord button result delivery failed', error, { mention: !isHttp429(error) }); } };
     if (!action || action.status !== 'pending' || this.stopping || interaction.channelId !== action.channel_id || interaction.message.id !== action.message_id) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕無效或不屬於目前允許的操作。'); return; }
     if (Date.now() >= Date.parse(action.expires_at)) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕已過期。'); return; }
     let buttons: Array<Record<string, unknown>>;
@@ -415,7 +415,7 @@ export class DiscordHandler {
         logInfo('tool_call', { tool: String(button.actionTool), source: 'discord_button', sessionId: action.session_id, callId: customId });
         toolId = this.store.beginTool(action.session_id, String(button.actionTool), actionArgs);
         result = await runtime.execute(String(button.actionTool), actionArgs);
-      } catch (error) { actionFailed = true; if (!(error instanceof ToolUsageError)) logError(`Discord button action failed action=${actionId} channel=${action.channel_id}`, error, { notify: !isHttp429(error) }); result = { error: 'failed_or_unknown; not retried' }; }
+      } catch (error) { actionFailed = true; if (!(error instanceof ToolUsageError)) logError(`Discord button action failed action=${actionId} channel=${action.channel_id}`, error, { mention: !isHttp429(error) }); result = { error: 'failed_or_unknown; not retried' }; }
       if (toolId) this.store.finishTool(toolId, actionFailed ? 'failed' : 'completed', result);
       this.store.finishDiscordAction(customId, actionFailed ? 'failed' : 'completed', { actorId: interaction.user.id, result });
       await respond(actionFailed ? '操作失敗或結果不明；為避免重複副作用，不會自動重試。' : '操作已完成。');
@@ -492,7 +492,7 @@ export class DiscordHandler {
           if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 10 則訊息會保留。');
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
         } catch (error) {
-          logError(`Discord conversation compaction failed channel=${context.channelId}`, error, { notify: !isHttp429(error) });
+          logError(`Discord conversation compaction failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
           await context.reply(error instanceof Error ? error.message : '壓縮失敗；原有上下文保持不變。');
         }
       });
@@ -511,8 +511,8 @@ export class DiscordHandler {
         this.store.setRestartNotice(context.channelId, messageId);
       } catch (error) {
         this.stopping = false;
-        try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError, { notify: !isHttp429(noticeError) }); }
-        logError(`Discord restart notice persistence failed channel=${context.channelId}`, error, { notify: !isHttp429(error) });
+        try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError, { mention: !isHttp429(noticeError) }); }
+        logError(`Discord restart notice persistence failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
         return;
       }
       try {
@@ -521,8 +521,8 @@ export class DiscordHandler {
       } catch (error) {
         this.stopping = false;
         this.store.setRestartNotice(null);
-        logError(`Discord managed restart failed channel=${context.channelId}`, error, { notify: !isHttp429(error) });
-        try { await context.reply('重啟未能啟動；Butler 已恢復接收工作。'); } catch (error) { logError('Discord restart failure notice delivery failed', error, { notify: !isHttp429(error) }); }
+        logError(`Discord managed restart failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
+        try { await context.reply('重啟未能啟動；Butler 已恢復接收工作。'); } catch (error) { logError('Discord restart failure notice delivery failed', error, { mention: !isHttp429(error) }); }
       }
       return;
     }
@@ -809,9 +809,9 @@ export class DiscordHandler {
         this.subagentCoordinator.updateEvent(event.id, 'delivered');
       } catch (error) {
         if (started) this.subagentCoordinator.updateEvent(event.id, 'failed_unknown');
-        logError(`Subagent parent event failed event=${event.id}`, error, { notify: !isHttp429(error) });
+        logError(`Subagent parent event failed event=${event.id}`, error, { mention: !isHttp429(error) });
       }
-    }).catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { notify: !isHttp429(error) }));
+    }).catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
   private enqueue(channelId: string, work: () => Promise<void>): Promise<void> {
@@ -888,7 +888,7 @@ async function archiveDeliveredAttachments(result: unknown, files: Array<{ attac
     let localPath = file.archivePath;
     if (!localPath) {
       try { localPath = (await archiveOutgoingAttachment(file.attachment, item.name, attachmentDir, mimeType)).localPath; }
-      catch (error) { logError(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error, { notify: !isHttp429(error) }); }
+      catch (error) { logError(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error, { mention: !isHttp429(error) }); }
     }
     delivered.push({ attachmentId: item.id, filename: item.name, mimeType, status: 'ready', ...(localPath ? { localPath, memoryDocumentId: `attachment:${messageId}:${item.id}` } : {}), ...(file.origin ? { origin: file.origin } : {}) });
   }
@@ -976,7 +976,7 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
       return interaction.reply({ content, ephemeral: true, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
     } });
   } catch (error) {
-    logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error, { notify: !isHttp429(error) });
+    logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error, { mention: !isHttp429(error) });
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({ content: DELIVERY_ERROR, allowedMentions: ALLOWED_MENTIONS });
@@ -984,7 +984,7 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
         await interaction.reply({ content: DELIVERY_ERROR, ephemeral: true, allowedMentions: ALLOWED_MENTIONS });
       }
     } catch (error) {
-      logError('Discord interaction failure notice delivery failed', error, { notify: !isHttp429(error) });
+      logError('Discord interaction failure notice delivery failed', error, { mention: !isHttp429(error) });
     }
   }
 }
@@ -1217,7 +1217,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     if (!isRecord(application) || typeof application.id !== 'string') throw new Error('Discord application metadata is missing application.id');
     await registerGuildCommands(application.id, guildId, commandApi);
   };
-  client.on('guildCreate', guild => { if (discordReady) void registerGuild(guild.id).catch(error => logError(`Discord command registration failed for joined guild ${guild.id}`, error, { notify: !isHttp429(error) })); });
+  client.on('guildCreate', guild => { if (discordReady) void registerGuild(guild.id).catch(error => logError(`Discord command registration failed for joined guild ${guild.id}`, error, { mention: !isHttp429(error) })); });
   client.once('clientReady', readyClient => {
     discordReady = true;
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
@@ -1230,12 +1230,12 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
         const message = await channel.messages.fetch(notice.messageId);
         await message.edit({ content: '重啟完成', allowedMentions: ALLOWED_MENTIONS });
         store.setRestartNotice(null);
-      })().catch(error => logError('Discord restart readiness notification failed', error, { notify: !isHttp429(error) }));
+      })().catch(error => logError('Discord restart readiness notification failed', error, { mention: !isHttp429(error) }));
     }
     const scheduler = new Scheduler({ store, enqueue: request => handler.enqueueScheduled(request), log: { logInfo, logWarn, logError } });
     handler.setScheduler(scheduler);
     scheduler.start();
-    if (readyFile) { try { writeFileSync(readyFile, 'ready\\n', { mode: 0o600 }); } catch (error) { logError('Discord readiness signal failed', error, { notify: !isHttp429(error) }); } }
+    if (readyFile) { try { writeFileSync(readyFile, 'ready\\n', { mode: 0o600 }); } catch (error) { logError('Discord readiness signal failed', error, { mention: !isHttp429(error) }); } }
     const serviceReadyFile = process.env.BUTLER_SERVICE_READY_FILE;
     if (serviceReadyFile) { try {
       const manifestPath = join(dirname(fileURLToPath(import.meta.url)), 'build-manifest.json');
@@ -1260,16 +1260,16 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       : message.content;
     const attachments = forwardedMessage ? forwardedAttachments : [...message.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size }));
     const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, forwardedMessage, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content, hasAttachments: attachments.length > 0, attachments, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId && !forwardedMessage ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.system ? message.channel.send({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }) : message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
-      .catch(error => logError(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error, { notify: !isHttp429(error) }));
+      .catch(error => logError(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error, { mention: !isHttp429(error) }));
     if (isErrorWebhook) void withoutLogMention(handle);
     else void handle();
   });
   client.on('interactionCreate', interaction => {
     if (interaction.isAutocomplete?.()) { const runtime = getRuntime(); void handleAutocomplete(runtime.discord, interaction, fetch, runtime.settings.image).catch(error => logWarn('Discord autocomplete handler failed', error)); }
-    else if (interaction.isButton?.()) void handler.button(interaction).catch(error => logError('Discord button handler failed', error, { notify: !isHttp429(error) }));
-    else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(error => logError('Discord interaction handler failed', error, { notify: !isHttp429(error) }));
+    else if (interaction.isButton?.()) void handler.button(interaction).catch(error => logError('Discord button handler failed', error, { mention: !isHttp429(error) }));
+    else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(error => logError('Discord interaction handler failed', error, { mention: !isHttp429(error) }));
   });
-  client.on('error', error => logError('Discord client error', error, { notify: !isHttp429(error) }));
+  client.on('error', error => logError('Discord client error', error, { mention: !isHttp429(error) }));
 
   let closed = false;
   let uiStartupFailed = false;
@@ -1280,18 +1280,18 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     closed = true;
     shutdownPromise = (async () => {
       closeConfigWatch?.();
-      try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error, { notify: !isHttp429(error) }); }
+      try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error, { mention: !isHttp429(error) }); }
       process.removeListener('SIGINT', onSigint);
       process.removeListener('SIGTERM', onSigterm);
-      try { await closeUi?.(); } catch (error) { logError('UI shutdown failed', error, { notify: !isHttp429(error) }); }
+      try { await closeUi?.(); } catch (error) { logError('UI shutdown failed', error, { mention: !isHttp429(error) }); }
       closeUi = undefined;
-      try { await client.destroy(); } catch (error) { logError('Discord client shutdown failed', error, { notify: !isHttp429(error) }); }
-      try { store.close(); } catch (error) { logError('Discord database shutdown failed', error, { notify: !isHttp429(error) }); }
+      try { await client.destroy(); } catch (error) { logError('Discord client shutdown failed', error, { mention: !isHttp429(error) }); }
+      try { store.close(); } catch (error) { logError('Discord database shutdown failed', error, { mention: !isHttp429(error) }); }
     })();
     return shutdownPromise;
   };
-  const onSigint = () => { void shutdown().then(finish).catch(error => { logError('Discord SIGINT shutdown failed', error, { notify: !isHttp429(error) }); finish(); }); };
-  const onSigterm = () => { void shutdown().then(finish).catch(error => { logError('Discord SIGTERM shutdown failed', error, { notify: !isHttp429(error) }); finish(); }); };
+  const onSigint = () => { void shutdown().then(finish).catch(error => { logError('Discord SIGINT shutdown failed', error, { mention: !isHttp429(error) }); finish(); }); };
+  const onSigterm = () => { void shutdown().then(finish).catch(error => { logError('Discord SIGTERM shutdown failed', error, { mention: !isHttp429(error) }); finish(); }); };
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
   try {

@@ -102,7 +102,7 @@ export class MemoryCoordinator {
   private kick(): void {
     if (!this.started || this.passive || this.closed || this.activeHttp) return;
     this.activeHttp = this.drainOne().catch(error => {
-      logError('Memory coordinator drain failed', error, { notify: !isHttp429(error) });
+      logError('Memory coordinator drain failed', error, { mention: !isHttp429(error) });
     }).finally(() => {
       this.activeHttp = undefined;
       if (!this.passive && !this.closed) this.schedule();
@@ -124,7 +124,7 @@ export class MemoryCoordinator {
         if (midnightDue) this.midnightAt = nextCronRun('0 0 * * *', this.getTimezone()).getTime();
       } catch (error) {
         freezeFailed = true;
-        logError('Memory coordinator freeze failed', error, { notify: !isHttp429(error) });
+        logError('Memory coordinator freeze failed', error, { mention: !isHttp429(error) });
       } finally {
         if (this.activeHttp) this.schedule(freezeFailed ? 1_000 : undefined);
         else if (freezeFailed) this.schedule(1_000);
@@ -237,7 +237,7 @@ export class MemoryCoordinator {
           this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'suppressed', { error: error.message });
           return;
         }
-        logError(`Attachment memory submit failed document=${job.documentId}`, error, { notify: !isHttp429(error) });
+        logError(`Attachment memory submit failed document=${job.documentId}`, error, { mention: !isHttp429(error) });
         const rejection = error instanceof ConversationSubmissionError && error.classification === 'rejection';
         this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, rejection ? 'failed' : 'unknown', { error: this.errorText(error) });
       }
@@ -267,10 +267,10 @@ export class MemoryCoordinator {
         const detail = typeof response?.error_message === 'string' ? response.error_message.slice(0, 500) : typeof response?.error === 'string' ? response.error.slice(0, 500) : '';
         const error = `Attachment memory operation ${operationId} ended with ${result.status}${detail ? `: ${detail}` : ''}`;
         this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, result.status === 'not_found' ? 'unknown' : 'failed', { nextPollAt: null, error });
-        const context = `Attachment memory operation terminal document=${job.documentId} operation=${operationId} status=${result.status}${detail ? ` reason=${detail}` : ''}`; logError(context, undefined, { notify: !isHttp429(context) });
+        const context = `Attachment memory operation terminal document=${job.documentId} operation=${operationId} status=${result.status}${detail ? ` reason=${detail}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
       }
     } catch (error) {
-      logError(`Attachment memory poll failed document=${job.documentId} operation=${operationId}`, error, { notify: !isHttp429(error) });
+      logError(`Attachment memory poll failed document=${job.documentId} operation=${operationId}`, error, { mention: !isHttp429(error) });
       const pollAttempt = Math.min(job.pollAttempt + 1, POLL_DELAYS.length - 1);
       this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, job.state === 'retaining' ? 'retaining' : 'converting', { pollAttempt, nextPollAt: new Date(Date.now() + POLL_DELAYS[pollAttempt]).toISOString(), error: this.errorText(error) });
     }
@@ -288,7 +288,7 @@ export class MemoryCoordinator {
       this.pollDelays.set(batch.operationId, 0);
     } catch (error) {
       if (error instanceof MemoryWriteSuppressedError) { this.suppressBatch(batch); return; }
-      logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error, { notify: !isHttp429(error) });
+      logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
       const rejection = error instanceof ConversationSubmissionError && error.classification === 'rejection';
       this.store.updateMemoryBatch(batch.operationId, rejection ? 'failed' : 'unknown', {
         error: this.errorText(error),
@@ -318,7 +318,7 @@ export class MemoryCoordinator {
       } else if (result.status === 'not_found') {
         const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
         const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
-        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=not_found${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { notify: !isHttp429(context) });
+        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=not_found${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
         this.store.updateMemoryBatch(batch.operationId, 'needs_clarification', {
           lastPollAt: now,
           error: 'Operation not found after persistent submit intent; automatic resubmission is unsafe.',
@@ -327,7 +327,7 @@ export class MemoryCoordinator {
       } else {
         const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
         const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
-        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=${result.status}${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { notify: !isHttp429(context) });
+        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=${result.status}${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
         this.store.updateMemoryBatch(batch.operationId, result.status, {
           lastPollAt: now,
           error: JSON.stringify(result.response),
@@ -335,7 +335,7 @@ export class MemoryCoordinator {
         this.pollDelays.delete(batch.operationId);
       }
     } catch (error) {
-      logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error, { notify: !isHttp429(error) });
+      logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
       this.recoveryPending.delete(batch.operationId);
       const index = this.pollDelays.get(batch.operationId) ?? (batch.lastPollAt ? 1 : 0);
       const nextIndex = Math.min(index + 1, POLL_DELAYS.length - 1);

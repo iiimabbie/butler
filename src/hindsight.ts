@@ -58,7 +58,7 @@ export class Hindsight {
         createdBank = true;
       } else if (!response.ok) throw new Error(`bank config returned HTTP ${response.status}`);
     } catch (error) {
-      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error, { notify: !isHttp429(error) });
+      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error, { mention: !isHttp429(error) });
       store.finishTool(audit, 'failed', { bankId: this.config.bankId, error: safeError(error) });
       emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed' });
       logMemoryPhase('bank_setup', started, 'failed');

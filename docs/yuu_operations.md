@@ -62,7 +62,7 @@ DEPLOY_LOG="$(jq -r '.log' .data/deploy/last-result.json)" && tail -n 80 "$DEPLO
 
 ## 錯誤通知
 
-可在 `discord.errorWebhookUrl` 設定 Discord webhook（`https://discord.com/api/webhooks/<id>/<token>`），錯誤才會送到指定目的地；不設定則只寫本機日誌。`discord.errorWebhookMentionUserId` 可設定通知自動標記的數字使用者 ID，`discord.errorWebhookThreadId` 可設定論壇內既有貼文（thread）ID，並以 `thread_id` 發送，不會建立新貼文。這三個欄位可熱更新或移除，後續錯誤即生效。每則錯誤會送出一張 Embed 卡片，外送內容僅含診斷資訊，不含工具參數／結果、聊天內容或 HTTP 回應本文；卡片描述最多 4,096 字元，過長時截斷並附本機完整 log 位置，本機 stdout/stderr 保留完整遮罩後錯誤。配置的告警 webhook 卡片文字會由 Butler 讀入。通知失敗只記錄本機分類或 HTTP 狀態，不阻塞聊天。程序致命錯誤、主機中斷時不保證 webhook 送達。
+可在 `discord.errorWebhookUrl` 設定 Discord webhook（`https://discord.com/api/webhooks/<id>/<token>`），錯誤才會送到指定目的地；不設定則只寫本機日誌。`discord.errorWebhookMentionUserId` 可設定通知自動標記的數字使用者 ID，`discord.errorWebhookThreadId` 可設定論壇內既有貼文（thread）ID，並以 `thread_id` 發送，不會建立新貼文。這三個欄位可熱更新或移除，後續錯誤即生效。每則錯誤會送出一張 Embed 卡片；HTTP 429 錯誤也會送出 webhook，但不會自動標記設定的使用者。外送內容僅含診斷資訊，不含工具參數／結果、聊天內容或 HTTP 回應本文；卡片描述最多 4,096 字元，過長時截斷並附本機完整 log 位置，本機 stdout/stderr 保留完整遮罩後錯誤。配置的告警 webhook 卡片文字會由 Butler 讀入。通知失敗只記錄本機分類或 HTTP 狀態，不阻塞聊天。程序致命錯誤、主機中斷時不保證 webhook 送達。
 
 Session UI 預設列出目前仍由頻道使用的 Session，可切換至封存列表；兩者都能查閱原始對話與工具紀錄。需要依日期查看純對話時，可在 Discord 請 Butler 使用 `journal_transcript_by_date`，提供完整 `YYYY-MM-DD`；日期依 `schedule.timezone`（預設 `Asia/Taipei`），跨目前與封存 Session，包含 Butler 實際送達 Discord 的文字，不含排程內部輸入或工具結果，長結果以 `next_offset` 續讀。此功能只涵蓋 Butler 已收錄的內容，不包含日記生成或日期 UI。
 
