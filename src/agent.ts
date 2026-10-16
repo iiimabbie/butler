@@ -529,7 +529,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
         : await config.hindsight.reflect(query);
     } else if (call.name.startsWith('hledger_')) {
       if (executionSource !== 'agent' || !config.hledgerTools || !isAuthorizedFinanceOrigin(config.executionOrigin)) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
-      result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!);
+      result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!, { requesterId: config.discordContext?.requesterId, channelId: config.discordContext?.channelId });
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
       result = await config.weatherTools.execute(call.name, runtimeArgs);
