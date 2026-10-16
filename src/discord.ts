@@ -52,7 +52,7 @@ const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 function isProcessAlive(pid: number): boolean { try { process.kill(pid, 0); return (readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').some(arg => arg.endsWith('/scripts/butler-deploy.mjs')) && readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').includes('--locked')); } catch { return false; } }
-export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
+export type DiscordCommandApi = { get(route: string): Promise<unknown>; put(route: string, options: { body: unknown }): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
   private readonly queues = new Map<string, Promise<void>>();
@@ -1005,7 +1005,7 @@ export async function synchronizeDiscordGuildCommands(applicationId: string, gui
       counts.unchanged++;
     } else {
       if (typeof existing.id !== 'string') throw new Error(`Discord command ID is missing: ${desired.name}`);
-      await api.put(Routes.applicationGuildCommand(applicationId, guildId, existing.id), { body: desired });
+      await api.patch(Routes.applicationGuildCommand(applicationId, guildId, existing.id), { body: desired });
       counts.updated++;
     }
   }
