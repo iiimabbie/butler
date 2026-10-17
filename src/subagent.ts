@@ -2,7 +2,7 @@ import { preserveOptionalToolArguments } from './tool-schema.js';
 import type { Store } from './store.js';
 import { logInfo } from './log.js';
 
-export type SubagentConfig = { model: string; maxTurns?: number; timeoutMs?: number };
+export type SubagentConfig = { model: string; maxTurns?: number; timeoutMs?: number; toolsEnabled?: boolean };
 export type SubagentToolRuntime = { definitions: Array<{ type: string; name: string; [key: string]: unknown }>; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 export type SubagentRunConfig = {
   baseUrl: string; apiKey?: string; fetcher?: typeof fetch; store: Store; parentSession: string;

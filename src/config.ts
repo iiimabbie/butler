@@ -19,7 +19,7 @@ export type ButlerConfig = {
   image?: ImageConfig;
   transcription?: AudioTranscriptionConfig;
   schedule?: { timezone?: string };
-  subagent?: { model: string; maxTurns?: number; timeoutMs?: number };
+  subagent?: { model: string; maxTurns?: number; timeoutMs?: number; toolsEnabled?: boolean };
 };
 
 const CONFIG_PATH = fileURLToPath(new URL('../config.yaml', import.meta.url));
@@ -120,7 +120,9 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (maxTurns !== undefined && (!Number.isSafeInteger(maxTurns) || (maxTurns as number) < 1 || (maxTurns as number) > 100)) throw new Error('Butler config subagent.maxTurns must be an integer from 1 to 100');
       const timeoutMs = section.timeoutMs;
       if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300000)) throw new Error('Butler config subagent.timeoutMs must be an integer from 1 to 300000');
-      config.subagent = { model, maxTurns: (maxTurns as number | undefined) ?? 30, timeoutMs: (timeoutMs as number | undefined) ?? 120000 };
+      const toolsEnabled = section.toolsEnabled;
+      if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
+      config.subagent = { model, maxTurns: (maxTurns as number | undefined) ?? 30, timeoutMs: (timeoutMs as number | undefined) ?? 120000, toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
     } else {
       const port = section.port;
       if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Butler config ui.port must be an integer from 1 to 65535');

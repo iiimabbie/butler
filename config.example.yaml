@@ -69,6 +69,8 @@ image:
 # Optional background subagent tool; uses llm.baseUrl/apiKey and this model.
 subagent:
   model: YOUR_SUBAGENT_MODEL
+  # toolsEnabled: true  # hot-reloadable; false hides and rejects parent management tools (default true)
+  # Existing workers continue; internal handoff retains send/stop only while disabled.
   # maxTurns: 30
   # timeoutMs: 120000
 

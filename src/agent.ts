@@ -127,6 +127,13 @@ export const tools = [
   { type: 'function', name: 'memory_reflect', description: 'Synthesize useful answers from shared long-term memories, including personal preferences, relationships, past decisions, changing circumstances, and connections across conversations. Ask a specific question identifying relevant people, topics, and dates when useful. Returns a generated synthesis with supporting memory references. Answer naturally and prioritize useful information over repetitive evidence qualifications. Preserve meaningful uncertainty, corrections, and contradictions without inventing missing facts. Use memory_recall when individual memory records are needed.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
 ];
 
+export function subagentToolsForContext(config: Pick<AgentConfig, 'subagent' | 'subagentCoordinator' | 'subagentEvent'>): typeof subagentDefinitions {
+  if (!config.subagentCoordinator) return [];
+  return subagentDefinitions.filter(tool => config.subagentEvent && config.subagent?.toolsEnabled === false
+    ? ['subagent_send', 'subagent_stop'].includes(tool.name)
+    : config.subagent?.toolsEnabled !== false && (config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)));
+}
+
 function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Record<string, unknown> }): { [key: string]: unknown; parameters: Record<string, unknown> } {
   const parameters = tool.parameters;
   return {
@@ -186,7 +193,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
     const fullAvailableTools = (config.deploymentResultEvent
       ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
-      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...(config.subagentCoordinator ? subagentDefinitions.filter(tool => config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)) : []), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const catalog = config.deploymentResultEvent ? undefined : createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
     const toolsForRequest = () => {
       if (!catalog) return fullAvailableTools;
@@ -479,6 +486,12 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     return { tool_history_id: id, ...result };
   }
 
+  const subagentManagementNames = new Set(['subagent_run', 'subagent_list', 'subagent_status', 'subagent_send', 'subagent_stop']);
+  if (subagentManagementNames.has(call.name) && config.subagent?.toolsEnabled === false) {
+    const internalHandoffAllowed = config.subagentEvent && ['subagent_send', 'subagent_stop'].includes(call.name);
+    if (!internalHandoffAllowed) throw new ToolUsageError('Subagent management tools are disabled');
+  }
+  if (config.subagentEvent && config.subagent?.toolsEnabled === false && ['subagent_run', 'subagent_list', 'subagent_status'].includes(call.name)) throw new ToolUsageError('Only send/stop are allowed during internal subagent handoff');
   if (executionSource === 'subagent' && call.name === 'butler_deploy') throw new ToolUsageError('Subagent workers cannot request deployment');
   if (config.deploymentResultEvent && (call.name !== 'deployment_result_status' || !config.deploymentResultStatus || Object.keys(args).some(key => key !== 'label'))) throw new ToolUsageError('Deployment result event tool call is not authorized');
   const id = store.beginTool(session, call.name, args);
