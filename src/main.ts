@@ -30,7 +30,7 @@ try {
     prepareDatabaseDirectory(dbPath);
     const store = new Store(dbPath);
     let current: RuntimeBundle;
-    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger', allowedRequesterIds:[], allowedChannelIds:[] }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
+    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger' }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
     store.setAlertChannelIds(current.discord.alertChannelIds);
     const getRuntime = () => current;

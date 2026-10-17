@@ -7,8 +7,7 @@ import { ToolUsageError } from './tool-errors.js';
 import type { FinanceIdentity } from './finance-origin.js';
 import { isAuthorizedFinanceOrigin } from './finance-origin.js';
 
-export type HledgerConfig = { enabled: boolean; journalPath: string; executablePath: string; allowedRequesterIds: string[]; allowedChannelIds: string[] };
-export type HledgerExecutionContext = { requesterId?: string; channelId?: string };
+export type HledgerConfig = { enabled: boolean; journalPath: string; executablePath: string };
 const str = { type: 'string', minLength: 1 };
 const date = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' };
 const posting = { type: 'object', properties: { account: str, amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, cost_currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' } }, required: ['account','amount','currency'], additionalProperties: false };
@@ -44,7 +43,7 @@ type SourceRef = { account: string; currency: string };
 type SourceOperation = { status: 'pending' | 'active' | 'voided' | 'unknown'; tool: string; updatedAt: string; date?: string; postings?: SourceRef[] };
 type OperationLedger = { version: 1; operations: Record<string, LedgerOperation>; sources: Record<string, SourceOperation>; cuts: Record<string, Record<string, string>>; accounts?: Record<string, AccountMetadata>; schedules?: Record<string, ScheduleMetadata> };
 
-export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args, origin?: FinanceIdentity, context?: HledgerExecutionContext): Promise<unknown> };
+export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> };
 export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime {
   const journal = resolve(config.journalPath), directory = dirname(journal), backups = resolve(directory, 'backups'), operationLedgerPath = resolve(directory, 'operations.json');
   if (!isAbsolute(config.journalPath) || !isAbsolute(config.executablePath) || !journal.includes(`${sep}.data${sep}finance${sep}`) || journal.includes(`${sep}public${sep}`)) throw new Error('hledger journal must be inside private .data/finance and executable path absolute');
@@ -361,10 +360,8 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     }
     return result;
   }
-  async function execute(name: string, args: Args, origin?: FinanceIdentity, context?: HledgerExecutionContext): Promise<unknown> {
-    const requesterId = context?.requesterId;
-    const channelId = context?.channelId;
-    if (!config.enabled || !isAuthorizedFinanceOrigin(origin) || !requesterId || !channelId || origin?.requesterId !== requesterId || origin?.channelId !== channelId || !config.allowedRequesterIds.includes(requesterId) || !config.allowedChannelIds.includes(channelId)) throw new ToolUsageError('hledger tools require an authorized interactive Discord requester and channel; scheduled/subagent execution is not allowed.');
+  async function execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> {
+    if (!config.enabled || !isAuthorizedFinanceOrigin(origin)) throw new ToolUsageError('hledger tools require an authorized interactive Discord message; scheduled/subagent execution is not allowed.');
     if (!definitions.some(x => x.name === name)) throw new ToolUsageError('Unknown or disabled hledger tool');
     if (name === 'hledger_lock_status') {
       try { const st = await lstat(`${journal}.lock`); if (!st.isFile() || st.isSymbolicLink()) return { lock: 'unsafe_object', automatic_recovery: false }; const handle=await open(`${journal}.lock`,constants.O_RDONLY|constants.O_NOFOLLOW); let owner=''; try { owner=(await handle.readFile('utf8')).slice(0,120); } finally { await handle.close(); } return { lock:'present',created_at:st.mtime.toISOString(),owner,automatic_recovery:false,administrator_action:'Verify no writer process is active, inspect journal and operation ledger, preserve lock copy, then remove only after explicit administrator approval.' }; }

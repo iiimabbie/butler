@@ -11,7 +11,7 @@ export type ButlerConfig = {
   discord?: { token?: string; ownerId?: string; channelIds?: string[]; alertChannelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
-  hledger?: { enabled: boolean; journalPath: string; executablePath: string; allowedRequesterIds: string[]; allowedChannelIds: string[] };
+  hledger?: { enabled: boolean; journalPath: string; executablePath: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
   google?: GoogleClientConfig;
@@ -69,17 +69,10 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (typeof enabled !== 'boolean') throw new Error('Butler config hledger.enabled must be boolean');
       const journalPath = requireSetting(string('journalPath'), 'hledger.journalPath');
       const executablePath = requireSetting(string('executablePath'), 'hledger.executablePath');
-      const allowedRequesterIds = section.allowedRequesterIds;
-      const allowedChannelIds = section.allowedChannelIds;
-      const validSnowflakeList = (value: unknown): value is string[] => Array.isArray(value) && value.length > 0 && value.every(id => typeof id === 'string' && /^[0-9]{17,20}$/.test(id)) && new Set(value).size === value.length;
-      if (enabled && !validSnowflakeList(allowedRequesterIds)) throw new Error('Butler config hledger.allowedRequesterIds must be a nonempty unique string array of Discord IDs when enabled');
-      if (enabled && !validSnowflakeList(allowedChannelIds)) throw new Error('Butler config hledger.allowedChannelIds must be a nonempty unique string array of Discord IDs when enabled');
-      if (!enabled && allowedRequesterIds !== undefined && !validSnowflakeList(allowedRequesterIds)) throw new Error('Butler config hledger.allowedRequesterIds must be a nonempty unique string array of Discord IDs');
-      if (!enabled && allowedChannelIds !== undefined && !validSnowflakeList(allowedChannelIds)) throw new Error('Butler config hledger.allowedChannelIds must be a nonempty unique string array of Discord IDs');
       const projectRoot = fileURLToPath(new URL('../', import.meta.url));
       if (!isAbsolute(journalPath) || resolve(journalPath) !== resolve(projectRoot, '.data/finance/main.journal')) throw new Error('Butler config hledger.journalPath must be the private .data/finance/main.journal');
       if (!isAbsolute(executablePath)) throw new Error('Butler config hledger.executablePath must be absolute');
-      config.hledger = { enabled, journalPath, executablePath, allowedRequesterIds: (allowedRequesterIds as string[] | undefined) ?? [], allowedChannelIds: (allowedChannelIds as string[] | undefined) ?? [] };
+      config.hledger = { enabled, journalPath, executablePath };
     } else if (name === 'web') {
       if (section.provider !== 'tavily') throw new Error('Butler config web.provider must be tavily');
       const baseUrl = string('baseUrl');
