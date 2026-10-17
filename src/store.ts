@@ -92,7 +92,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, question_id TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS deployment_requests(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, requester_id TEXT, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','interrupted','needs_reconciliation')), result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deployment_requests(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, requester_id TEXT, status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','interrupted','needs_reconciliation')), result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, provenance_json TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_idx ON deployment_requests((1)) WHERE status IN ('queued','running','needs_reconciliation');
       CREATE TABLE IF NOT EXISTS deployment_result_events(id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE REFERENCES deployment_requests(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown','needs_reconciliation')), parent_input_id TEXT, delivery_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, target_version TEXT, claimed_version TEXT, parent_input_version TEXT, delivered_version TEXT, send_attempt_id TEXT, send_phase TEXT);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
@@ -135,6 +135,8 @@ export class Store implements SchedulerStore {
     if (!replySql.includes("'none'")) {
       this.db.exec(`ALTER TABLE channel_reply_modes RENAME TO channel_reply_modes_old; CREATE TABLE channel_reply_modes(channel_id TEXT PRIMARY KEY,mode TEXT NOT NULL CHECK(mode IN ('all','mention','none'))); INSERT INTO channel_reply_modes SELECT * FROM channel_reply_modes_old; DROP TABLE channel_reply_modes_old;`);
     }
+    const deploymentRequestColumns = new Set((this.db.prepare('PRAGMA table_info(deployment_requests)').all() as Array<{ name: string }>).map(column => column.name));
+    if (!deploymentRequestColumns.has('provenance_json')) this.db.exec('ALTER TABLE deployment_requests ADD COLUMN provenance_json TEXT');
     const deploymentEventColumns = new Set((this.db.prepare('PRAGMA table_info(deployment_result_events)').all() as Array<{ name: string }>).map(column => column.name));
     for (const [name, definition] of [['target_version', 'TEXT'], ['claimed_version', 'TEXT'], ['parent_input_version', 'TEXT'], ['delivered_version', 'TEXT'], ['send_attempt_id', 'TEXT'], ['send_phase', 'TEXT']] as const) {
       if (!deploymentEventColumns.has(name)) this.db.exec(`ALTER TABLE deployment_result_events ADD COLUMN ${name} ${definition}`);
@@ -578,9 +580,9 @@ export class Store implements SchedulerStore {
     return Number(result.changes) === 1;
   }
 
-  createDeploymentRequest(input: { id: string; parentSession: string; channelId: string; messageId?: string; requesterId?: string }): boolean {
+  createDeploymentRequest(input: { id: string; parentSession: string; channelId: string; messageId?: string; requesterId?: string; provenance?: Record<string, unknown> }): boolean {
     const now = new Date().toISOString();
-    const result = this.db.prepare("INSERT OR IGNORE INTO deployment_requests(id,parent_session_id,channel_id,message_id,requester_id,status,created_at,updated_at) VALUES(?,?,?,?,?,'queued',?,?)").run(input.id,input.parentSession,input.channelId,input.messageId ?? null,input.requesterId ?? null,now,now);
+    const result = this.db.prepare("INSERT OR IGNORE INTO deployment_requests(id,parent_session_id,channel_id,message_id,requester_id,status,created_at,updated_at,provenance_json) VALUES(?,?,?,?,?,'queued',?,?,?)").run(input.id,input.parentSession,input.channelId,input.messageId ?? null,input.requesterId ?? null,now,now,input.provenance ? JSON.stringify(input.provenance) : null);
     return Number(result.changes) === 1;
   }
   deploymentRequest(id: string): Record<string, unknown> | undefined { return this.db.prepare('SELECT * FROM deployment_requests WHERE id=?').get(id) as Record<string, unknown> | undefined; }

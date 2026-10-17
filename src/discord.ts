@@ -87,7 +87,7 @@ export class DiscordHandler {
     this.memoryCoordinator = options.memoryCoordinator;
     this.store.recoverRunningDeployments();
     this.localTools?.setDeploymentAdapter({
-      accept: source => { const id = randomUUID(); if (this.store.createDeploymentRequest({ id, parentSession: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId })) return id; const existing = this.store.activeDeploymentRequest()?.id; if (typeof existing === 'string') return existing; throw new Error('Could not persist deployment request'); },
+      accept: source => { const id = randomUUID(); if (this.store.createDeploymentRequest({ id, parentSession: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId, provenance: { sourceKind: source.sourceKind, ...(source.sourceEventId ? { eventId: source.sourceEventId } : {}), ...(source.sourceInputId ? { parentInputId: source.sourceInputId } : {}), ...(source.sourceTriggerInputId ? { triggerInputId: source.sourceTriggerInputId } : {}), ...(source.sourceParentSession ? { sourceParentSession: source.sourceParentSession } : {}) } })) return id; const existing = this.store.activeDeploymentRequest()?.id; if (typeof existing === 'string') return existing; throw new Error('Could not persist deployment request'); },
       pending: () => { const row = this.store.queuedDeploymentRequest(); return row?.id as string | undefined; },
       active: () => { const row = this.store.activeDeploymentRequest(); return row?.id as string | undefined; },
       running: id => this.store.claimDeploymentRequest(id),
@@ -774,7 +774,7 @@ export class DiscordHandler {
       const current = this.subagentCoordinator.event(event.id);
       const snapshot = this.subagentCoordinator.status(event.subagentId, event.parentSession);
       if (!current || current.status !== 'pending') return;
-      if (!snapshot || snapshot.runId !== event.runId || (event.waitForReply && snapshot.question?.id !== event.questionId)) {
+      if (!snapshot || snapshot.runId !== event.runId || snapshot.parentSession !== event.parentSession || !origin.channelId || (event.waitForReply && snapshot.question?.id !== event.questionId)) {
         this.subagentCoordinator.updateEvent(event.id, 'delivered');
         return;
       }
@@ -798,6 +798,7 @@ export class DiscordHandler {
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
+          deploymentSource: { sourceKind: 'subagent_event', eventId: event.id, parentInputId: storedInput.id, triggerInputId: origin.triggerInputId, parentSession: event.parentSession, channelId: origin.channelId, requesterId: origin.requesterId },
           hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); }) : undefined,
           memoryWriteAllowed: () => { const token = this.store.messageMemoryWriteToken(storedInput.id); return token !== null && token !== undefined && this.store.validMemoryWriteToken(token); },

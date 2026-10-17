@@ -28,6 +28,8 @@ const definitions = [
   definition('local_process_stop', 'Stop a task created by this runtime. For other existing host processes, use local_shell. Tasks do not survive service restart.', { task_id: string }, ['task_id']),
 ];
 
+export type DeploymentRequestSource = { sessionId: string; channelId: string; messageId?: string; requesterId?: string; sourceKind: 'discord_external' | 'subagent_event'; sourceEventId?: string; sourceInputId?: string; sourceTriggerInputId?: string; sourceParentSession?: string };
+
 export class LocalToolRuntime {
   readonly definitions = definitions;
   private readonly processes = new LocalProcesses();
@@ -36,8 +38,8 @@ export class LocalToolRuntime {
   private deployPersisted = false;
   private deployTimer?: ReturnType<typeof setTimeout>;
   private deploymentQueueIdle: () => boolean = () => false;
-  private deploymentAdapter?: { accept: (source: { sessionId: string; channelId: string; messageId?: string; requesterId?: string }) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void };
-  setDeploymentAdapter(adapter: { accept: (source: { sessionId: string; channelId: string; messageId?: string; requesterId?: string }) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void }) { this.deploymentAdapter = adapter; if (adapter.pending()) { this.deployPending = true; this.deployPersisted = true; } }
+  private deploymentAdapter?: { accept: (source: DeploymentRequestSource) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void };
+  setDeploymentAdapter(adapter: { accept: (source: DeploymentRequestSource) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void }) { this.deploymentAdapter = adapter; if (adapter.pending()) { this.deployPending = true; this.deployPersisted = true; } }
   restoreQueuedDeploy() { if (this.deploymentAdapter?.pending()) { this.deployPending = true; this.deployPersisted = true; } }
   constructor(private readonly root = ROOT) {}
   setDeploymentQueueIdleCheck(check: () => boolean) { this.deploymentQueueIdle = check; }
@@ -69,13 +71,15 @@ export class LocalToolRuntime {
   }
   get activeCount() { return this.processes.activeCount; }
   async close() { this.closed = true; this.cancelDeployRequest(); await this.processes.close(); }
-  async execute(name: string, args: Record<string, unknown>, source?: { sessionId?: string; channelId?: string; messageId?: string; requesterId?: string }): Promise<unknown> {
+  async execute(name: string, args: Record<string, unknown>, source?: Partial<DeploymentRequestSource>): Promise<unknown> {
     if (this.closed) throw new Error('Local runtime is closing');
     if (name === 'butler_deploy') {
-      const existing = this.deploymentAdapter?.active?.() ?? this.deploymentAdapter?.pending();
+      const internalSourceValid = source?.sourceKind === 'subagent_event' && source.sourceParentSession === source.sessionId && Boolean(source.sourceEventId && source.sourceInputId);
+      const externalSourceValid = source?.sourceKind === 'discord_external';
+      if (!this.deploymentAdapter || !source?.sessionId || !source.channelId || (!internalSourceValid && !externalSourceValid)) throw new Error('Deployment request source metadata is unavailable; request was not queued');
+      const existing = this.deploymentAdapter.active?.() ?? this.deploymentAdapter.pending();
       if (existing) return { accepted: true, duplicate: true, deployment_id: existing, message: `部署已排隊，deployment_id=${existing}` };
-      if (!this.deploymentAdapter || !source?.sessionId || !source.channelId) throw new Error('Deployment request source metadata is unavailable; request was not queued');
-      const id = this.deploymentAdapter.accept({ sessionId: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId });
+      const id = this.deploymentAdapter.accept({ sessionId: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId, sourceKind: source.sourceKind!, sourceEventId: source.sourceEventId, sourceInputId: source.sourceInputId, sourceTriggerInputId: source.sourceTriggerInputId, sourceParentSession: source.sourceParentSession });
       this.deployPending = true;
       return { accepted: true, deployment_id: id, message: `已受理，將在本輪結束後部署（${id}）。` };
     }
