@@ -32,9 +32,10 @@ try {
     let current: RuntimeBundle;
     const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger', allowedRequesterIds:[], allowedChannelIds:[] }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
+    store.setAlertChannelIds(current.discord.alertChannelIds);
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
-    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); current = next; configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { current = next; configureLogging(candidate); }; } });
+    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); current = next; store.setAlertChannelIds(next.discord.alertChannelIds); configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { current = next; store.setAlertChannelIds(next.discord.alertChannelIds); configureLogging(candidate); }; } });
     try {
       await memoryCoordinator?.start();
       await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close(), id => watcher.addChannel(id));

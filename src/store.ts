@@ -8,8 +8,8 @@ import type { TranscriptEntry } from './journal-transcript.js';
 
 export type ChannelReplyMode = 'all' | 'mention' | 'none';
 export interface ChannelPolicy { channelId: string; parentChannelId: string | null; tracked: boolean | null; botReply: boolean | null; hindsightWrite: boolean | null; revision: number; }
-export interface EffectiveChannelPolicy { tracked: boolean; botReply: boolean; hindsightWrite: boolean; replyMode: ChannelReplyMode; trackedSource: string; botReplySource: string; hindsightWriteSource: string; replyModeSource: string; }
-export interface MemoryWriteToken { originChannelId: string; sourceChannelId: string; originPolicyChannelId: string; originRevision: number; sourcePolicyChannelId: string; sourceRevision: number; }
+export interface EffectiveChannelPolicy { tracked: boolean; botReply: boolean; hindsightWrite: boolean; replyMode: ChannelReplyMode; mode: 'queue' | 'steer'; trackedSource: string; botReplySource: string; hindsightWriteSource: string; replyModeSource: string; }
+export interface MemoryWriteToken { originChannelId: string; sourceChannelId: string; originPolicyChannelId: string; originRevision: number; sourcePolicyChannelId: string; sourceRevision: number; alertFingerprint?: string; }
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'auto';
 
 export interface Message {
@@ -64,6 +64,7 @@ function sortJsonValue(value: unknown): unknown {
 
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
+  private alertChannelIds = new Set<string>();
 
   constructor(path: string) {
     if (path !== ':memory:') {
@@ -745,6 +746,15 @@ export class Store implements SchedulerStore {
     return row && {channelId:row.channel_id,parentChannelId:row.parent_channel_id,tracked:row.tracked===null?null:row.tracked===1,botReply:row.bot_reply===null?null:row.bot_reply===1,hindsightWrite:row.hindsight_write===null?null:row.hindsight_write===1,revision:row.revision};
   }
 
+  setAlertChannelIds(ids: string[]): void { this.alertChannelIds = new Set(ids); }
+  isAlertChannel(channelId: string, parentChannelId?: string): boolean {
+    if (this.alertChannelIds.has(channelId)) return true;
+    const seen = new Set([channelId]);
+    let current = parentChannelId ?? this.channelPolicy(channelId)?.parentChannelId ?? undefined;
+    while (current && !seen.has(current)) { if (this.alertChannelIds.has(current)) return true; seen.add(current); current = this.channelPolicy(current)?.parentChannelId ?? undefined; }
+    return false;
+  }
+
   effectiveChannelPolicy(channelId:string,parentChannelId?:string):EffectiveChannelPolicy {
     const own=this.channelPolicy(channelId);
     const chain:Array<{channelId:string;policy:ChannelPolicy}>=[];
@@ -756,11 +766,14 @@ export class Store implements SchedulerStore {
       for(const entry of chain)if(entry.policy[key]!==null)return {value:entry.policy[key]!,source:entry.channelId};
       return {value:fallback,source:'default'};
     };
+    const alertSource = this.alertChannelIds.has(channelId) ? channelId : chain.find(entry => this.alertChannelIds.has(entry.channelId))?.channelId;
+    if (alertSource) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'mention', mode:'steer', trackedSource:alertSource, botReplySource:alertSource, hindsightWriteSource:alertSource, replyModeSource:alertSource };
     const tracked=resolve('tracked',true),botReply=resolve('botReply',false),hindsightWrite=resolve('hindsightWrite',true);
     const mode=this.channelReplyMode(channelId);
     const effectiveParent=parentChannelId??own?.parentChannelId??undefined;
     const parentMode=effectiveParent?this.channelReplyMode(effectiveParent):undefined;
-    return {tracked:tracked.value,botReply:botReply.value,hindsightWrite:hindsightWrite.value,trackedSource:tracked.source,botReplySource:botReply.source,hindsightWriteSource:hindsightWrite.source,replyMode:mode??parentMode??'mention',replyModeSource:mode?channelId:parentMode?effectiveParent!:'default'};
+    const modeSource = [channelId, ...chain.map(entry => entry.channelId)].find(id => this.channelModeOverride(id) !== undefined);
+    return {tracked:tracked.value,botReply:botReply.value,hindsightWrite:hindsightWrite.value,replyMode:mode??parentMode??'mention',mode:modeSource ? this.channelModeOverride(modeSource)! : 'queue',trackedSource:tracked.source,botReplySource:botReply.source,hindsightWriteSource:hindsightWrite.source,replyModeSource:mode?channelId:parentMode?effectiveParent!:'default'};
   }
 
   setChannelPolicy(channelId:string,patch:Partial<Pick<ChannelPolicy,'parentChannelId'|'tracked'|'botReply'|'hindsightWrite'>>):ChannelPolicy {
@@ -805,7 +818,7 @@ export class Store implements SchedulerStore {
     if(!origin.tracked||!source.tracked||!origin.hindsightWrite||!source.hindsightWrite)return null;
     const originPolicy=origin.hindsightWriteSource==='default'?originChannelId:origin.hindsightWriteSource;
     const sourcePolicy=source.hindsightWriteSource==='default'?sourceChannelId:source.hindsightWriteSource;
-    return {originChannelId,sourceChannelId,originPolicyChannelId:originPolicy,originRevision:this.channelPolicy(originPolicy)?.revision??0,sourcePolicyChannelId:sourcePolicy,sourceRevision:this.channelPolicy(sourcePolicy)?.revision??0};
+    return {originChannelId,sourceChannelId,originPolicyChannelId:originPolicy,originRevision:this.channelPolicy(originPolicy)?.revision??0,sourcePolicyChannelId:sourcePolicy,sourceRevision:this.channelPolicy(sourcePolicy)?.revision??0,alertFingerprint:this.alertFingerprint(originChannelId,sourceChannelId)};
   }
   messageMemoryWriteToken(messageId:string):MemoryWriteToken|null|undefined {
     const row=this.db.prepare('SELECT token_json FROM message_memory_tokens WHERE message_id=?').get(messageId) as {token_json:string}|undefined;
@@ -819,11 +832,13 @@ export class Store implements SchedulerStore {
     return {...destination,originPolicyChannelId:originalToken.originPolicyChannelId,originRevision:originalToken.originRevision};
   }
 
+  private alertFingerprint(...channelIds: string[]): string { return channelIds.map(id => { const source = this.effectiveChannelPolicy(id).hindsightWriteSource; return `${id}:${this.alertChannelIds.has(source) ? source : ''}`; }).join('|'); }
+
   validMemoryWriteToken(token:MemoryWriteToken):boolean {
     const effectiveOrigin=this.effectiveChannelPolicy(token.originChannelId),effectiveSource=this.effectiveChannelPolicy(token.sourceChannelId);
     const originPolicy=effectiveOrigin.hindsightWriteSource==='default'?token.originChannelId:effectiveOrigin.hindsightWriteSource;
     const sourcePolicy=effectiveSource.hindsightWriteSource==='default'?token.sourceChannelId:effectiveSource.hindsightWriteSource;
-    return effectiveOrigin.tracked&&effectiveSource.tracked&&effectiveOrigin.hindsightWrite&&effectiveSource.hindsightWrite&&originPolicy===token.originPolicyChannelId&&sourcePolicy===token.sourcePolicyChannelId&&(this.channelPolicy(originPolicy)?.revision??0)===token.originRevision&&(this.channelPolicy(sourcePolicy)?.revision??0)===token.sourceRevision;
+    return (token.alertFingerprint === undefined || token.alertFingerprint === this.alertFingerprint(token.originChannelId,token.sourceChannelId))&&effectiveOrigin.tracked&&effectiveSource.tracked&&effectiveOrigin.hindsightWrite&&effectiveSource.hindsightWrite&&originPolicy===token.originPolicyChannelId&&sourcePolicy===token.sourcePolicyChannelId&&(this.channelPolicy(originPolicy)?.revision??0)===token.originRevision&&(this.channelPolicy(sourcePolicy)?.revision??0)===token.sourceRevision;
   }
 
   migrateChannelPolicies(allowedIds:string[]):void {
@@ -900,10 +915,7 @@ export class Store implements SchedulerStore {
     return row?.mode;
   }
 
-  channelMode(channelId: string): 'queue' | 'steer' {
-    const policy = this.channelPolicy(channelId);
-    return this.channelModeOverride(channelId) ?? (policy?.parentChannelId ? this.channelMode(policy.parentChannelId) : undefined) ?? 'queue';
-  }
+  channelMode(channelId: string): 'queue' | 'steer' { return this.effectiveChannelPolicy(channelId).mode; }
 
   setChannelMode(channelId: string, mode: 'queue' | 'steer' | undefined): void {
     if (mode === undefined) { this.db.prepare('DELETE FROM channel_modes WHERE channel_id=?').run(channelId); return; }
@@ -963,9 +975,7 @@ export class Store implements SchedulerStore {
     if (Number(update.changes) !== 1) throw new Error('Could not persist Discord action result');
   }
 
-  effectiveReplyMode(channelId: string, parentChannelId?: string): ChannelReplyMode {
-    return this.channelReplyMode(channelId) ?? (parentChannelId ? this.channelReplyMode(parentChannelId) : undefined) ?? 'mention';
-  }
+  effectiveReplyMode(channelId: string, parentChannelId?: string): ChannelReplyMode { return this.effectiveChannelPolicy(channelId, parentChannelId).replyMode; }
 
   channelReplyMode(channelId: string): ChannelReplyMode | undefined {
     const row = this.db.prepare('SELECT mode FROM channel_reply_modes WHERE channel_id=?').get(channelId) as { mode: ChannelReplyMode } | undefined;

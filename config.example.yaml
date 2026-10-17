@@ -11,6 +11,8 @@ discord:
   # Discord tools and scheduled outputs use bot permissions, not this list.
   channelIds:
     - "YOUR_CHANNEL_ID"
+  # Optional alert roots: enforced tracked/reply/memory policy; threads inherit from their root.
+  alertChannelIds: []
 
 llm:
   baseUrl: https://your-cpa.example/v1

@@ -278,7 +278,7 @@ function settingSelect(channel, draft, key, label, options, effectiveText) {
     option.value = value;
     select.append(option);
   }
-  const raw = draft[key];
+  const raw = channel.alert && ['replyMode','mode'].includes(key) ? effectiveText : draft[key];
   const desired = raw == null ? '' : String(raw);
   if (desired && !options.some(([value]) => value === desired)) {
     const unknown = element('option', `${desired}（目前設定）`);
@@ -297,7 +297,7 @@ function booleanField(channel, draft, key, label, effectiveValue) {
   const input = element('input');
   input.type = 'checkbox';
   input.dataset.key = key;
-  input.checked = draft[key] === null ? effectiveValue : draft[key];
+  input.checked = channel.alert ? effectiveValue : draft[key] === null ? effectiveValue : draft[key];
   input.onchange = () => { draft[key] = input.checked; updateChannelDirty(channel.channelId); };
   labelElement.append(input, document.createTextNode(label));
   wrap.append(labelElement, element('small', `生效值：${effectiveValue ? '開' : '關'}`));
@@ -359,14 +359,14 @@ function renderChannels() {
     const title = element('span', undefined, 'channel-tree-title');
     const kinds = { forum: '論壇', post: '貼文', channel: '頻道' };
     title.append(element('span', kinds[channel.kind] ?? '未知', `channel-kind channel-kind-${channel.kind ?? 'unknown'}`), name);
-    const state = channel.authorized ? (channel.tracked ? '追蹤中' : '已停止追蹤') : '僅歷史';
+    const state = channel.authorized ? (channel.alert ? 'Alert 固定政策' : channel.tracked ? '追蹤中' : '已停止追蹤') : '僅歷史';
     const details = element('span', state, 'tree-state');
     const dirty = element('span', '未儲存', 'tree-dirty'); dirty.dataset.treeDirty = ''; dirty.hidden = !isChannelDirty(channel.channelId);
     button.append(title, details, dirty);
     button.onclick = () => selectChannel(channel.channelId);
     const action = element('button', channel.tracked ? '停止追蹤' : '恢復追蹤', 'channel-tree-tracking');
     action.type = 'button';
-    action.disabled = !channel.authorized || busyChannels.has(channel.channelId);
+    action.disabled = !channel.authorized || channel.alert || busyChannels.has(channel.channelId);
     action.setAttribute('aria-label', `${action.textContent}：${channel.name || channel.channelId}`);
     action.onclick = () => {
       if (channel.tracked) {
@@ -395,6 +395,7 @@ function renderChannels() {
   const meta = element('dl', undefined, 'channel-meta');
   for (const [label, value] of [['頻道 ID', channel.channelId], ['父頻道', parent ? (parent.name || parent.channelId) : channel.parentChannelId || '無'], ['追蹤狀態', state.textContent]]) { meta.append(element('dt', label), element('dd', value)); }
   panel.append(meta);
+  if (channel.alert) panel.append(element('p', 'Alert 頻道固定政策：追蹤、Bot 回覆、Hindsight 寫入、僅 @ 觸發、Steer；個別設定不會覆蓋。請由 discord.alertChannelIds 管理。', 'muted'));
   if (!channel.authorized) { panel.append(element('p', '此頻道已不再授權，僅保留歷史資料供檢視。', 'empty-state')); return; }
   const fieldset = (title, className='') => { const section=element('section',undefined,`channel-group ${className}`); section.append(element('h4',title)); const grid=element('div',undefined,'channel-fields'); section.append(grid); panel.append(section); return grid; };
   const reply = fieldset('回應','reply-group');
@@ -409,9 +410,11 @@ function renderChannels() {
   addSelect(model,'model','對話模型',[['','沿用預設'],...channelModels.models.map(value=>[value,value])],effective.model);
   addSelect(model,'effort','Effort',[['','沿用預設'],...['none','minimal','low','medium','high','xhigh','auto'].map(value=>[value,value])],effective.effort);
   addSelect(model,'imageModel','圖片模型',[['','沿用預設'],...channelModels.imageModels.map(value=>[value,value])],effective.imageModel ?? '停用');
-  for (const control of panel.querySelectorAll('select,input')) control.disabled = busyChannels.has(channel.channelId);
+  for (const control of panel.querySelectorAll('select,input')) {
+    control.disabled = busyChannels.has(channel.channelId) || (channel.alert && ['replyMode','botReply','hindsightWrite','mode'].includes(control.dataset.key));
+  }
   if (channel.parentChannelId) {
-    const inheritLabel=element('label',undefined,'inherit-label'); const inherit=element('input'); inherit.type='checkbox'; inherit.checked=inherits; inherit.disabled=busyChannels.has(channel.channelId);
+    const inheritLabel=element('label',undefined,'inherit-label'); const inherit=element('input'); inherit.type='checkbox'; inherit.checked=inherits; inherit.disabled=busyChannels.has(channel.channelId) || channel.alert;
     inherit.onchange=()=>{for(const key of ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel']) draft[key]=inherit.checked?null:effective[key]; renderChannels();};
     inheritLabel.append(inherit,document.createTextNode('使用父頻道設定')); panel.insertBefore(inheritLabel,reply.parentElement);
     if (inherits) for (const control of panel.querySelectorAll('.channel-group select,.channel-group input')) control.disabled = true;

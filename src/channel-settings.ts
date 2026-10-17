@@ -9,6 +9,7 @@ export interface ChannelSettings {
   parentChannelId?: string;
   authorized: boolean;
   tracked: boolean;
+  alert: boolean;
   raw: {
     tracked: boolean | null;
     botReply: boolean | null;

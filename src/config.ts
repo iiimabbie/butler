@@ -8,7 +8,7 @@ import type { LogMethods } from './log.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
-  discord?: { token?: string; ownerId?: string; channelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
+  discord?: { token?: string; ownerId?: string; channelIds?: string[]; alertChannelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
   hledger?: { enabled: boolean; journalPath: string; executablePath: string; allowedRequesterIds: string[]; allowedChannelIds: string[] };
@@ -47,13 +47,15 @@ function validateConfig(raw: unknown): ButlerConfig {
     if (name === 'discord') {
       const channelIds = section.channelIds;
       if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
+      const alertChannelIds = section.alertChannelIds;
+      if (alertChannelIds !== undefined && (!Array.isArray(alertChannelIds) || alertChannelIds.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)) || new Set(alertChannelIds).size !== alertChannelIds.length)) throw new Error('Butler config discord.alertChannelIds must be a unique string array of Discord channel IDs');
       const errorWebhookUrl = string('errorWebhookUrl');
       if (errorWebhookUrl !== undefined && !/^https:\/\/discord\.com\/api\/(?:v10\/)?webhooks\/\d+\/[^/?#]+$/.test(errorWebhookUrl)) throw new Error('Butler config discord.errorWebhookUrl must be a Discord webhook URL without query or fragment');
       const errorWebhookMentionUserId = string('errorWebhookMentionUserId');
       if (errorWebhookMentionUserId !== undefined && !/^\d+$/.test(errorWebhookMentionUserId)) throw new Error('Butler config discord.errorWebhookMentionUserId must be a numeric Discord user ID');
       const errorWebhookThreadId = string('errorWebhookThreadId');
       if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined, errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
+      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined, alertChannelIds: (alertChannelIds as string[] | undefined) ?? [], errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');

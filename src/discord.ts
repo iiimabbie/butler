@@ -38,7 +38,7 @@ import { logTrace, traceTextMetadata } from './model-request.js';
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
+export type DiscordConfig = { token: string; ownerId: string; channelIds: string[]; alertChannelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
@@ -198,7 +198,7 @@ export class DiscordHandler {
     const content = effectiveContent.trim();
     if (!effectiveContent.trim() && !message.hasAttachments) return;
     const ingressRuntime = this.getRuntime();
-    if (!isAllowedDiscordChannel(ingressRuntime.discord.channelIds, message.channelId, message.parentChannelId)) return;
+    if (!isAllowedDiscordChannel([...ingressRuntime.discord.channelIds, ...ingressRuntime.discord.alertChannelIds], message.channelId, message.parentChannelId)) return;
     const ingress = this.reserveIngress(message.channelId);
     await ingress.ready;
     const releaseIngress = ingress.release;
@@ -217,11 +217,14 @@ export class DiscordHandler {
         ...(message.reference ? { replyToMessageId: message.reference.messageId, replyToChannelId: message.reference.channelId } : {}),
         ...(message.forwardedMessage ? { forwardedMessage: message.forwardedMessage } : {}),
       };
-      const rootChannelIds = ingressRuntime.discord.channelIds;
+      const rootChannelIds = [...ingressRuntime.discord.channelIds, ...ingressRuntime.discord.alertChannelIds];
       const parentIsAuthorized = Boolean(message.parentChannelId && rootChannelIds.includes(message.parentChannelId));
       let channelPolicy = this.store.channelPolicy(message.channelId);
       if (parentIsAuthorized && channelPolicy?.parentChannelId !== message.parentChannelId) {
         this.store.setChannelPolicy(message.channelId, { parentChannelId: message.parentChannelId });
+        channelPolicy = this.store.channelPolicy(message.channelId);
+      } else if (!channelPolicy && ingressRuntime.discord.alertChannelIds.includes(message.channelId)) {
+        this.store.setChannelPolicy(message.channelId, { parentChannelId: null });
         channelPolicy = this.store.channelPolicy(message.channelId);
       } else if (!channelPolicy && message.parentChannelId && rootChannelIds.includes(message.channelId)) {
         // A thread explicitly authorized by its own ID must not inherit from an unauthorized parent.
@@ -474,6 +477,7 @@ export class DiscordHandler {
       return;
     }
     if (context.command === 'bot_reply') {
+      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道的 Bot Reply 固定啟用，請由 discord.alertChannelIds 管理。'); return; }
       if (context.enabled === undefined) { await context.reply('必須指定 enabled。'); return; }
       await this.enqueue(context.channelId, async () => {
         this.store.setChannelPolicy(context.channelId, { botReply: context.enabled! });
@@ -482,11 +486,13 @@ export class DiscordHandler {
       return;
     }
     if (context.command === 'replymode') {
+      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道固定為 mention 回覆模式，請由 discord.alertChannelIds 管理。'); return; }
       if (!context.replyMode) { await context.reply('必須指定 value。'); return; }
       await this.enqueue(context.channelId, async () => { this.store.setChannelReplyMode(context.channelId, context.replyMode === 'inherit' ? undefined : context.replyMode); await context.reply(`頻道回覆模式已設定：${context.replyMode}`); });
       return;
     }
     if (context.command === 'mode') {
+      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道固定為 Steer 模式，請由 discord.alertChannelIds 管理。'); return; }
       if (!context.mode) { await context.reply('必須指定 value。'); return; }
       await this.enqueue(context.channelId, async () => {
         this.store.setChannelMode(context.channelId, context.mode!);
@@ -943,6 +949,7 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     token: requireSetting(config.discord?.token, 'discord.token'),
     ownerId: requireSetting(config.discord?.ownerId, 'discord.ownerId'),
     channelIds: requireSetting(config.discord?.channelIds, 'discord.channelIds'),
+    alertChannelIds: config.discord?.alertChannelIds ?? [],
     defaultModel: requireSetting(config.llm?.model, 'llm.model'),
     baseUrl: requireSetting(config.llm?.baseUrl, 'llm.baseUrl'),
     apiKey: config.llm?.apiKey,
@@ -1167,7 +1174,7 @@ function isAllowedDiscordChannel(rootIds: string[], channelId: string, parentCha
 
 function createChannelManagement(client: Client, store: Store, getRuntime: () => RuntimeBundle, addAllowedChannel: ((id: string) => void) | undefined, canStopChannel: (id: string) => boolean): ChannelManagement {
   const isAuthorized = async (id: string): Promise<boolean> => {
-    const roots = getRuntime().discord.channelIds;
+    const roots = [...getRuntime().discord.channelIds, ...getRuntime().discord.alertChannelIds];
     if (roots.includes(id)) return true;
     const storedParent = store.channelPolicy(id)?.parentChannelId;
     if (storedParent && roots.includes(storedParent)) return true;
@@ -1175,6 +1182,7 @@ function createChannelManagement(client: Client, store: Store, getRuntime: () =>
   };
   const stop = async (id: string): Promise<ChannelSettings> => {
     if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
+    if (store.isAlertChannel(id)) throw Object.assign(new Error('Alert 頻道固定追蹤；請由 discord.alertChannelIds 管理'), { status: 400 });
     const affected = affectedTrackingChannels(store, id);
     if (affected.some(channelId => !canStopChannel(channelId))) throw Object.assign(new Error('頻道忙碌中'), { status: 409 });
     store.setChannelPolicy(id, { tracked: false });
@@ -1199,13 +1207,13 @@ function createChannelManagement(client: Client, store: Store, getRuntime: () =>
     const effective = store.effectiveChannelPolicy(id, parentChannelId);
     const state = store.channelSettings(id, runtime.discord.defaultModel);
     const effort = store.effectiveChannelReasoningEffort(id) ?? 'auto';
-    return { channelId: id, ...(name ? { name } : {}), ...(kind ? { kind } : {}), ...(parentChannelId ? { parentChannelId } : {}), authorized: authorized ?? await isAuthorized(id), tracked: effective.tracked,
+    return { channelId: id, ...(name ? { name } : {}), ...(kind ? { kind } : {}), ...(parentChannelId ? { parentChannelId } : {}), authorized: authorized ?? await isAuthorized(id), tracked: effective.tracked, alert: store.isAlertChannel(id, parentChannelId),
       raw: { tracked: policy?.tracked ?? null, botReply: policy?.botReply ?? null, hindsightWrite: policy?.hindsightWrite ?? null, replyMode: store.channelReplyMode(id) ?? null, mode: store.channelModeOverride(id) ?? null, model: store.channelModelOverride(id) ?? null, effort: store.channelReasoningEffort(id) ?? null, imageModel: store.channelImageModel(id) ?? null },
       effective: { botReply: effective.botReply, hindsightWrite: effective.hindsightWrite, replyMode: effective.replyMode, mode: store.channelMode(id), model: state.model, effort, imageModel: store.effectiveChannelImageModel(id) ?? runtime.settings.image?.model ?? null } };
   };
   return {
     listChannels: async () => {
-      const ids = [...new Set([...getRuntime().discord.channelIds, ...store.knownChannelIds()])];
+      const ids = [...new Set([...getRuntime().discord.channelIds, ...getRuntime().discord.alertChannelIds, ...store.knownChannelIds()])];
       return Promise.all(ids.map(id => build(id)));
     },
     addChannel: async id => {
@@ -1224,6 +1232,7 @@ function createChannelManagement(client: Client, store: Store, getRuntime: () =>
     },
     updateChannel: async (id, patch: ChannelSettingsPatch) => {
       if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
+      if (store.isAlertChannel(id) && ['tracked','botReply','hindsightWrite','replyMode','mode'].some(key => Object.hasOwn(patch, key))) throw Object.assign(new Error('Alert 頻道政策固定；請由 discord.alertChannelIds 管理'), { status: 400 });
       const inheritedTracked = store.channelPolicy(id)?.parentChannelId ? store.effectiveChannelPolicy(store.channelPolicy(id)!.parentChannelId!).tracked : true;
       const resultingTracked = patch.tracked === undefined ? store.effectiveChannelPolicy(id).tracked : patch.tracked ?? inheritedTracked;
       const stopping = patch.tracked !== undefined && !resultingTracked;
