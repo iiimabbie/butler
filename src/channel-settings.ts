@@ -11,7 +11,6 @@ export interface ChannelSettings {
   tracked: boolean;
   alert: boolean;
   raw: {
-    tracked: boolean | null;
     botReply: boolean | null;
     hindsightWrite: boolean | null;
     replyMode: ChannelReplyMode | null;
@@ -20,6 +19,7 @@ export interface ChannelSettings {
     effort: ChannelReasoningEffort | null;
     imageModel: string | null;
   };
+  sources: Record<'botReply' | 'hindsightWrite' | 'replyMode' | 'mode' | 'model' | 'effort' | 'imageModel', string>;
   effective: {
     botReply: boolean;
     hindsightWrite: boolean;
@@ -32,7 +32,6 @@ export interface ChannelSettings {
 }
 
 export interface ChannelSettingsPatch {
-  tracked?: boolean | null;
   botReply?: boolean | null;
   hindsightWrite?: boolean | null;
   replyMode?: ChannelReplyMode | null;

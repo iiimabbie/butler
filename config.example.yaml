@@ -7,12 +7,7 @@ discord:
   # errorWebhookMentionUserId: "YOUR_DISCORD_ACCOUNT_ID"
   # Optional existing forum post (thread) ID for error notifications.
   # errorWebhookThreadId: "YOUR_DISCORD_THREAD_ID"
-  # Root channels where Butler automatically replies; all received messages are still saved and retained. Slash commands are not restricted.
-  # Discord tools and scheduled outputs use bot permissions, not this list.
-  channelIds:
-    - "YOUR_CHANNEL_ID"
-  # Optional alert roots: enforced tracked/reply/memory policy; threads inherit from their root.
-  alertChannelIds: []
+  # General channel membership and overrides live in .data/config/channels.yaml.
 
 llm:
   baseUrl: https://your-cpa.example/v1

@@ -1,4 +1,4 @@
-import { readConfig, watchConfig, type ButlerConfig } from './config.js';
+import { configuredAlertChannelIds, readConfig, watchConfig, type ButlerConfig } from './config.js';
 import type { RuntimeBundle } from './discord.js';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { databasePath, prepareDatabaseDirectory } from './paths.js';
@@ -28,20 +28,23 @@ try {
     process.once('exit', () => { try { unlinkSync(appPidPath); } catch {} });
     const dbPath = databasePath(config);
     prepareDatabaseDirectory(dbPath);
-    const store = new Store(dbPath);
+    const store = new Store(dbPath, { alertChannelIds: configuredAlertChannelIds(config), timezone: config.schedule?.timezone ?? 'Asia/Taipei' });
     let current: RuntimeBundle;
     const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger' }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
-    store.setAlertChannelIds(current.discord.alertChannelIds);
+    store.setAlertChannelIds(configuredAlertChannelIds(config));
+    const closeSettingsWatch = store.watchFileSettings((error, file) => logWarn('File-backed settings reload rejected; retaining last valid snapshot', error, { file }));
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
-    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); current = next; store.setAlertChannelIds(next.discord.alertChannelIds); configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { current = next; store.setAlertChannelIds(next.discord.alertChannelIds); configureLogging(candidate); }; } });
+    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }; } });
     try {
       await memoryCoordinator?.start();
-      await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => watcher.close(), id => watcher.addChannel(id));
+      await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => { watcher.close(); closeSettingsWatch(); });
     } finally {
       watcher.close();
+      closeSettingsWatch();
       await memoryCoordinator?.close();
+      store.close();
     }
   }
 } catch (error) {

@@ -1,13 +1,16 @@
-import { logError } from './log.js';
+import { logError, logInfo } from './log.js';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { FileBackedSettings, SettingsConflictError, type SettingsSnapshot } from './file-backed-settings.js';
+import { nextCronRun, scheduleNextRun } from './scheduler.js';
 import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
 import type { TranscriptEntry } from './journal-transcript.js';
 
 export type ChannelReplyMode = 'all' | 'mention' | 'none';
-export interface ChannelPolicy { channelId: string; parentChannelId: string | null; tracked: boolean | null; botReply: boolean | null; hindsightWrite: boolean | null; revision: number; }
+export interface ChannelPolicy { channelId: string; botReply: boolean | null; hindsightWrite: boolean | null; revision: number; }
 export interface EffectiveChannelPolicy { tracked: boolean; botReply: boolean; hindsightWrite: boolean; replyMode: ChannelReplyMode; mode: 'queue' | 'steer'; trackedSource: string; botReplySource: string; hindsightWriteSource: string; replyModeSource: string; }
 export interface MemoryWriteToken { originChannelId: string; sourceChannelId: string; originPolicyChannelId: string; originRevision: number; sourcePolicyChannelId: string; sourceRevision: number; alertFingerprint?: string; }
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'auto';
@@ -64,9 +67,13 @@ function sortJsonValue(value: unknown): unknown {
 
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
+  private readonly settings: FileBackedSettings;
+  private externalStopHooks?: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void };
   private alertChannelIds = new Set<string>();
+  private readonly ownedSettingsDirectory?: string;
+  private closed = false;
 
-  constructor(path: string) {
+  constructor(path: string, options: { settingsDirectory?: string; timezone?: string; alertChannelIds?: string[] } = {}) {
     if (path !== ':memory:') {
       const directory = dirname(path);
       if (!existsSync(directory)) { mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700); }
@@ -75,6 +82,18 @@ export class Store implements SchedulerStore {
     try { this.db = new DatabaseSync(path); }
     finally { process.umask(previousUmask); }
     if (path !== ':memory:') chmodSync(path, 0o600);
+    if (options.alertChannelIds) this.alertChannelIds = new Set(options.alertChannelIds);
+    const settingsDirectory = options.settingsDirectory ?? (path === ':memory:' ? (this.ownedSettingsDirectory = mkdtempSync(join(tmpdir(), 'butler-settings-'))) : join(dirname(path), 'config'));
+    this.settings = new FileBackedSettings(settingsDirectory, options.timezone);
+    const migrationTableExists = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='file_settings_migrations'").get();
+    const migrated = migrationTableExists && this.db.prepare("SELECT 1 FROM file_settings_migrations WHERE name='file-backed-settings-v1'").get();
+    const oldScheduleTableExists = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schedules'").get();
+    if (path !== ':memory:' && oldScheduleTableExists && !migrated) {
+      const backupPath = join(dirname(path), `butler-pre-file-settings-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID()}.sqlite`);
+      this.db.prepare('VACUUM INTO ?').run(backupPath);
+      chmodSync(backupPath, 0o600);
+      logInfo(`Pre-file-settings consistent SQLite backup created at ${backupPath}`);
+    }
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
@@ -96,31 +115,29 @@ export class Store implements SchedulerStore {
       CREATE UNIQUE INDEX IF NOT EXISTS deployment_one_active_idx ON deployment_requests((1)) WHERE status IN ('queued','running','needs_reconciliation');
       CREATE TABLE IF NOT EXISTS deployment_result_events(id TEXT PRIMARY KEY, deployment_id TEXT NOT NULL UNIQUE REFERENCES deployment_requests(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown','needs_reconciliation')), parent_input_id TEXT, delivery_message_id TEXT, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, target_version TEXT, claimed_version TEXT, parent_input_version TEXT, delivered_version TEXT, send_attempt_id TEXT, send_phase TEXT);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
-      CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('queue','steer')));
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS discord_actions(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, owner_id TEXT NOT NULL, expires_at TEXT NOT NULL, status TEXT NOT NULL, buttons TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS discord_action_claims(custom_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, status TEXT NOT NULL, actor_id TEXT NOT NULL, result TEXT, claimed_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS discord_settings(id INTEGER PRIMARY KEY CHECK(id=1), bot_reply INTEGER NOT NULL CHECK(bot_reply IN (0,1)));
       CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
       CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, output_channel_id TEXT NOT NULL, creator_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('cron','reminder')), content TEXT NOT NULL, cron TEXT, run_at TEXT, timezone TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), next_run TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notify TEXT NOT NULL DEFAULT 'always' CHECK(notify IN ('always','on_event')));
-      CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules(enabled,next_run);
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
-      CREATE TABLE IF NOT EXISTS channel_reply_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('all','mention','none')));
-      CREATE TABLE IF NOT EXISTS channel_reasoning_efforts(channel_id TEXT PRIMARY KEY, effort TEXT NOT NULL CHECK(effort IN ('none','minimal','low','medium','high','xhigh','auto')));
-      CREATE TABLE IF NOT EXISTS channel_image_models(channel_id TEXT PRIMARY KEY, model TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_compact_checkpoints(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, summary TEXT NOT NULL, through_message_id TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_opening_context(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL, attachments_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS channel_policies(channel_id TEXT PRIMARY KEY,parent_channel_id TEXT,tracked INTEGER CHECK(tracked IN (0,1)),bot_reply INTEGER CHECK(bot_reply IN (0,1)),hindsight_write INTEGER CHECK(hindsight_write IN (0,1)),revision INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS channel_model_overrides(channel_id TEXT PRIMARY KEY,model TEXT); CREATE TABLE IF NOT EXISTS message_memory_tokens(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,token_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS channel_policy_migrations(name TEXT PRIMARY KEY,completed_at TEXT NOT NULL);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS message_memory_tokens(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,token_json TEXT NOT NULL); CREATE TABLE IF NOT EXISTS file_settings_migrations(name TEXT PRIMARY KEY,completed_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_fingerprint TEXT NOT NULL,definition_fingerprint TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS channel_policy_runtime(channel_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,policy_fingerprint TEXT);`);
+    const runtimeColumns=new Set((this.db.prepare('PRAGMA table_info(schedule_runtime)').all() as Array<{name:string}>).map(c=>c.name));
+    if(runtimeColumns.size&&!runtimeColumns.has('definition_fingerprint'))this.db.exec("ALTER TABLE schedule_runtime ADD COLUMN definition_fingerprint TEXT NOT NULL DEFAULT ''");
     this.db.exec('BEGIN IMMEDIATE');
     try {
-    const scheduleColumns = new Set((this.db.prepare('PRAGMA table_info(schedules)').all() as Array<{ name: string }>).map(column => column.name));
-    if (!scheduleColumns.has('notify')) this.db.exec("ALTER TABLE schedules ADD COLUMN notify TEXT NOT NULL DEFAULT 'always'");
-    if (scheduleColumns.has('source_channel_id')) this.db.exec('ALTER TABLE schedules DROP COLUMN source_channel_id');
+    if (!migrated) {
+    this.db.exec(`CREATE TABLE IF NOT EXISTS channel_policies(channel_id TEXT PRIMARY KEY,parent_channel_id TEXT,tracked INTEGER CHECK(tracked IN (0,1)),bot_reply INTEGER CHECK(bot_reply IN (0,1)),hindsight_write INTEGER CHECK(hindsight_write IN (0,1)),revision INTEGER NOT NULL DEFAULT 1); CREATE TABLE IF NOT EXISTS channel_model_overrides(channel_id TEXT PRIMARY KEY,model TEXT); CREATE TABLE IF NOT EXISTS channel_modes(channel_id TEXT PRIMARY KEY,mode TEXT NOT NULL CHECK(mode IN ('queue','steer'))); CREATE TABLE IF NOT EXISTS channel_policy_migrations(name TEXT PRIMARY KEY,completed_at TEXT NOT NULL); CREATE TABLE IF NOT EXISTS discord_settings(id INTEGER PRIMARY KEY CHECK(id=1), bot_reply INTEGER NOT NULL CHECK(bot_reply IN (0,1))); CREATE TABLE IF NOT EXISTS schedules(id TEXT PRIMARY KEY, output_channel_id TEXT NOT NULL, creator_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('cron','reminder')), content TEXT NOT NULL, cron TEXT, run_at TEXT, timezone TEXT NOT NULL, enabled INTEGER NOT NULL CHECK(enabled IN (0,1)), next_run TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, notify TEXT NOT NULL DEFAULT 'always' CHECK(notify IN ('always','on_event'))); CREATE INDEX IF NOT EXISTS schedules_due_idx ON schedules(enabled,next_run); CREATE TABLE IF NOT EXISTS channel_reply_modes(channel_id TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('all','mention','none'))); CREATE TABLE IF NOT EXISTS channel_reasoning_efforts(channel_id TEXT PRIMARY KEY, effort TEXT NOT NULL CHECK(effort IN ('none','minimal','low','medium','high','xhigh','auto'))); CREATE TABLE IF NOT EXISTS channel_image_models(channel_id TEXT PRIMARY KEY, model TEXT NOT NULL);`);
+    }
+    const scheduleColumns = migrated ? new Set<string>() : new Set((this.db.prepare('PRAGMA table_info(schedules)').all() as Array<{ name: string }>).map(column => column.name));
+    if (!migrated && !scheduleColumns.has('notify')) this.db.exec("ALTER TABLE schedules ADD COLUMN notify TEXT NOT NULL DEFAULT 'always'");
+    if (!migrated && scheduleColumns.has('source_channel_id')) this.db.exec('ALTER TABLE schedules DROP COLUMN source_channel_id');
     const jobColumns = new Set((this.db.prepare('PRAGMA table_info(attachment_memory_jobs)').all() as Array<{ name: string }>).map(column => column.name));
     if (jobColumns.size && !String((this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='attachment_memory_jobs'").get() as {sql:string}|undefined)?.sql??'').includes("'suppressed'")) {
       this.db.exec(`ALTER TABLE attachment_memory_jobs RENAME TO attachment_memory_jobs_old; CREATE TABLE attachment_memory_jobs(message_id TEXT NOT NULL,attachment_id TEXT NOT NULL,document_id TEXT NOT NULL UNIQUE,state TEXT NOT NULL CHECK(state IN ('queued','submitting','converting','retaining','completed','failed','unknown','suppressed')),conversion_operation_id TEXT,retain_operation_id TEXT,attempted_at TEXT,next_poll_at TEXT,poll_attempt INTEGER NOT NULL DEFAULT 0,error TEXT,PRIMARY KEY(message_id,attachment_id)); INSERT INTO attachment_memory_jobs SELECT * FROM attachment_memory_jobs_old; DROP TABLE attachment_memory_jobs_old;`);
@@ -131,8 +148,8 @@ export class Store implements SchedulerStore {
     if (!batchSql.includes("'suppressed'")) {
       this.db.exec(`ALTER TABLE memory_batch_sources RENAME TO memory_batch_sources_old; ALTER TABLE memory_batches RENAME TO memory_batches_old; CREATE TABLE memory_batches(operation_id TEXT PRIMARY KEY,payload TEXT NOT NULL,source_message_ids TEXT NOT NULL,document_id TEXT NOT NULL,session_id TEXT NOT NULL,channel_id TEXT NOT NULL,batch_order INTEGER NOT NULL,status TEXT NOT NULL CHECK(status IN ('frozen','submitting','unknown','pending','processing','completed','failed','cancelled','not_found','needs_clarification','suppressed')),submit_intended_at TEXT,last_poll_at TEXT,next_poll_at TEXT,error TEXT,created_at TEXT NOT NULL,UNIQUE(document_id,batch_order)); INSERT INTO memory_batches SELECT * FROM memory_batches_old; CREATE TABLE memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id)); INSERT INTO memory_batch_sources SELECT * FROM memory_batch_sources_old; DROP TABLE memory_batch_sources_old; DROP TABLE memory_batches_old;`);
     }
-    const replySql = (this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_reply_modes'").get() as {sql:string}).sql;
-    if (!replySql.includes("'none'")) {
+    const replySql = migrated ? undefined : (this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='channel_reply_modes'").get() as {sql:string}).sql;
+    if (replySql && !replySql.includes("'none'")) {
       this.db.exec(`ALTER TABLE channel_reply_modes RENAME TO channel_reply_modes_old; CREATE TABLE channel_reply_modes(channel_id TEXT PRIMARY KEY,mode TEXT NOT NULL CHECK(mode IN ('all','mention','none'))); INSERT INTO channel_reply_modes SELECT * FROM channel_reply_modes_old; DROP TABLE channel_reply_modes_old;`);
     }
     const deploymentRequestColumns = new Set((this.db.prepare('PRAGMA table_info(deployment_requests)').all() as Array<{ name: string }>).map(column => column.name));
@@ -169,8 +186,6 @@ export class Store implements SchedulerStore {
     const segmentColumns = new Set((this.db.prepare('PRAGMA table_info(discord_outgoing_segments)').all() as Array<{ name: string }>).map(column => column.name));
     if (!segmentColumns.has('reply_to_message_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_message_id TEXT');
     if (!segmentColumns.has('reply_to_channel_id')) this.db.exec('ALTER TABLE discord_outgoing_segments ADD COLUMN reply_to_channel_id TEXT');
-    const legacyMessages=this.db.prepare(`SELECT m.id,s.channel_id FROM messages m JOIN message_sources s ON s.message_id=m.id LEFT JOIN message_memory_tokens t ON t.message_id=m.id WHERE t.message_id IS NULL AND s.channel_id IS NOT NULL`).all() as Array<{id:string;channel_id:string}>;
-    for(const message of legacyMessages){const token=this.memoryWriteToken(message.channel_id,message.channel_id);this.db.prepare('INSERT OR IGNORE INTO message_memory_tokens(message_id,token_json) VALUES(?,?)').run(message.id,JSON.stringify(token));}
     const messageIds = new Set((this.db.prepare('PRAGMA table_info(message_sources)').all() as Array<{ name: string }>).map(column => column.name));
     if (messageIds.has('discord_message_id')) {
       const duplicate = this.db.prepare('SELECT discord_message_id,COUNT(*) count FROM message_sources WHERE discord_message_id IS NOT NULL GROUP BY discord_message_id HAVING COUNT(*)>1 LIMIT 1').get() as { discord_message_id: string; count: number } | undefined;
@@ -184,7 +199,153 @@ export class Store implements SchedulerStore {
     `);
     this.db.exec('COMMIT');
     } catch(error) { this.db.exec('ROLLBACK'); throw error; }
+    this.initializeFileSettings();
+    const legacyMessages=this.db.prepare(`SELECT m.id,s.channel_id FROM messages m JOIN message_sources s ON s.message_id=m.id LEFT JOIN message_memory_tokens t ON t.message_id=m.id WHERE t.message_id IS NULL AND s.channel_id IS NOT NULL`).all() as Array<{id:string;channel_id:string}>;
+    for(const message of legacyMessages){const token=this.memoryWriteToken(message.channel_id,message.channel_id);this.db.prepare('INSERT OR IGNORE INTO message_memory_tokens(message_id,token_json) VALUES(?,?)').run(message.id,JSON.stringify(token));}
   }
+
+  private initializeFileSettings(): void {
+    const marker = this.db.prepare("SELECT 1 FROM file_settings_migrations WHERE name='file-backed-settings-v1'").get();
+    if (marker) {
+      const state = this.settings.activate();
+      this.settings.setApply((next,previous)=>this.reconcileFileSettings(next,previous),(next,previous)=>this.validateFileSettings(next,previous));
+      this.validateFileSettings(state,state);
+      this.reconcileFileSettings(state,state);
+      return;
+    }
+    const globalReplyRow=this.db.prepare('SELECT bot_reply FROM discord_settings WHERE id=1').get() as {bot_reply:number}|undefined;
+    const legacyBotReply=globalReplyRow?.bot_reply===1;
+    if (!this.db.prepare("SELECT 1 FROM channel_policy_migrations WHERE name='global-bot-reply'").get()) {
+      this.db.prepare('INSERT INTO channel_policies(channel_id,bot_reply,revision) SELECT cs.channel_id,?,0 FROM channel_state cs WHERE NOT EXISTS(SELECT 1 FROM channel_policies cp WHERE cp.channel_id=cs.channel_id)').run(legacyBotReply?1:0);
+    }
+    const ids = new Set<string>();
+    for (const table of ['channel_state','channel_policies','channel_modes','channel_reply_modes','channel_reasoning_efforts','channel_image_models','channel_model_overrides']) {
+      idsForTable: {
+        const exists = this.db.prepare('SELECT 1 FROM sqlite_master WHERE type=\'table\' AND name=?').get(table);
+        if (!exists) break idsForTable;
+        for (const row of this.db.prepare(`SELECT channel_id FROM "${table}"`).all() as Array<{channel_id:string}>) ids.add(row.channel_id);
+      }
+    }
+    const channels: Record<string, Record<string, unknown>> = {};
+    for (const channelId of ids) {
+      const legacyPolicy=this.db.prepare('SELECT tracked FROM channel_policies WHERE channel_id=?').get(channelId) as {tracked:number|null}|undefined;
+      if (this.alertChannelIds.has(channelId) || legacyPolicy?.tracked === 0) continue;
+      const overrides: Record<string, unknown> = {};
+      const policy=this.db.prepare('SELECT bot_reply,hindsight_write FROM channel_policies WHERE channel_id=?').get(channelId) as {bot_reply:number|null;hindsight_write:number|null}|undefined;
+      if(policy){if(policy.bot_reply!==null)overrides.botReply=policy.bot_reply===1;if(policy.hindsight_write!==null)overrides.hindsightWrite=policy.hindsight_write===1;}
+      const scalar=(table:string,column:string):unknown=>this.db.prepare(`SELECT "${column}" AS value FROM "${table}" WHERE channel_id=?`).get(channelId)?.value;
+      const reply=scalar('channel_reply_modes','mode');if(reply!==undefined)overrides.replyMode=reply;
+      const mode=scalar('channel_modes','mode');if(mode!==undefined)overrides.mode=mode;
+      const modelRow=this.db.prepare('SELECT model FROM channel_model_overrides WHERE channel_id=?').get(channelId) as {model:string|null}|undefined;
+      if(modelRow)overrides.model=modelRow.model;else {const legacyModel=this.db.prepare('SELECT model FROM channel_state WHERE channel_id=?').get(channelId) as {model:string|null}|undefined;if(legacyModel?.model!==null&&legacyModel?.model!==undefined)overrides.model=legacyModel.model;}
+      const effort=scalar('channel_reasoning_efforts','effort');if(effort!==undefined)overrides.effort=effort;
+      const imageModel=scalar('channel_image_models','model');if(imageModel!==undefined)overrides.imageModel=imageModel;
+      channels[channelId] = overrides;
+    }
+    const jobs = (this.db.prepare('SELECT * FROM schedules ORDER BY created_at,id').all() as ScheduleDbRow[]).map(scheduleFromRow);
+    const snapshot: SettingsSnapshot = { crons: jobs.filter(job => job.kind === 'cron'), reminders: jobs.filter(job => job.kind === 'reminder'), channels };
+    this.settings.initialize(snapshot);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const now = new Date().toISOString();
+      this.db.exec(`CREATE TABLE IF NOT EXISTS channel_policy_runtime(channel_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,policy_fingerprint TEXT);`);
+      const addRuntime = this.db.prepare('INSERT INTO schedule_runtime(job_id,next_run,schedule_fingerprint,definition_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?)');
+      const normalized = this.settings.current();
+      const normalizedJobs = new Map([...normalized.crons, ...normalized.reminders].map(job => [job.id, job]));
+      for (const job of jobs) addRuntime.run(job.id, job.nextRun, this.scheduleFingerprint(normalizedJobs.get(job.id)!), this.definitionFingerprint(normalizedJobs.get(job.id)!), job.createdAt, job.updatedAt);
+      const addPolicy = this.db.prepare('INSERT INTO channel_policy_runtime(channel_id,revision,policy_fingerprint) VALUES(?,?,?)');
+      for (const id of ids) {
+        const fingerprint = Object.hasOwn(channels,id) ? this.policyFingerprint(channels[id] ?? {}) : null;
+        const prior = this.db.prepare('SELECT revision FROM channel_policies WHERE channel_id=?').get(id) as {revision:number}|undefined;
+        addPolicy.run(id, prior?.revision ?? 0, fingerprint);
+      }
+      this.db.prepare('UPDATE channel_state SET model=NULL').run();
+      this.db.exec('DROP TABLE IF EXISTS schedules; DROP TABLE IF EXISTS channel_policies; DROP TABLE IF EXISTS channel_modes; DROP TABLE IF EXISTS channel_reply_modes; DROP TABLE IF EXISTS channel_reasoning_efforts; DROP TABLE IF EXISTS channel_image_models; DROP TABLE IF EXISTS channel_model_overrides; DROP TABLE IF EXISTS discord_settings; DROP TABLE IF EXISTS channel_policy_migrations;');
+      this.db.prepare("INSERT INTO file_settings_migrations(name,completed_at) VALUES('file-backed-settings-v1',?)").run(now);
+      this.db.exec('COMMIT');
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      for (const file of Object.values(this.settings.paths)) rmSync(file);
+      throw error;
+    }
+    this.settings.setApply((next, previous) => this.reconcileFileSettings(next, previous), (next, previous) => this.validateFileSettings(next, previous));
+  }
+
+  private scheduleFingerprint(job: ScheduleJob): string {
+    return createHash('sha256').update(JSON.stringify({kind:job.kind,cron:job.cron,runAt:job.runAt,timezone:job.timezone,enabled:job.enabled})).digest('hex');
+  }
+
+  private definitionFingerprint(job: ScheduleJob): string {
+    const { nextRun: _nextRun, updatedAt: _updatedAt, ...definition } = job;
+    return createHash('sha256').update(JSON.stringify(sortJsonValue(definition))).digest('hex');
+  }
+
+  private policyFingerprint(config: Record<string, unknown>): string {
+    return createHash('sha256').update(JSON.stringify({tracked: true, hindsightWrite: config.hindsightWrite === true})).digest('hex');
+  }
+
+  private snapshotTracked(id: string, channels: SettingsSnapshot['channels']): boolean {
+    return this.alertChannelIds.has(id) || Object.hasOwn(channels, id);
+  }
+
+  private validateFileSettings(next: SettingsSnapshot, previous: SettingsSnapshot): void {
+    const overlap = Object.keys(next.channels).filter(id => this.alertChannelIds.has(id));
+    if (overlap.length) throw new SettingsConflictError(`Alert channels cannot have general channel settings: ${overlap.join(', ')}`);
+    if (!this.externalStopHooks) return;
+    const channels = new Set([...Object.keys(previous.channels), ...Object.keys(next.channels), ...this.knownChannelIds()]);
+    const affected = [...channels].filter(id => this.snapshotTracked(id, previous.channels) && !this.snapshotTracked(id, next.channels));
+    const blocked = affected.filter(id => !this.externalStopHooks!.canStop(id));
+    if (blocked.length) throw new SettingsConflictError(`Cannot stop tracking while channel work is active: ${blocked.join(', ')}`);
+  }
+
+  private reconcileFileSettings(snapshot: SettingsSnapshot, previous: SettingsSnapshot): void {
+    const now = new Date().toISOString();
+    const diskJobs = [...snapshot.crons, ...snapshot.reminders];
+    const existing = new Map((this.db.prepare('SELECT job_id,next_run,schedule_fingerprint,definition_fingerprint,created_at,updated_at FROM schedule_runtime').all() as Array<{job_id:string;next_run:string|null;schedule_fingerprint:string;definition_fingerprint:string;created_at:string;updated_at:string}>).map(row => [row.job_id,row]));
+    const archiveIds = [...new Set([...this.knownChannelIds(), ...Object.keys(previous.channels)])].filter(id => (snapshot === previous || this.snapshotTracked(id, previous.channels)) && !this.snapshotTracked(id, snapshot.channels));
+    this.db.exec('BEGIN IMMEDIATE');
+    const affected: string[] = [];
+    try {
+      this.reconcileChannelRuntime(snapshot, previous, now, affected);
+      const upsert = this.db.prepare('INSERT INTO schedule_runtime(job_id,next_run,schedule_fingerprint,definition_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET next_run=excluded.next_run,schedule_fingerprint=excluded.schedule_fingerprint,definition_fingerprint=excluded.definition_fingerprint,updated_at=excluded.updated_at');
+      for (const job of diskJobs) {
+        const runtime = existing.get(job.id);
+        const scheduleFp = this.scheduleFingerprint(job);
+        const definitionFp = this.definitionFingerprint(job);
+        const changedDefinition = runtime?.definition_fingerprint !== definitionFp;
+        const changedSchedule = runtime?.schedule_fingerprint !== scheduleFp;
+        const nextRun = !runtime || changedSchedule ? (job.enabled ? scheduleNextRun(job) : null) : runtime.next_run;
+        const updatedAt = changedDefinition ? now : runtime!.updated_at;
+        upsert.run(job.id,nextRun,scheduleFp,definitionFp,runtime?.created_at??job.createdAt,updatedAt);
+      }
+      const ids = new Set(diskJobs.map(job => job.id));
+      for (const id of existing.keys()) if (!ids.has(id)) this.db.prepare('DELETE FROM schedule_runtime WHERE job_id=?').run(id);
+      if (affected.length) this.suppressInvalidMemoryWrites(now);
+      for (const id of archiveIds) this.archiveChannelSession(id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  private reconcileChannelRuntime(snapshot: SettingsSnapshot, previous: SettingsSnapshot, now: string, affected: string[]): void {
+    const ids = new Set([...Object.keys(snapshot.channels), ...Object.keys(previous.channels), ...this.knownChannelIds(), ...this.alertChannelIds]);
+    const upsert = this.db.prepare('INSERT INTO channel_policy_runtime(channel_id,revision,policy_fingerprint) VALUES(?,?,?) ON CONFLICT(channel_id) DO UPDATE SET revision=excluded.revision,policy_fingerprint=excluded.policy_fingerprint');
+    for (const id of ids) {
+      const oldFp = this.db.prepare('SELECT revision,policy_fingerprint FROM channel_policy_runtime WHERE channel_id=?').get(id) as {revision:number;policy_fingerprint:string|null}|undefined;
+      const config = snapshot.channels[id] ?? {};
+      const fp = this.alertChannelIds.has(id) ? `alert:${this.policyFingerprint({ hindsightWrite: true })}` : Object.hasOwn(snapshot.channels,id) ? this.policyFingerprint(config) : null;
+      const changed = oldFp?.policy_fingerprint !== fp;
+      const revision = (oldFp?.revision ?? 0) + (oldFp && changed ? 1 : !oldFp && fp && config.hindsightWrite === false ? 1 : 0);
+      upsert.run(id, revision, fp);
+      if (changed && oldFp) affected.push(id);
+    }
+  }
+
+  setExternalChannelStopHooks(hooks: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void }): void { this.externalStopHooks = hooks; }
+
+  watchFileSettings(onInvalid: (error: Error, file: string) => void): () => void { this.settings.watch(onInvalid); return () => this.settings.close(); }
+  setSettingsTimezone(timezone:string):void { this.settings.setTimezone(timezone); }
+
+  setChannelOverrides(channelId:string,patch:Record<string,unknown>):void { this.settings.patchChannel(channelId,patch); }
 
   newSession(): string {
     const id = randomUUID();
@@ -740,78 +901,70 @@ export class Store implements SchedulerStore {
   }
 
   knownChannelIds(): string[] {
-    return (this.db.prepare(`SELECT channel_id FROM channel_state UNION SELECT channel_id FROM channel_policies UNION SELECT channel_id FROM channel_reply_modes UNION SELECT channel_id FROM channel_reasoning_efforts UNION SELECT channel_id FROM channel_image_models UNION SELECT channel_id FROM channel_model_overrides`).all() as Array<{channel_id:string}>).map(row => row.channel_id);
+    return [...new Set([...Object.keys(this.settings.current().channels), ...(this.db.prepare('SELECT channel_id FROM channel_state UNION SELECT channel_id FROM channel_policy_runtime').all() as Array<{channel_id:string}>).map(row => row.channel_id)])];
   }
 
+  isTrackedChannel(channelId: string): boolean { return this.alertChannelIds.has(channelId) || Object.hasOwn(this.settings.current().channels, channelId); }
+
+  addTrackedChannel(channelId: string): void { this.settings.addChannel(channelId); }
+  deleteTrackedChannel(channelId: string): void { this.settings.deleteChannel(channelId); }
+
+  private channelPolicyRevision(channelId:string):number { return (this.db.prepare('SELECT revision FROM channel_policy_runtime WHERE channel_id=?').get(channelId) as {revision:number}|undefined)?.revision??0; }
   channelPolicy(channelId: string): ChannelPolicy | undefined {
-    const row = this.db.prepare('SELECT * FROM channel_policies WHERE channel_id=?').get(channelId) as {channel_id:string;parent_channel_id:string|null;tracked:number|null;bot_reply:number|null;hindsight_write:number|null;revision:number}|undefined;
-    return row && {channelId:row.channel_id,parentChannelId:row.parent_channel_id,tracked:row.tracked===null?null:row.tracked===1,botReply:row.bot_reply===null?null:row.bot_reply===1,hindsightWrite:row.hindsight_write===null?null:row.hindsight_write===1,revision:row.revision};
+    const config=this.settings.current().channels[channelId];
+    if(!config)return undefined;
+    return {channelId,botReply:(config.botReply as boolean|null|undefined)??null,hindsightWrite:(config.hindsightWrite as boolean|null|undefined)??null,revision:this.channelPolicyRevision(channelId)};
   }
 
-  setAlertChannelIds(ids: string[]): void { this.alertChannelIds = new Set(ids); }
-  isAlertChannel(channelId: string, parentChannelId?: string): boolean {
-    if (this.alertChannelIds.has(channelId)) return true;
-    const seen = new Set([channelId]);
-    let current = parentChannelId ?? this.channelPolicy(channelId)?.parentChannelId ?? undefined;
-    while (current && !seen.has(current)) { if (this.alertChannelIds.has(current)) return true; seen.add(current); current = this.channelPolicy(current)?.parentChannelId ?? undefined; }
-    return false;
-  }
-
-  effectiveChannelPolicy(channelId:string,parentChannelId?:string):EffectiveChannelPolicy {
-    const own=this.channelPolicy(channelId);
-    const chain:Array<{channelId:string;policy:ChannelPolicy}>=[];
-    let current=parentChannelId??own?.parentChannelId;
-    const seen=new Set([channelId]);
-    while(current&&!seen.has(current)){seen.add(current);const policy=this.channelPolicy(current);if(!policy)break;chain.push({channelId:current,policy});current=policy.parentChannelId??undefined;}
-    const resolve=(key:'tracked'|'botReply'|'hindsightWrite',fallback:boolean):{value:boolean;source:string}=>{
-      if(own&&own[key]!==null)return {value:own[key]!,source:channelId};
-      for(const entry of chain)if(entry.policy[key]!==null)return {value:entry.policy[key]!,source:entry.channelId};
-      return {value:fallback,source:'default'};
-    };
-    const alertSource = this.alertChannelIds.has(channelId) ? channelId : chain.find(entry => this.alertChannelIds.has(entry.channelId))?.channelId;
-    if (alertSource) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'mention', mode:'steer', trackedSource:alertSource, botReplySource:alertSource, hindsightWriteSource:alertSource, replyModeSource:alertSource };
-    const tracked=resolve('tracked',true),botReply=resolve('botReply',false),hindsightWrite=resolve('hindsightWrite',true);
-    const mode=this.channelReplyMode(channelId);
-    const effectiveParent=parentChannelId??own?.parentChannelId??undefined;
-    const parentMode=effectiveParent?this.channelReplyMode(effectiveParent):undefined;
-    const modeSource = [channelId, ...chain.map(entry => entry.channelId)].find(id => this.channelModeOverride(id) !== undefined);
-    return {tracked:tracked.value,botReply:botReply.value,hindsightWrite:hindsightWrite.value,replyMode:mode??parentMode??'mention',mode:modeSource ? this.channelModeOverride(modeSource)! : 'queue',trackedSource:tracked.source,botReplySource:botReply.source,hindsightWriteSource:hindsightWrite.source,replyModeSource:mode?channelId:parentMode?effectiveParent!:'default'};
-  }
-
-  setChannelPolicy(channelId:string,patch:Partial<Pick<ChannelPolicy,'parentChannelId'|'tracked'|'botReply'|'hindsightWrite'>>):ChannelPolicy {
-    const before=this.channelPolicy(channelId);const parent=Object.prototype.hasOwnProperty.call(patch,'parentChannelId')?patch.parentChannelId??null:before?.parentChannelId??null;
-    const tracked=Object.prototype.hasOwnProperty.call(patch,'tracked')?patch.tracked:before?.tracked??null;
-    const botReply=Object.prototype.hasOwnProperty.call(patch,'botReply')?patch.botReply:before?.botReply??null;
-    const hindsightWrite=Object.prototype.hasOwnProperty.call(patch,'hindsightWrite')?patch.hindsightWrite:before?.hindsightWrite??null;
-    const revisionChanged=Boolean(before&&(before.parentChannelId!==parent||before.tracked!==tracked||before.hindsightWrite!==hindsightWrite));
-    const initialRevision=before?0:(parent!==null||hindsightWrite!==null?1:0);
-    this.db.exec('BEGIN IMMEDIATE');try{
-      this.db.prepare(`INSERT INTO channel_policies(channel_id,parent_channel_id,tracked,bot_reply,hindsight_write,revision) VALUES(?,?,?,?,?,?) ON CONFLICT(channel_id) DO UPDATE SET parent_channel_id=excluded.parent_channel_id,tracked=excluded.tracked,bot_reply=excluded.bot_reply,hindsight_write=excluded.hindsight_write,revision=channel_policies.revision+?`).run(channelId,parent,tracked===null?null:tracked?1:0,botReply===null?null:botReply?1:0,hindsightWrite===null?null:hindsightWrite?1:0,initialRevision,revisionChanged?1:0);
-      const now=new Date().toISOString();
-      const pending=this.db.prepare("SELECT hp.message_id,s.channel_id FROM hindsight_pending hp JOIN message_sources s ON s.message_id=hp.message_id WHERE hp.status='pending' AND NOT EXISTS (SELECT 1 FROM memory_batch_sources bs JOIN memory_batches b ON b.operation_id=bs.operation_id WHERE bs.message_id=hp.message_id AND (b.submit_intended_at IS NOT NULL OR b.status!='frozen'))").all() as Array<{message_id:string;channel_id:string|null}>;
-      const suppressMessage=(messageId:string,sourceChannelId:string|null):boolean=>{
-        const token=this.messageMemoryWriteToken(messageId);
-        if(token!==undefined)return token===null||!this.validMemoryWriteToken(token);
-        return !sourceChannelId||!this.effectiveChannelPolicy(sourceChannelId).tracked||!this.effectiveChannelPolicy(sourceChannelId).hindsightWrite;
-      };
-      const suppressIds=new Set(pending.filter(row=>suppressMessage(row.message_id,row.channel_id)).map(row=>row.message_id));
-      for(const row of this.db.prepare("SELECT operation_id,source_message_ids FROM memory_batches WHERE status='frozen' AND submit_intended_at IS NULL").all() as Array<{operation_id:string;source_message_ids:string}>) {
-        const ids=JSON.parse(row.source_message_ids) as string[];
-        if(ids.some(id=>suppressIds.has(id))){
-          this.db.prepare("UPDATE memory_batches SET status='suppressed',next_poll_at=NULL,error='Captured memory-write policy is no longer valid' WHERE operation_id=? AND status='frozen' AND submit_intended_at IS NULL").run(row.operation_id);
-          for(const id of ids)suppressIds.add(id);
-        }
-      }
-      const updatePending=this.db.prepare("UPDATE hindsight_pending SET status='suppressed',updated_at=?,error='Captured memory-write policy is no longer valid' WHERE message_id=? AND status='pending'");
-      for(const id of suppressIds)updatePending.run(now,id);
-      const jobs=this.db.prepare("SELECT j.message_id,s.channel_id FROM attachment_memory_jobs j JOIN message_sources s ON s.message_id=j.message_id WHERE j.state='queued'").all() as Array<{message_id:string;channel_id:string|null}>;
-      const updateJob=this.db.prepare("UPDATE attachment_memory_jobs SET state='suppressed',next_poll_at=NULL,error='Captured memory-write policy is no longer valid' WHERE message_id=? AND state='queued'");
-      for(const row of jobs)if(suppressMessage(row.message_id,row.channel_id)){updateJob.run(row.message_id);suppressIds.add(row.message_id);}
-      const clearToken=this.db.prepare("UPDATE message_memory_tokens SET token_json='null' WHERE message_id=?");
-      for(const id of suppressIds)clearToken.run(id);
+  setAlertChannelIds(ids: string[]): void {
+    const next = new Set(ids);
+    const channels = this.settings.current().channels;
+    const overlap = [...next].filter(id => Object.hasOwn(channels, id));
+    if (overlap.length) throw new SettingsConflictError(`Alert channels cannot have general channel settings: ${overlap.join(', ')}`);
+    const previous = this.alertChannelIds;
+    const changed = [...new Set([...previous, ...next])].filter(id => previous.has(id) !== next.has(id));
+    if (!changed.length) return;
+    const stopped = [...previous].filter(id => !next.has(id) && !Object.hasOwn(channels, id));
+    const blocked = stopped.filter(id => this.externalStopHooks && !this.externalStopHooks.canStop(id));
+    if (blocked.length) throw new SettingsConflictError(`Cannot stop tracking while channel work is active: ${blocked.join(', ')}`);
+    const now = new Date().toISOString();
+    this.db.exec('BEGIN IMMEDIATE');
+    this.alertChannelIds = next;
+    try {
+      const update = this.db.prepare('INSERT INTO channel_policy_runtime(channel_id,revision,policy_fingerprint) VALUES(?,1,?) ON CONFLICT(channel_id) DO UPDATE SET revision=revision+1,policy_fingerprint=excluded.policy_fingerprint');
+      for (const id of changed) update.run(id, next.has(id) ? `alert:${this.policyFingerprint({ hindsightWrite: true })}` : Object.hasOwn(channels, id) ? this.policyFingerprint(channels[id]!) : null);
+      this.suppressInvalidMemoryWrites(now);
+      for (const id of stopped) this.archiveChannelSession(id);
       this.db.exec('COMMIT');
-    }catch(error){this.db.exec('ROLLBACK');throw error;}
+    } catch (error) {
+      this.alertChannelIds = previous;
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+  isAlertChannel(channelId: string, _parentChannelId?: string): boolean { return this.alertChannelIds.has(channelId); }
+
+  effectiveChannelPolicy(channelId:string,_parentChannelId?:string):EffectiveChannelPolicy {
+    if (this.alertChannelIds.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'mention', mode:'steer', trackedSource:channelId, botReplySource:channelId, hindsightWriteSource:channelId, replyModeSource:channelId };
+    const config = this.settings.current().channels[channelId];
+    const tracked = Object.hasOwn(this.settings.current().channels, channelId);
+    const bool = (key: 'botReply'|'hindsightWrite', fallback: boolean) => typeof config?.[key] === 'boolean' ? config[key] as boolean : fallback;
+    return { tracked, botReply:bool('botReply',false), hindsightWrite:bool('hindsightWrite',false), replyMode:this.channelReplyMode(channelId) ?? 'mention', mode:this.channelModeOverride(channelId) ?? 'steer', trackedSource:tracked?channelId:'default', botReplySource:typeof config?.botReply==='boolean'?channelId:'default', hindsightWriteSource:typeof config?.hindsightWrite==='boolean'?channelId:'default', replyModeSource:this.channelReplyMode(channelId)?channelId:'default' };
+  }
+
+  setChannelPolicy(channelId:string,patch:Partial<Pick<ChannelPolicy,'botReply'|'hindsightWrite'>>):ChannelPolicy {
+    this.settings.patchChannel(channelId,patch as Record<string,unknown>);
     return this.channelPolicy(channelId)!;
+  }
+
+  private suppressInvalidMemoryWrites(now: string): void {
+    const pending=this.db.prepare("SELECT hp.message_id,s.channel_id FROM hindsight_pending hp JOIN message_sources s ON s.message_id=hp.message_id WHERE hp.status='pending' AND NOT EXISTS (SELECT 1 FROM memory_batch_sources bs JOIN memory_batches b ON b.operation_id=bs.operation_id WHERE bs.message_id=hp.message_id AND (b.submit_intended_at IS NOT NULL OR b.status!='frozen'))").all() as Array<{message_id:string;channel_id:string|null}>;
+    const suppressMessage=(messageId:string,sourceChannelId:string|null):boolean=>{const token=this.messageMemoryWriteToken(messageId);if(token!==undefined)return token===null||!this.validMemoryWriteToken(token);return !sourceChannelId||!this.effectiveChannelPolicy(sourceChannelId).tracked||!this.effectiveChannelPolicy(sourceChannelId).hindsightWrite;};
+    const suppressIds=new Set(pending.filter(row=>suppressMessage(row.message_id,row.channel_id)).map(row=>row.message_id));
+    for(const row of this.db.prepare("SELECT operation_id,source_message_ids FROM memory_batches WHERE status='frozen' AND submit_intended_at IS NULL").all() as Array<{operation_id:string;source_message_ids:string}>){const ids=JSON.parse(row.source_message_ids) as string[];if(ids.some(id=>suppressIds.has(id))){this.db.prepare("UPDATE memory_batches SET status='suppressed',next_poll_at=NULL,error='Captured memory-write policy is no longer valid' WHERE operation_id=? AND status='frozen' AND submit_intended_at IS NULL").run(row.operation_id);for(const id of ids)suppressIds.add(id);}}
+    const updatePending=this.db.prepare("UPDATE hindsight_pending SET status='suppressed',updated_at=?,error='Captured memory-write policy is no longer valid' WHERE message_id=? AND status='pending'");for(const id of suppressIds)updatePending.run(now,id);
+    const jobs=this.db.prepare("SELECT j.message_id,s.channel_id FROM attachment_memory_jobs j JOIN message_sources s ON s.message_id=j.message_id WHERE j.state='queued'").all() as Array<{message_id:string;channel_id:string|null}>;const updateJob=this.db.prepare("UPDATE attachment_memory_jobs SET state='suppressed',next_poll_at=NULL,error='Captured memory-write policy is no longer valid' WHERE message_id=? AND state='queued'");for(const row of jobs)if(suppressMessage(row.message_id,row.channel_id)){updateJob.run(row.message_id);suppressIds.add(row.message_id);}
+    const clearToken=this.db.prepare("UPDATE message_memory_tokens SET token_json='null' WHERE message_id=?");for(const id of suppressIds)clearToken.run(id);
   }
 
   memoryWriteToken(originChannelId:string,sourceChannelId:string):MemoryWriteToken|null {
@@ -820,7 +973,7 @@ export class Store implements SchedulerStore {
     if(!origin.tracked||!source.tracked||!origin.hindsightWrite||!source.hindsightWrite)return null;
     const originPolicy=origin.hindsightWriteSource==='default'?originChannelId:origin.hindsightWriteSource;
     const sourcePolicy=source.hindsightWriteSource==='default'?sourceChannelId:source.hindsightWriteSource;
-    return {originChannelId,sourceChannelId,originPolicyChannelId:originPolicy,originRevision:this.channelPolicy(originPolicy)?.revision??0,sourcePolicyChannelId:sourcePolicy,sourceRevision:this.channelPolicy(sourcePolicy)?.revision??0,alertFingerprint:this.alertFingerprint(originChannelId,sourceChannelId)};
+    return {originChannelId,sourceChannelId,originPolicyChannelId:originPolicy,originRevision:this.channelPolicyRevision(originPolicy),sourcePolicyChannelId:sourcePolicy,sourceRevision:this.channelPolicyRevision(sourcePolicy),alertFingerprint:this.alertFingerprint(originChannelId,sourceChannelId)};
   }
   messageMemoryWriteToken(messageId:string):MemoryWriteToken|null|undefined {
     const row=this.db.prepare('SELECT token_json FROM message_memory_tokens WHERE message_id=?').get(messageId) as {token_json:string}|undefined;
@@ -840,43 +993,22 @@ export class Store implements SchedulerStore {
     const effectiveOrigin=this.effectiveChannelPolicy(token.originChannelId),effectiveSource=this.effectiveChannelPolicy(token.sourceChannelId);
     const originPolicy=effectiveOrigin.hindsightWriteSource==='default'?token.originChannelId:effectiveOrigin.hindsightWriteSource;
     const sourcePolicy=effectiveSource.hindsightWriteSource==='default'?token.sourceChannelId:effectiveSource.hindsightWriteSource;
-    return (token.alertFingerprint === undefined || token.alertFingerprint === this.alertFingerprint(token.originChannelId,token.sourceChannelId))&&effectiveOrigin.tracked&&effectiveSource.tracked&&effectiveOrigin.hindsightWrite&&effectiveSource.hindsightWrite&&originPolicy===token.originPolicyChannelId&&sourcePolicy===token.sourcePolicyChannelId&&(this.channelPolicy(originPolicy)?.revision??0)===token.originRevision&&(this.channelPolicy(sourcePolicy)?.revision??0)===token.sourceRevision;
-  }
-
-  migrateChannelPolicies(allowedIds:string[]):void {
-    this.db.exec('BEGIN IMMEDIATE');try{
-      if(this.db.prepare("SELECT 1 FROM channel_policy_migrations WHERE name='global-bot-reply'").get()){this.db.exec('COMMIT');return;}
-      const legacyRow=this.db.prepare('SELECT bot_reply FROM discord_settings WHERE id=1').get() as {bot_reply:number}|undefined;
-      const legacy=legacyRow?.bot_reply===1;
-      for(const id of allowedIds)this.db.prepare('INSERT INTO channel_policies(channel_id,bot_reply,revision) VALUES(?,?,0) ON CONFLICT(channel_id) DO NOTHING').run(id,legacy?1:0);
-      this.db.prepare('INSERT INTO channel_policies(channel_id,bot_reply,revision) SELECT cs.channel_id,?,0 FROM channel_state cs WHERE NOT EXISTS(SELECT 1 FROM channel_policies cp WHERE cp.channel_id=cs.channel_id)').run(legacy?1:0);
-      this.db.prepare("INSERT INTO channel_policy_migrations(name,completed_at) VALUES('global-bot-reply',?)").run(new Date().toISOString());
-      this.db.exec('COMMIT');
-    }catch(error){this.db.exec('ROLLBACK');throw error;}
+    return (token.alertFingerprint === undefined || token.alertFingerprint === this.alertFingerprint(token.originChannelId,token.sourceChannelId))&&effectiveOrigin.tracked&&effectiveSource.tracked&&effectiveOrigin.hindsightWrite&&effectiveSource.hindsightWrite&&originPolicy===token.originPolicyChannelId&&sourcePolicy===token.sourcePolicyChannelId&&this.channelPolicyRevision(originPolicy)===token.originRevision&&this.channelPolicyRevision(sourcePolicy)===token.sourceRevision;
   }
 
   channelSettings(channelId:string,defaultModel:string):{sessionId?:string;model:string} {
-    const row=this.db.prepare('SELECT session_id,model FROM channel_state WHERE channel_id=?').get(channelId) as {session_id:string;model:string|null}|undefined;
+    const row=this.db.prepare('SELECT session_id FROM channel_state WHERE channel_id=?').get(channelId) as {session_id:string}|undefined;
     return { ...(row?{sessionId:row.session_id}:{}), model: this.effectiveChannelModel(channelId, defaultModel) };
   }
 
-  effectiveChannelModel(channelId: string, defaultModel: string): string {
-    const override = this.channelModelOverride(channelId);
-    if (override !== undefined && override !== null) return override;
-    const parent = this.channelPolicy(channelId)?.parentChannelId;
-    return parent ? this.effectiveChannelModel(parent, defaultModel) : defaultModel;
-  }
+  effectiveChannelModel(channelId: string, defaultModel: string): string { return this.isAlertChannel(channelId) ? defaultModel : this.channelModelOverride(channelId) ?? defaultModel; }
 
-  effectiveChannelReasoningEffort(channelId: string): ReasoningEffort | undefined {
-    return this.channelReasoningEffort(channelId) ?? (this.channelPolicy(channelId)?.parentChannelId ? this.effectiveChannelReasoningEffort(this.channelPolicy(channelId)!.parentChannelId!) : undefined);
-  }
+  effectiveChannelReasoningEffort(channelId: string): ReasoningEffort | undefined { return this.isAlertChannel(channelId) ? undefined : this.channelReasoningEffort(channelId); }
 
-  effectiveChannelImageModel(channelId: string): string | undefined {
-    return this.channelImageModel(channelId) ?? (this.channelPolicy(channelId)?.parentChannelId ? this.effectiveChannelImageModel(this.channelPolicy(channelId)!.parentChannelId!) : undefined);
-  }
+  effectiveChannelImageModel(channelId: string): string | undefined { return this.isAlertChannel(channelId) ? undefined : this.channelImageModel(channelId); }
 
   channelState(channelId: string, defaultModel: string, ownerId = 'unknown'): { sessionId: string; model: string } {
-    const row = this.db.prepare('SELECT session_id,model FROM channel_state WHERE channel_id=?').get(channelId) as { session_id: string; model: string | null } | undefined;
+    const row = this.db.prepare('SELECT session_id FROM channel_state WHERE channel_id=?').get(channelId) as { session_id: string } | undefined;
     if (row) return { sessionId: row.session_id, model: this.effectiveChannelModel(channelId, defaultModel) };
     const sessionId = this.newSession();
     this.db.exec('BEGIN');
@@ -897,32 +1029,12 @@ export class Store implements SchedulerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  setChannelModel(channelId: string, model: string | null): void {
-    this.db.prepare('INSERT INTO channel_model_overrides(channel_id,model) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET model=excluded.model').run(channelId,model);
-  }
-
-  channelModelOverride(channelId:string):string|null|undefined {
-    const row=this.db.prepare('SELECT model FROM channel_model_overrides WHERE channel_id=?').get(channelId) as {model:string|null}|undefined;
-    if (row) return row.model;
-    const legacy = this.db.prepare('SELECT model FROM channel_state WHERE channel_id=?').get(channelId) as {model:string|null}|undefined;
-    return legacy?.model;
-  }
-
-  archiveChannelSession(channelId:string):boolean {
-    return Number(this.db.prepare('DELETE FROM channel_state WHERE channel_id=?').run(channelId).changes)===1;
-  }
-
-  channelModeOverride(channelId: string): 'queue' | 'steer' | undefined {
-    const row = this.db.prepare('SELECT mode FROM channel_modes WHERE channel_id=?').get(channelId) as { mode: 'queue' | 'steer' } | undefined;
-    return row?.mode;
-  }
-
+  setChannelModel(channelId: string, model: string | null): void { this.settings.patchChannel(channelId,{model}); }
+  channelModelOverride(channelId:string):string|null|undefined { const config=this.settings.current().channels[channelId];return config&&Object.hasOwn(config,'model')?config.model as string|null:undefined; }
+  archiveChannelSession(channelId:string):boolean { return Number(this.db.prepare('DELETE FROM channel_state WHERE channel_id=?').run(channelId).changes)===1; }
+  channelModeOverride(channelId: string): 'queue' | 'steer' | undefined { return (this.settings.current().channels[channelId]?.mode as 'queue'|'steer'|null|undefined)??undefined; }
   channelMode(channelId: string): 'queue' | 'steer' { return this.effectiveChannelPolicy(channelId).mode; }
-
-  setChannelMode(channelId: string, mode: 'queue' | 'steer' | undefined): void {
-    if (mode === undefined) { this.db.prepare('DELETE FROM channel_modes WHERE channel_id=?').run(channelId); return; }
-    this.db.prepare('INSERT INTO channel_modes(channel_id,mode) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET mode=excluded.mode').run(channelId, mode);
-  }
+  setChannelMode(channelId: string, mode: 'queue' | 'steer' | undefined): void { this.settings.patchChannel(channelId,{mode}); }
 
   setRestartNotice(channelId: string | null, messageId?: string): void {
     if (channelId === null) this.db.prepare('DELETE FROM restart_notice WHERE id=1').run();
@@ -979,83 +1091,21 @@ export class Store implements SchedulerStore {
 
   effectiveReplyMode(channelId: string, parentChannelId?: string): ChannelReplyMode { return this.effectiveChannelPolicy(channelId, parentChannelId).replyMode; }
 
-  channelReplyMode(channelId: string): ChannelReplyMode | undefined {
-    const row = this.db.prepare('SELECT mode FROM channel_reply_modes WHERE channel_id=?').get(channelId) as { mode: ChannelReplyMode } | undefined;
-    return row?.mode;
-  }
+  channelReplyMode(channelId:string):ChannelReplyMode|undefined { return (this.settings.current().channels[channelId]?.replyMode as ChannelReplyMode|null|undefined)??undefined; }
+  setChannelReplyMode(channelId:string,mode:ChannelReplyMode|undefined):void { this.settings.patchChannel(channelId,{replyMode:mode}); }
+  channelReasoningEffort(channelId:string):ReasoningEffort|undefined { return (this.settings.current().channels[channelId]?.effort as ReasoningEffort|null|undefined)??undefined; }
+  setChannelReasoningEffort(channelId:string,effort:ReasoningEffort|undefined):void { this.settings.patchChannel(channelId,{effort}); }
+  channelImageModel(channelId:string):string|undefined { return (this.settings.current().channels[channelId]?.imageModel as string|null|undefined)??undefined; }
+  setChannelImageModel(channelId:string,model:string|undefined):void { this.settings.patchChannel(channelId,{imageModel:model}); }
 
-  setChannelReplyMode(channelId: string, mode: ChannelReplyMode | undefined): void {
-    if (mode === undefined) { this.db.prepare('DELETE FROM channel_reply_modes WHERE channel_id=?').run(channelId); return; }
-    this.db.prepare('INSERT INTO channel_reply_modes(channel_id,mode) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET mode=excluded.mode').run(channelId, mode);
-  }
+  createSchedule(job:ScheduleJob):ScheduleJob { this.settings.refresh();if(this.getSchedule(job.id))throw new SettingsConflictError(`Schedule ${job.id} already exists`);this.settings.upsertSchedule(job);this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(job.nextRun,job.id);return this.getSchedule(job.id)!; }
+  getSchedule(id:string):ScheduleJob|undefined { const snapshot=this.settings.current();const job=[...snapshot.crons,...snapshot.reminders].find(item=>item.id===id);if(!job)return undefined;const runtime=this.db.prepare('SELECT next_run,updated_at FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null;updated_at:string}|undefined;return {...job,nextRun:runtime?runtime.next_run:null,updatedAt:runtime?.updated_at??job.updatedAt}; }
+  listSchedules():ScheduleJob[] { const snapshot=this.settings.current();return [...snapshot.crons,...snapshot.reminders].map(job=>this.getSchedule(job.id)!).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id)); }
+  updateSchedule(id:string,patch:Partial<Pick<ScheduleJob,'outputChannelId'|'content'|'cron'|'runAt'|'timezone'|'enabled'|'nextRun'|'notify'>>):ScheduleJob|undefined { this.settings.refresh();const current=this.getSchedule(id);if(!current)return undefined;const {nextRun,...definitionPatch}=patch;if(Object.keys(definitionPatch).length)this.settings.patchSchedule(id,{...definitionPatch,updatedAt:new Date().toISOString()});if(Object.hasOwn(patch,'nextRun'))this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(nextRun??null,id);return this.getSchedule(id); }
+  deleteSchedule(id:string):boolean { return Boolean(this.settings.deleteSchedule(id)); }
 
-  channelReasoningEffort(channelId: string): ReasoningEffort | undefined {
-    const row = this.db.prepare('SELECT effort FROM channel_reasoning_efforts WHERE channel_id=?').get(channelId) as { effort: ReasoningEffort } | undefined;
-    return row?.effort;
-  }
-
-  setChannelReasoningEffort(channelId: string, effort: ReasoningEffort | undefined): void {
-    if (effort === undefined) { this.db.prepare('DELETE FROM channel_reasoning_efforts WHERE channel_id=?').run(channelId); return; }
-    this.db.prepare('INSERT INTO channel_reasoning_efforts(channel_id,effort) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET effort=excluded.effort').run(channelId, effort);
-  }
-
-  channelImageModel(channelId: string): string | undefined {
-    const row = this.db.prepare('SELECT model FROM channel_image_models WHERE channel_id=?').get(channelId) as { model: string } | undefined;
-    return row?.model;
-  }
-
-  setChannelImageModel(channelId: string, model: string | undefined): void {
-    if (model === undefined) { this.db.prepare('DELETE FROM channel_image_models WHERE channel_id=?').run(channelId); return; }
-    this.db.prepare('INSERT INTO channel_image_models(channel_id,model) VALUES(?,?) ON CONFLICT(channel_id) DO UPDATE SET model=excluded.model').run(channelId, model);
-  }
-
-  createSchedule(job: ScheduleJob): ScheduleJob {
-    this.db.prepare(`INSERT INTO schedules(id,output_channel_id,creator_id,kind,content,cron,run_at,timezone,enabled,next_run,created_at,updated_at,notify)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(job.id, job.outputChannelId, job.creatorId, job.kind, job.content, job.cron, job.runAt, job.timezone, job.enabled ? 1 : 0, job.nextRun, job.createdAt, job.updatedAt, job.notify);
-    return job;
-  }
-
-  getSchedule(id: string): ScheduleJob | undefined {
-    const row = this.db.prepare('SELECT * FROM schedules WHERE id=?').get(id) as ScheduleDbRow | undefined;
-    return row && scheduleFromRow(row);
-  }
-
-  listSchedules(): ScheduleJob[] {
-    return (this.db.prepare('SELECT * FROM schedules ORDER BY created_at,id').all() as ScheduleDbRow[]).map(scheduleFromRow);
-  }
-
-  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>>): ScheduleJob | undefined {
-    const fields: Array<[keyof typeof patch, string]> = [['outputChannelId','output_channel_id'],['content','content'],['cron','cron'],['runAt','run_at'],['timezone','timezone'],['enabled','enabled'],['nextRun','next_run'],['notify','notify']];
-    const selected = fields.filter(([key]) => Object.prototype.hasOwnProperty.call(patch, key));
-    if (!selected.length) return this.getSchedule(id);
-    const assignments = selected.map(([, column]) => `${column}=?`).join(',');
-    const values = selected.map(([key]) => key === 'enabled' ? (patch.enabled ? 1 : 0) : (patch[key as keyof typeof patch] == null ? null : String(patch[key as keyof typeof patch])));
-    const result = this.db.prepare(`UPDATE schedules SET ${assignments},updated_at=? WHERE id=?`).run(...values, new Date().toISOString(), id);
-    if (Number(result.changes) !== 1) return undefined;
-    return this.getSchedule(id);
-  }
-
-  deleteSchedule(id: string): boolean {
-    return Number(this.db.prepare('DELETE FROM schedules WHERE id=?').run(id).changes) === 1;
-  }
-
-  claimScheduleRun(id: string, scheduledAt: string, nextRun: string | null, now: string): { job: ScheduleJob; run: ScheduleRun } | undefined {
-    this.db.exec('BEGIN IMMEDIATE');
-    try {
-      const row = this.db.prepare('SELECT * FROM schedules WHERE id=? AND enabled=1 AND next_run=? AND next_run<=?').get(id, scheduledAt, now) as ScheduleDbRow | undefined;
-      if (!row) { this.db.exec('COMMIT'); return undefined; }
-      const run: ScheduleRun = { id: randomUUID(), jobId: id, scheduledAt, status: 'running', claimedAt: now, finishedAt: null, error: null };
-      try {
-        this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id, id, scheduledAt, 'running', now);
-      } catch (error) {
-        if (error instanceof Error && /UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)) { this.db.exec('ROLLBACK'); return undefined; }
-        throw error;
-      }
-      const updated = this.db.prepare('UPDATE schedules SET next_run=?,updated_at=? WHERE id=? AND enabled=1 AND next_run=?').run(nextRun, now, id, scheduledAt);
-      if (Number(updated.changes) !== 1) throw new Error(`Could not advance schedule ${id}`);
-      this.db.exec('COMMIT');
-      return { job: scheduleFromRow({ ...row, next_run: nextRun, updated_at: now }), run };
-    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  claimScheduleRun(id:string,scheduledAt:string,nextRun:string|null,now:string):{job:ScheduleJob;run:ScheduleRun}|undefined {
+    this.db.exec('BEGIN IMMEDIATE');try{const job=this.getSchedule(id);const row=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;if(!job||!job.enabled||!row||row.next_run!==scheduledAt||scheduledAt>now){this.db.exec('COMMIT');return undefined;}const run:ScheduleRun={id:randomUUID(),jobId:id,scheduledAt,status:'running',claimedAt:now,finishedAt:null,error:null};try{this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id,id,scheduledAt,'running',now);}catch(error){if(error instanceof Error&&/UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)){this.db.exec('ROLLBACK');return undefined;}throw error;}const updated=this.db.prepare('UPDATE schedule_runtime SET next_run=?,updated_at=? WHERE job_id=? AND next_run=?').run(nextRun,now,id,scheduledAt);if(Number(updated.changes)!==1)throw new Error(`Could not advance schedule ${id}`);this.db.exec('COMMIT');return {job:{...job,nextRun},run};}catch(error){this.db.exec('ROLLBACK');throw error;}
   }
 
   markRunningScheduleRunsUnknown(now: string): ScheduleRun[] {
@@ -1070,9 +1120,7 @@ export class Store implements SchedulerStore {
   }
 
   dueSchedules(now: string): ScheduleJob[] {
-    const rows = this.db.prepare(`SELECT s.* FROM schedules s WHERE s.enabled=1 AND s.next_run IS NOT NULL AND s.next_run<=?
-      AND (s.kind!='reminder' OR NOT EXISTS (SELECT 1 FROM schedule_runs r WHERE r.job_id=s.id AND r.scheduled_at=s.next_run)) ORDER BY s.next_run,s.id`).all(now) as ScheduleDbRow[];
-    return rows.map(scheduleFromRow);
+    return this.listSchedules().filter(job=>job.enabled&&job.nextRun!==null&&job.nextRun<=now&&(job.kind!=='reminder'||!this.db.prepare('SELECT 1 FROM schedule_runs WHERE job_id=? AND scheduled_at=?').get(job.id,job.nextRun))).sort((a,b)=>a.nextRun!.localeCompare(b.nextRun!)||a.id.localeCompare(b.id));
   }
 
   finishScheduleRun(runId: string, status: 'completed' | 'failed', error?: string): void {
@@ -1081,6 +1129,8 @@ export class Store implements SchedulerStore {
   }
 
   close(): void {
-    this.db.close();
+    if (this.closed) return;
+    this.closed = true;
+    this.settings.close(); this.db.close(); if(this.ownedSettingsDirectory)rmSync(this.ownedSettingsDirectory,{recursive:true,force:true});
   }
 }

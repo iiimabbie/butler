@@ -1,14 +1,14 @@
-import { readFileSync, watch, type FSWatcher, writeFileSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { isAbsolute, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse, parseDocument } from 'yaml';
+import { parse } from 'yaml';
 import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 import type { LogMethods } from './log.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
-  discord?: { token?: string; ownerId?: string; channelIds?: string[]; alertChannelIds?: string[]; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
+  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
   hledger?: { enabled: boolean; journalPath: string; executablePath: string };
@@ -21,6 +21,11 @@ export type ButlerConfig = {
   schedule?: { timezone?: string };
   subagent?: { model: string; maxTurns?: number; timeoutMs?: number; toolsEnabled?: boolean };
 };
+
+export function configuredAlertChannelIds(config: ButlerConfig): string[] {
+  const discord = config.discord;
+  return discord?.errorWebhookUrl && discord.errorWebhookThreadId ? [discord.errorWebhookThreadId] : [];
+}
 
 const CONFIG_PATH = fileURLToPath(new URL('../config.yaml', import.meta.url));
 
@@ -45,17 +50,13 @@ function validateConfig(raw: unknown): ButlerConfig {
       return value;
     };
     if (name === 'discord') {
-      const channelIds = section.channelIds;
-      if (channelIds !== undefined && (!Array.isArray(channelIds) || !channelIds.length || channelIds.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)))) throw new Error('Butler config discord.channelIds must be a nonempty string array');
-      const alertChannelIds = section.alertChannelIds;
-      if (alertChannelIds !== undefined && (!Array.isArray(alertChannelIds) || alertChannelIds.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)) || new Set(alertChannelIds).size !== alertChannelIds.length)) throw new Error('Butler config discord.alertChannelIds must be a unique string array of Discord channel IDs');
       const errorWebhookUrl = string('errorWebhookUrl');
       if (errorWebhookUrl !== undefined && !/^https:\/\/discord\.com\/api\/(?:v10\/)?webhooks\/\d+\/[^/?#]+$/.test(errorWebhookUrl)) throw new Error('Butler config discord.errorWebhookUrl must be a Discord webhook URL without query or fragment');
       const errorWebhookMentionUserId = string('errorWebhookMentionUserId');
       if (errorWebhookMentionUserId !== undefined && !/^\d+$/.test(errorWebhookMentionUserId)) throw new Error('Butler config discord.errorWebhookMentionUserId must be a numeric Discord user ID');
       const errorWebhookThreadId = string('errorWebhookThreadId');
       if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), channelIds: channelIds as string[] | undefined, alertChannelIds: (alertChannelIds as string[] | undefined) ?? [], errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
+      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
@@ -163,34 +164,12 @@ export class ConfigConflictError extends Error {
   constructor(message: string, readonly coldPaths?: readonly string[]) { super(message); this.name = 'ConfigConflictError'; }
 }
 
-class ConfigInputError extends Error {
-  readonly status = 400;
-  constructor(message: string) { super(message); this.name = 'ConfigInputError'; }
-}
-
 function validateCandidate(current: ButlerConfig, candidate: ButlerConfig): void {
   const cold = coldPaths.filter(key => !sameValue(valueAt(current, key), valueAt(candidate, key)));
   if (cold.length) throw new ConfigConflictError(`Config changes require restart: ${cold.join(', ')}`, cold);
 }
 
-function addChannelToFile(path: string, channelId: string): { candidate: ButlerConfig; original: Buffer } {
-  if (!/^\d{17,20}$/.test(channelId)) throw new ConfigInputError('Discord channel ID must be a snowflake');
-  const original = readFileSync(path);
-  const document = parseDocument(original.toString('utf8'), { logLevel: 'silent' });
-  if (document.errors.length) throw new Error('Butler config could not be read as YAML');
-  const raw = document.toJS() as unknown;
-  if (!isRecord(raw)) throw new Error('Butler config must be an object');
-  const discord: Record<string, unknown> = isRecord(raw.discord) ? raw.discord : {};
-  (raw as Record<string, unknown>).discord = discord;
-  const ids = discord.channelIds;
-  if (ids !== undefined && (!Array.isArray(ids) || ids.some(id => typeof id !== 'string' || !/^\d{17,20}$/.test(id)))) throw new Error('Butler config discord.channelIds must contain snowflakes');
-  const channelIds = (ids ?? []) as string[];
-  if (channelIds.includes(channelId)) throw new ConfigConflictError('Discord channel is already allowed');
-  document.setIn(['discord', 'channelIds'], [...channelIds, channelId]);
-  return { candidate: validateConfig(document.toJS()), original };
-}
-
-export function watchConfig(options: { onCandidate(config: ButlerConfig): void; prepareCandidate?(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void; addChannel(channelId: string): void } {
+export function watchConfig(options: { onCandidate(config: ButlerConfig): void; prepareCandidate?(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
   const path = options.path ?? CONFIG_PATH;
   let current = options.initial ?? readConfig(path);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -222,24 +201,5 @@ export function watchConfig(options: { onCandidate(config: ButlerConfig): void; 
     });
     watcher.on('error', () => options.log.logError('Config watcher failed; service continues without further reloads'));
   } catch { options.log.logError('Config watcher failed; service continues without further reloads'); }
-  return {
-    close() { closed = true; if (timer) clearTimeout(timer); timer = undefined; watcher?.close(); watcher = undefined; },
-    addChannel(channelId: string) {
-      if (closed) throw new Error('Config watcher is closed');
-      const { candidate, original } = addChannelToFile(path, channelId);
-      validateCandidate(current, candidate);
-      const apply = options.prepareCandidate?.(candidate);
-      const currentBytes = readFileSync(path);
-      if (!currentBytes.equals(original)) throw new ConfigConflictError('Config file changed while adding channel');
-      const temp = `${path}.${process.pid}-${Date.now()}.tmp`;
-      const mode = statSync(path).mode & 0o777;
-      try {
-        writeFileSync(temp, (() => { const doc = parseDocument(original.toString('utf8'), { logLevel: 'silent' }); doc.setIn(['discord', 'channelIds'], candidate.discord?.channelIds); return doc.toString(); })(), { mode, flag: 'wx' });
-        if (!readFileSync(path).equals(original)) throw new ConfigConflictError('Config file changed while adding channel');
-        renameSync(temp, path);
-      } catch (error) { try { unlinkSync(temp); } catch {} throw error; }
-      if (apply) apply(); else options.onCandidate(candidate);
-      current = candidate;
-    },
-  };
+  return { close() { closed = true; if (timer) clearTimeout(timer); timer = undefined; watcher?.close(); watcher = undefined; } };
 }

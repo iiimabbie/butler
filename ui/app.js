@@ -252,7 +252,6 @@ function isChannelDirty(id) {
 
 function channelSettings(channel) {
   return {
-    tracked: channel.raw.tracked,
     botReply: channel.raw.botReply,
     hindsightWrite: channel.raw.hindsightWrite,
     replyMode: channel.raw.replyMode,
@@ -266,6 +265,14 @@ function channelSettings(channel) {
 function ensureChannelDraft(channel) {
   if (!channelDrafts.has(channel.channelId)) channelDrafts.set(channel.channelId, channelSettings(channel));
   return channelDrafts.get(channel.channelId);
+}
+
+function channelSettingSource(channel, key) {
+  const source = channel.sources[key];
+  if (source === 'default') return '全域預設';
+  if (source.startsWith('alert:')) return `告警頻道固定規則（${source.slice(6)}）`;
+  if (source === channel.channelId) return '此頻道設定';
+  return '全域預設';
 }
 
 function settingSelect(channel, draft, key, label, options, effectiveText) {
@@ -287,7 +294,7 @@ function settingSelect(channel, draft, key, label, options, effectiveText) {
   }
   select.value = desired;
   select.onchange = () => { draft[key] = select.value === '' ? null : select.value; updateChannelDirty(channel.channelId); };
-  wrap.append(select, element('small', `生效值：${effectiveText}`));
+  wrap.append(select, element('small', `生效值：${effectiveText} · ${channelSettingSource(channel, key)}`));
   return wrap;
 }
 
@@ -300,7 +307,7 @@ function booleanField(channel, draft, key, label, effectiveValue) {
   input.checked = channel.alert ? effectiveValue : draft[key] === null ? effectiveValue : draft[key];
   input.onchange = () => { draft[key] = input.checked; updateChannelDirty(channel.channelId); };
   labelElement.append(input, document.createTextNode(label));
-  wrap.append(labelElement, element('small', `生效值：${effectiveValue ? '開' : '關'}`));
+  wrap.append(labelElement, element('small', `生效值：${effectiveValue ? '開' : '關'} · ${channelSettingSource(channel, key)}`));
   return wrap;
 }
 
@@ -366,12 +373,12 @@ function renderChannels() {
     button.onclick = () => selectChannel(channel.channelId);
     const action = element('button', channel.tracked ? '停止追蹤' : '恢復追蹤', 'channel-tree-tracking');
     action.type = 'button';
-    action.disabled = !channel.authorized || channel.alert || busyChannels.has(channel.channelId);
+    action.disabled = channel.alert || busyChannels.has(channel.channelId);
     action.setAttribute('aria-label', `${action.textContent}：${channel.name || channel.channelId}`);
     action.onclick = () => {
       if (channel.tracked) {
         if (window.confirm('停止追蹤此頻道？歷史紀錄會保留。')) void mutateChannel(channel, 'DELETE');
-      } else void mutateChannel(channel, 'PATCH', { tracked: true });
+      } else void mutateChannel(channel, 'POST', { channelId: channel.channelId });
     };
     row.append(button, action);
     tree.append(row);
@@ -386,39 +393,29 @@ function renderChannels() {
   panel.dataset.channelId = channel.channelId;
   panel.replaceChildren();
   const draft = ensureChannelDraft(channel);
-  const parent = byId.get(channel.parentChannelId);
-  const inherits = Boolean(channel.parentChannelId) && ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel'].every(key => draft[key] == null);
-  const effective = inherits ? (parent?.effective ?? channel.effective) : channel.effective;
+  const effective = channel.effective;
   const heading = element('header', undefined, 'channel-panel-heading');
   const identity = element('div'); identity.append(element('p', '頻道設定', 'eyebrow'), element('h3', channel.name || '未取得頻道名稱'));
   const state = element('span', channel.authorized ? (channel.tracked ? '追蹤中' : '已停止追蹤') : '不再授權（僅歷史）', 'channel-state'); heading.append(identity, state); panel.append(heading);
   const meta = element('dl', undefined, 'channel-meta');
-  for (const [label, value] of [['頻道 ID', channel.channelId], ['父頻道', parent ? (parent.name || parent.channelId) : channel.parentChannelId || '無'], ['追蹤狀態', state.textContent]]) { meta.append(element('dt', label), element('dd', value)); }
+  for (const [label, value] of [['頻道 ID', channel.channelId], ['父頻道', channel.parentChannelId || '無（僅 Discord 資訊）'], ['追蹤狀態', state.textContent]]) { meta.append(element('dt', label), element('dd', value)); }
   panel.append(meta);
-  if (channel.alert) panel.append(element('p', 'Alert 頻道固定政策：追蹤、Bot 回覆、Hindsight 寫入、僅 @ 觸發、Steer；個別設定不會覆蓋。請由 discord.alertChannelIds 管理。', 'muted'));
+  if (channel.alert) panel.append(element('p', 'Alert 頻道固定政策：追蹤、Bot 回覆、Hindsight 寫入、僅 @ 觸發、Steer；個別設定不會覆蓋。請由 config.yaml 的 webhook 設定管理。', 'muted'));
   if (!channel.authorized) { panel.append(element('p', '此頻道已不再授權，僅保留歷史資料供檢視。', 'empty-state')); return; }
   const fieldset = (title, className='') => { const section=element('section',undefined,`channel-group ${className}`); section.append(element('h4',title)); const grid=element('div',undefined,'channel-fields'); section.append(grid); panel.append(section); return grid; };
   const reply = fieldset('回應','reply-group');
   const memory = fieldset('記憶','memory-group');
   const model = fieldset('模型','model-group');
   const addSelect = (host,key,label,options,effectiveValue) => { const field=settingSelect(channel,draft,key,label,options,effectiveValue); host.append(field); };
-  addSelect(reply,'replyMode','回應模式',[['','沿用父頻道／預設'],['none','不回應'],['mention','僅 @'],['all','所有訊息']],effective.replyMode);
+  addSelect(reply,'replyMode','回應模式',[['','全域預設'],['none','不回應'],['mention','僅 @'],['all','所有訊息']],effective.replyMode);
   reply.append(booleanField(channel,draft,'botReply','回應其他 bot',effective.botReply));
-  addSelect(reply,'mode','處理模式',[['','沿用父頻道／預設'],['queue','Queue'],['steer','Steer']],effective.mode);
+  addSelect(reply,'mode','處理模式',[['','全域預設'],['queue','Queue'],['steer','Steer']],effective.mode);
   memory.append(booleanField(channel,draft,'hindsightWrite','寫入 Hindsight',effective.hindsightWrite));
   memory.append(element('p','停用寫入時仍可查詢既有記憶。','muted'));
   addSelect(model,'model','對話模型',[['','沿用預設'],...channelModels.models.map(value=>[value,value])],effective.model);
   addSelect(model,'effort','Effort',[['','沿用預設'],...['none','minimal','low','medium','high','xhigh','auto'].map(value=>[value,value])],effective.effort);
   addSelect(model,'imageModel','圖片模型',[['','沿用預設'],...channelModels.imageModels.map(value=>[value,value])],effective.imageModel ?? '停用');
-  for (const control of panel.querySelectorAll('select,input')) {
-    control.disabled = busyChannels.has(channel.channelId) || (channel.alert && ['replyMode','botReply','hindsightWrite','mode'].includes(control.dataset.key));
-  }
-  if (channel.parentChannelId) {
-    const inheritLabel=element('label',undefined,'inherit-label'); const inherit=element('input'); inherit.type='checkbox'; inherit.checked=inherits; inherit.disabled=busyChannels.has(channel.channelId) || channel.alert;
-    inherit.onchange=()=>{for(const key of ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel']) draft[key]=inherit.checked?null:effective[key]; renderChannels();};
-    inheritLabel.append(inherit,document.createTextNode('使用父頻道設定')); panel.insertBefore(inheritLabel,reply.parentElement);
-    if (inherits) for (const control of panel.querySelectorAll('.channel-group select,.channel-group input')) control.disabled = true;
-  }
+  for (const control of panel.querySelectorAll('select,input')) control.disabled = busyChannels.has(channel.channelId) || channel.alert;
   const footer=element('div',undefined,'channel-footer'); const dirty=element('span','已儲存'); dirty.dataset.dirty='';
   const save=element('button','儲存設定'); save.type='button'; save.dataset.save=''; save.disabled=!isChannelDirty(channel.channelId)||busyChannels.has(channel.channelId);
   save.onclick=()=>{const saved=channelSettings(channel);const settings=Object.fromEntries(Object.entries(draft).filter(([key,value])=>value!==saved[key]));if(Object.keys(settings).length)void mutateChannel(channel,'PATCH',settings);}; footer.append(dirty,save); panel.append(footer);
@@ -447,7 +444,7 @@ async function loadChannels(force = false) {
     const [data, models] = await Promise.all([getJson('api/channels'), getJson('api/models')]);
     if (requestId !== channelRequestId) return;
     if (!Array.isArray(data.channels) || !Array.isArray(models.models) || !Array.isArray(models.imageModels)) throw new Error('頻道或模型資料格式無效');
-    channelRows = data.channels.filter(channel => channel.authorized);
+    channelRows = data.channels;
     channelModels = models;
     if (!channelRows.some(channel => channel.channelId === selectedChannelId)) selectedChannelId = channelRows[0]?.channelId ?? null;
     if (activeTab === 'channels') { sessionScope = 'channels'; sessionChannelId = selectedChannelId; }
@@ -468,7 +465,7 @@ async function mutateChannel(channel, method, body) {
     const headers = {};
     const options = { method, headers, cache: 'no-store', credentials: 'same-origin' };
     if (body !== undefined) { headers['content-type'] = 'application/json'; options.body = JSON.stringify(body); }
-    const response = await fetch(method === 'DELETE' ? `api/channels/${encodeURIComponent(channel.channelId)}/tracking` : `api/channels/${encodeURIComponent(channel.channelId)}`, options);
+    const response = await fetch(method === 'POST' ? 'api/channels' : method === 'DELETE' ? `api/channels/${encodeURIComponent(channel.channelId)}/tracking` : `api/channels/${encodeURIComponent(channel.channelId)}`, options);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error ?? `HTTP ${response.status}`);
     if (!data.channel) throw new Error('回應缺少 channel');
@@ -479,7 +476,7 @@ async function mutateChannel(channel, method, body) {
     const updatedSettings = channelSettings(data.channel);
     for (const key of Object.keys(updatedSettings)) if (draft[key] === previousSettings[key] || (body && Object.hasOwn(body, key) && draft[key] === body[key])) draft[key] = updatedSettings[key];
     channelDrafts.set(channel.channelId, draft);
-    if ((method === 'DELETE' || body?.tracked === true) && selectedChannelId === channel.channelId && activeTab === 'channels' && channelView === 'records') { sessionSnapshot = ''; resetSessionSelection(); void loadSessions(false); }
+    if ((method === 'DELETE' || method === 'POST') && selectedChannelId === channel.channelId && activeTab === 'channels' && channelView === 'records') { sessionSnapshot = ''; resetSessionSelection(); void loadSessions(false); }
     setStatus(method === 'DELETE' ? '已停止追蹤；歷史保留。' : '頻道設定已儲存。');
   } catch (error) { setStatus(`頻道操作失敗：${error.message}`); }
   finally { busyChannels.delete(channel.channelId); renderChannels(); }

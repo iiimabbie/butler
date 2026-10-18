@@ -73,9 +73,9 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
               if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') { respond(415, { error: '需要 application/json' }); return; }
               let body: Record<string, unknown>;
               try { body = await readJsonBody(req); } catch (error) { if (error instanceof SyntaxError) { invalid(); return; } throw error; }
-              const allowed = new Set(['tracked', 'botReply', 'hindsightWrite', 'replyMode', 'mode', 'model', 'effort', 'imageModel']);
+              const allowed = new Set(['botReply', 'hindsightWrite', 'replyMode', 'mode', 'model', 'effort', 'imageModel']);
               if (Object.keys(body).some(key => !allowed.has(key))) { invalid(); return; }
-              const booleanKeys = ['tracked', 'botReply', 'hindsightWrite'];
+              const booleanKeys = ['botReply', 'hindsightWrite'];
               const enumValues: Record<string, string[]> = { replyMode: ['none', 'mention', 'all'], mode: ['queue', 'steer'], effort: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] };
               for (const [key, value] of Object.entries(body)) {
                 if (booleanKeys.includes(key) && value !== null && typeof value !== 'boolean') { invalid(); return; }

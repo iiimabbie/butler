@@ -22,6 +22,40 @@ nvm use 24.21.0
 
 日常不需要執行 slash registration。`npm run deploy` 不應自動註冊 commands；只有 slash command 變更並要同步時才執行既有的 `npm run discord:register`。舊 `npm run discord:deploy` 是 build 加註冊 commands，不是日常程式部署入口。
 
+## 直接編輯排程與頻道設定
+
+服務首次啟動時會把既有 cron、reminder 與頻道行為設定搬到 `.data/config/`；搬移前會在 `.data/` 建立含已提交 WAL 的一致 SQLite 備份，服務 log 會記錄實際備份路徑。搬移完成後，設定檔是唯一編輯來源，舊設定資料表會移除；SQLite 保留執行時點、執行紀錄與政策 revision。
+
+- `.data/config/crons.yaml` 與 `reminders.yaml` 是兩格縮排 YAML 清單，`content: |` 底下可以直接換行；`|-` 同樣保留段落換行，但不在文字末尾多加換行。Discord ID 與時間請用引號包住。每筆需有唯一的 `id`、建立者 Discord ID `creatorId`、目的頻道 ID `outputChannelId`、任務內容 `content`、建立時間 `createdAt`；cron 項目另需 `cron` 表達式，reminder 項目另需帶時區的 ISO `runAt`。`timezone` 可省略（沿用根設定的時區，預設 `Asia/Taipei`），`enabled` 可省略（預設 `true`），`notify` 可省略（預設 `always`）或設為 `on_event`。`nextRun` 等執行狀態不放在檔案裡。
+- `.data/config/channels.yaml` 使用 `channels:` map；每個 entry 的存在就代表追蹤，空設定 `{}` 也有效。只支援 `botReply`、`hindsightWrite`、`replyMode`、`mode`、`model`、`effort`、`imageModel`；省略或 `null` 使用全域預設，不繼承父頻道。一般頻道預設 `hindsightWrite: false`、`mode: steer`；明確填寫的設定優先。固定錯誤通知頻道由 `config.yaml` 的 `discord.errorWebhookThreadId`（且設定 `errorWebhookUrl`）推導，不可列入或覆寫。
+- 手動存檔會在短暫去抖後整份驗證再套用。無效內容會保留前一個有效設定並在 log 指出檔案／錯誤；請修正後再存檔。若刪除 entry 的頻道仍有工作進行，這次套用會拒絕並繼續使用上一份設定；請等工作結束後重新存檔。有效設定若無法寫入 runtime DB，服務會停止而不是繼續使用舊政策。
+- 修改任務內容、目的頻道或通知模式不會重排既有 `nextRun`；修改 cron、`runAt`、timezone 或 enabled 才會依原有語意重算。reminder 的同一 `id` 與同一排程時點不會重播；改 `runAt` 可建立新的排程時點。已完成 reminder 定義會保留，需手動移除。
+- UI 與 bot 頻道管理會更新同一份檔案；只有明確新增追蹤才會建立 entry，讀取頻道清單不會加入追蹤。手動編輯不要用舊副本覆蓋最新內容。UI 顯示的頻道名稱與 parent 關係只作 Discord 展示資料；生效值來源為「此頻道設定」、「全域預設」或固定 Alert 政策。
+
+例如 reminder 可以這樣寫；請將示範 ID 換成實際 ID，並選擇未來的提醒時間：
+
+```yaml
+- id: water-plants
+  creatorId: "100000000000000001"
+  outputChannelId: "100000000000000002"
+  content: |-
+    提醒我澆花。
+
+    陽台和書桌上的都要。
+  runAt: "2099-01-01T09:00:00+08:00"
+  createdAt: "2026-10-18T00:00:00+08:00"
+```
+
+頻道設定範例（請換成實際頻道 ID）：
+
+```yaml
+channels:
+  "100000000000000002":
+    botReply: false
+    replyMode: mention
+    model: null # 使用全域預設
+```
+
 ## Discord 的 `/restart` 與 `npm restart`
 
 Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進行中或排隊工作時才受理，並由 managed service 按既有流程重啟。終端機 `npm restart` 則由人直接停止並重新啟動常駐服務，使用目前已建置的 `dist`，不會重新 build。要更新程式時使用部署流程，不要把 restart 當成 deploy。
