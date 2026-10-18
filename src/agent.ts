@@ -363,7 +363,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       const outputMeta = body.output.map((item: unknown) => {
         if (!isRecord(item)) return { type: 'unknown' };
         const base = { ...(safeMeta(item.type) ? { type: safeMeta(item.type) } : {}), ...(safeMeta(item.id) ? { id: safeMeta(item.id) } : {}), ...(safeMeta(item.status) ? { status: safeMeta(item.status) } : {}), ...(safeMeta(item.channel) ? { channel: safeMeta(item.channel) } : {}) };
-        if (item.type === 'reasoning') return { ...base, present: true, summaryCount: Array.isArray(item.summary) ? item.summary.length : undefined };
+        if (item.type === 'reasoning') return { ...base, present: true, summaryCount: Array.isArray(item.summary) ? item.summary.length : undefined, summary: Array.isArray(item.summary) ? item.summary.filter(isRecord).filter(part => typeof part.text === 'string').map(part => ({ text: (part.text as string).slice(0, 16000), textLength: (part.text as string).length, truncated: (part.text as string).length > 16000 })) : undefined };
         if (item.type === 'message') return { ...base, content: Array.isArray(item.content) ? item.content.map(part => isRecord(part) ? { type: safeMeta(part.type) ?? 'unknown', ...(typeof part.text === 'string' ? { textLength: part.text.length } : {}) } : { type: 'unknown' }) : undefined };
         if (item.type === 'function_call') return { ...base, name: safeMeta(item.name), callId: safeMeta(item.call_id) };
         return base;
