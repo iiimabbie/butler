@@ -4,6 +4,7 @@ import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowle
 import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
 import { requestModel, logTrace, traceTextMetadata } from './model-request.js';
 import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagnostic.js';
+import { IncompleteTurnRecovery, unfinishedDelegateStatus } from './incomplete-turn-recovery.js';
 import type { Store, ToolRecord } from './store.js';
 import { createHash } from 'node:crypto';
 import type { DiscordToolRuntime } from './discord-tools.js';
@@ -106,6 +107,7 @@ const transcriptPageSchema = {
 };
 
 const WRAP_UP_REMINDER_TURN = 45;
+const MAX_REASONING_ONLY_CONTINUATIONS = 2;
 
 export const tools = [
   memoryTagsDefinition,
@@ -249,13 +251,25 @@ export async function ask(store: Store, session: string, prompt: string, config:
 
     let forceImageSave = false;
     let imageSaveRequiredAttempted = false;
-    let requireFinalText = false;
     let finalTextRetryUsed = false;
     let imageSaveSucceeded = false;
+    let reasoningOnlyContinuations = 0;
+    let recoveryFinalTextOnly = false;
+    const recovery = new IncompleteTurnRecovery();
+    const recoveryReminders = new Set<unknown>();
+    const clearRecoveryModeForSteer = (): void => {
+      recoveryFinalTextOnly = false;
+      for (const reminder of recoveryReminders) {
+        const index = input.indexOf(reminder); if (index >= 0) input.splice(index, 1);
+        const runtimeIndex = runtimeReminders.indexOf(reminder); if (runtimeIndex >= 0) runtimeReminders.splice(runtimeIndex, 1);
+      }
+      recoveryReminders.clear();
+    };
     const runtimeReminders: unknown[] = [];
     for (let turn = 0; ; turn++) {
       const steered = await config.consumeSteer?.();
       if (steered) {
+        clearRecoveryModeForSteer();
         logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: steered.stored?.source?.discordMessageId ?? steered.stored?.id, status: 'consumed' });
         if (!steered.stored) throw new Error('steer input must already be persisted');
         const savedSteer = steered.stored;
@@ -267,10 +281,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
         liveGroups.push([steerInput]); liveGroupProtected.push(true);
         config.onSteerPersisted?.(storedSteer.id);
       }
-      const toolChoice = forceImageSave ? { type: 'function', name: 'image_save' } : requireFinalText ? 'none' : undefined;
+      const toolChoice: 'none' | { type: 'function'; name: string } | undefined = forceImageSave ? { type: 'function', name: 'image_save' } : recoveryFinalTextOnly ? 'none' : undefined;
       if (forceImageSave) imageSaveRequiredAttempted = true;
       forceImageSave = false;
-      requireFinalText = false;
       if (turn + 1 === WRAP_UP_REMINDER_TURN) { const reminder = { role: 'developer', content: '請整理目前已確認的結果並準備回覆。若工作尚未完成，請誠實說明還沒看完，並列出目前已確認的內容與尚待查核或未完成的部分；不要聲稱已完成。' }; runtimeReminders.push(reminder); input.push(reminder); }
       let localCountEstimate = 0;
       let localCountSource: string = 'local-count-estimate';
@@ -367,6 +380,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (isRecord(raw) && isRecord(raw.usage) && Number.isSafeInteger(raw.usage.input_tokens) && Number.isSafeInteger(raw.usage.output_tokens)) {
         store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localCountEstimate, countSource: localCountSource, contextLimit: config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000, limitSource: config.modelContextTokens?.[config.model] ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString(), attachmentSignature: nativeAttachmentSignature(input), checkpointThroughMessageId: store.compactCheckpoint(session)?.throughMessageId });
       } else store.clearContextUsage(session);
+      // Failed/cancelled/incomplete upstream turns must not enter recovery or execute tools.
+      // Transport aborts and timeouts already throw from requestModel before this point.
+      if (isRecord(raw) && raw.status !== undefined && raw.status !== 'completed') {
+        throw new Error(`LLM response status ${String(raw.status)} cannot complete the turn`);
+      }
       const calls = body.output.filter(isFunctionCall);
       const responseInputStart = input.length;
       const responseCandidate = responseText(body);
@@ -377,6 +395,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const text = responseCandidate;
         const lateSteer = await config.consumeSteer?.();
         if (lateSteer) {
+          clearRecoveryModeForSteer();
           logTrace('model_candidate_deferred', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), reason: 'late_steer_context_only' });
           logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: lateSteer.stored?.source?.discordMessageId ?? lateSteer.stored?.id, status: 'consumed_late' });
           if (!lateSteer.stored) throw new Error('late steer input must already be persisted');
@@ -389,27 +408,40 @@ export async function ask(store: Store, session: string, prompt: string, config:
           config.onSteerPersisted?.(savedLateSteer.id);
           continue;
         }
-        if (isRecord(raw) && raw.status !== undefined && raw.status !== 'completed') {
-          throw new Error(`LLM response status ${String(raw.status)} cannot complete image delivery`);
-        }
         const pendingImages = config.imageTools?.pendingImages() ?? [];
         if (pendingImages.length) {
+          if (recoveryFinalTextOnly) throw new Error('Final-text recovery cannot execute image_save while tools are disabled');
           if (imageSaveRequiredAttempted) throw new Error(`Image generation was not saved; image_save was required for ${pendingImages.map(image => image.path).join(', ')}`);
           const reminder = { role: 'developer', content: `Save every generated image before replying. Call image_save now using this exact generated path and a readable semantic filename: ${pendingImages.map(image => image.path).join(', ')}` }; runtimeReminders.push(reminder); input.push(reminder);
           forceImageSave = true;
           continue;
         }
-        const emptyCompletedAfterSave = imageSaveSucceeded && isRecord(raw) && raw.status === 'completed' && !text;
-        if (emptyCompletedAfterSave) {
-          if (finalTextRetryUsed) throw new Error('LLM completed image_save but did not provide the required final text reply');
-          finalTextRetryUsed = true;
-          const reminder = { role: 'developer', content: 'Provide the final response as text now. Do not call or repeat any tools; the image has already been saved and queued.' }; runtimeReminders.push(reminder); input.push(reminder);
-          requireFinalText = true;
-          continue;
-        }
-        if (!text) {
+        const emptyCompletedAfterSave = imageSaveSucceeded && isRecord(raw) && raw.status === 'completed' && !text.trim();
+        if (!text.trim()) {
           const diagnostic = buildEmptyAssistantTextDiagnostic({ requestId, session, model: config.model, httpStatus: response.status, raw });
           logError('llm_empty_assistant_text', undefined, { notify: false, fields: diagnostic });
+          const reasoningOnly = body.output.length > 0 && body.output.every(item => isRecord(item) && item.type === 'reasoning');
+          if (reasoningOnly || emptyCompletedAfterSave) {
+            const delegates = config.subagentCoordinator?.list(session, 0, Number.MAX_SAFE_INTEGER) ?? [];
+            const mode = recovery.decide(delegates.some(item => unfinishedDelegateStatus(item.status)));
+            if (emptyCompletedAfterSave && !reasoningOnly) {
+              if (finalTextRetryUsed) throw new Error('LLM completed image_save but did not provide the required final text reply');
+              finalTextRetryUsed = true;
+            }
+            if (reasoningOnlyContinuations >= MAX_REASONING_ONLY_CONTINUATIONS) {
+              throw new Error(`LLM returned only reasoning after ${MAX_REASONING_ONLY_CONTINUATIONS} continuation attempts; no assistant text or tool calls`);
+            }
+            reasoningOnlyContinuations++;
+            // Finalization is latched across every retry and compaction. tool_choice
+            // is also enforced locally before executeCall, not merely requested upstream.
+            recoveryFinalTextOnly ||= mode === 'finalize' || toolChoice === 'none' || emptyCompletedAfterSave;
+            const reminder = { role: 'developer', content: recoveryFinalTextOnly
+              ? 'The previous response did not provide a visible final answer. Tools have already run and their recorded results are in context. Provide only the final text using those results. Do not call tools, repeat actions, restart the task, or present reasoning as the answer. State any incomplete work or queued operation accurately; do not claim it completed.'
+              : 'The previous response contained only reasoning, with no assistant text or tool calls. Continue the current task from the existing context and completed read-only tool results. If more work is needed, issue the actual tool calls; otherwise provide the final answer. Do not repeat completed actions or present reasoning as the answer.' };
+            recoveryReminders.add(reminder); runtimeReminders.push(reminder); input.push(reminder);
+            logTrace('model_reasoning_only_continuation', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, attempt: reasoningOnlyContinuations, limit: MAX_REASONING_ONLY_CONTINUATIONS, mode: recoveryFinalTextOnly ? 'finalize' : 'continue' });
+            continue;
+          }
           throw new Error('LLM response has no assistant text');
         }
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
@@ -427,6 +459,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         let toolCompleted = false;
         try {
           const output = await executeCall(store, session, call, config, googleRuntime, 'agent', catalog);
+          recovery.recordToolResult(call.name, output);
           if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
           input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
           toolCompleted = true;
