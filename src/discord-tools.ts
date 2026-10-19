@@ -1,4 +1,4 @@
-import { ToolUsageError } from './tool-errors.js';
+import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
@@ -119,7 +119,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         : response.status >= 400 && response.status < 500 && response.status !== 408
           ? 'request rejected by Discord; do not retry automatically'
           : 'outcome may be unknown; do not retry automatically';
-      throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
+      const Rejection = method === 'PUT' && /\/reactions\/[^/]+\/@me$/.test(path) && response.status === 400 && String(code) === '10014' ? DiscordReactionInputError : Error;
+      throw new Rejection(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
     }
     if (response.status === 204) return null;
     const raw = await response.json();
@@ -148,7 +149,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
           added.push(emoji);
         } catch (error) {
           const original = error instanceof Error ? error.message : String(error);
-          throw new Error(`Failed to add reaction ${JSON.stringify(emoji)}; confirmed added: ${JSON.stringify(added)}. Successfully added reactions will not be rolled back; remaining reactions were not executed. The outcome for the current reaction may be unknown; do not retry automatically. Original error: ${original}`);
+          const ReactionError = error instanceof DiscordReactionInputError ? DiscordReactionInputError : Error;
+          throw new ReactionError(`Failed to add reaction ${JSON.stringify(emoji)}; confirmed added: ${JSON.stringify(added)}. Successfully added reactions will not be rolled back; remaining reactions were not executed. The outcome for the current reaction may be unknown; do not retry automatically. Original error: ${original}`);
         }
       }
       return { ok: true, channelId, messageId, emojis: added };

@@ -24,3 +24,11 @@ export function isHttp429(value: unknown, depth = 0): boolean {
   if (typeof record.message === 'string' && (/\bHTTP\s+429\b/i.test(record.message) || /^429\b/.test(record.message))) return true;
   return 'cause' in record && isHttp429(record.cause, depth + 1);
 }
+
+/** A reaction rejected by Discord because the supplied emoji is unknown. */
+export class DiscordReactionInputError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DiscordReactionInputError';
+  }
+}

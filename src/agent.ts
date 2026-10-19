@@ -1,7 +1,7 @@
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
-import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
+import { DiscordReactionInputError, ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
 import { requestModel, logTrace, traceTextMetadata } from './model-request.js';
 import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagnostic.js';
 import { IncompleteTurnRecovery, unfinishedDelegateStatus } from './incomplete-turn-recovery.js';
@@ -611,7 +611,8 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     }
   } catch (error) {
     if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) throw error;
-    if (error instanceof WebFetchExtractionError) logError(`Tool execution fallback available tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
+    if (error instanceof DiscordReactionInputError) logError(`Tool reaction input rejected tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
+    else if (error instanceof WebFetchExtractionError) logError(`Tool execution fallback available tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
     else if (!(error instanceof ToolUsageError)) logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: true, deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
     result = { error: errorMessage(error) };
     try { store.finishTool(id, 'failed', result); } catch (persistError) { throw Object.assign(persistError instanceof Error ? persistError : new Error(String(persistError)), { auditPersistenceFailure: true }); }
