@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
@@ -43,16 +43,11 @@ export async function archiveOutgoingAttachment(sourcePath: string, filename: st
 
 export async function prepareAttachments(items: DiscordAttachmentInput[], attachmentDir: string, transcription?: AudioTranscriptionConfig): Promise<InputAttachment[]> {
   if (!items.length) return [];
-  let dir: string | undefined;
-  let directoryError = false;
-  try { dir = join(resolve(attachmentDir), 'incoming'); mkdirSync(dir, { recursive: true, mode: 0o700 }); chmodSync(dir, 0o700); if (!statSync(dir).isDirectory()) throw new Error(); }
-  catch { directoryError = true; }
   const result: InputAttachment[] = [];
   for (const item of items) {
     const mimeType = safeMime(item.contentType) ?? MIME_EXTENSIONS[extension(item.name)] ?? 'application/octet-stream';
     const base: InputAttachment = { attachmentId: item.id, filename: cleanFilename(item.name), mimeType, status: 'failed' };
     try {
-      if (directoryError || !dir) throw new Error('storage');
       validateUrl(item.url);
       if (Number.isSafeInteger(item.size) && item.size! > MAX_ATTACHMENT_BYTES) throw new Error('limit');
       const response = await download(item.url);
@@ -66,8 +61,10 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
       const category = attachmentCategory(actualMime, item.name);
       const filename = `${randomUUID()}-${cleanFilename(item.name).slice(0, 180)}`;
       const path = join(resolve(attachmentDir), category, filename);
-      mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); chmodSync(dirname(path), 0o700);
-      await writeFile(path, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
+      try {
+        mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); chmodSync(dirname(path), 0o700);
+        await writeFile(path, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
+      } catch { throw new Error('storage'); }
       const prepared: InputAttachment = { ...base, filename: cleanFilename(item.name), mimeType: actualMime, status: 'ready', localPath: path, origin: 'discord_attachment' };
       if (isVideoAttachment(actualMime, item.name)) {
         try { await getVideoAttachmentResult({ path, filename: cleanFilename(item.name), attachmentDir: resolve(attachmentDir), transcription }); }

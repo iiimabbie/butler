@@ -228,7 +228,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const initialGroupReferences = new Map(initialGroups.map(group => [group.items, group.messageId]));
     const liveSummaryState = { role: 'user', content: '' };
     const input: unknown[] = [...stableInput, liveSummaryState, ...initialGroups.flatMap(group => group.items)];
-    let compactionCandidate = '';
     const recentCount = 10;
     const contextState = { role: 'developer', content: '' };
     const liveGroups: unknown[][] = initialGroups.map(group => group.items);
@@ -299,32 +298,28 @@ export async function ask(store: Store, session: string, prompt: string, config:
       percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
       updateContextState(prediction, percent);
       if (percent >= 80 && turn === 0) {
-        const candidate = JSON.stringify(input.map(item => item === contextState ? '[context-state]' : item));
-        if (candidate !== compactionCandidate) {
-          compactionCandidate = candidate;
-          const safeBoundary = currentIndex > 0 ? storedHistory[currentIndex - 1]?.id : undefined;
-          if (safeBoundary) {
-            try {
-              const previousCheckpoint = store.compactCheckpoint(session)?.throughMessageId;
-              const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, keepRecent: recentCount, throughMessageId: safeBoundary });
-              const checkpoint = store.compactCheckpoint(session);
-              if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
-                store.clearContextUsage(session);
-                priorUsage = undefined;
-                compactInput = [{ role: 'user', content: `Prior conversation summary (historical background):\n${checkpoint.summary}` }];
-                stableInput = [...workspaceInput, ...runtimeInput, ...toolIndexInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
-                const checkpointIndex = storedHistory.findIndex(message => message.id === checkpoint.throughMessageId);
-                const retained = liveGroups.map((group, index) => ({ group, protected: liveGroupProtected[index] ?? false }))
-                  .filter(({ group }) => { const messageId = initialGroupReferences.get(group); return messageId === undefined || storedHistory.findIndex(message => message.id === messageId) > checkpointIndex; });
-                liveGroups.splice(0, liveGroups.length, ...retained.map(item => item.group));
-                liveGroupProtected.splice(0, liveGroupProtected.length, ...retained.map(item => item.protected));
-                input.splice(0, input.length, ...stableInput, liveSummaryState, ...liveGroups.flat(), ...runtimeReminders, contextState);
-                prediction = await countAndCalibrate();
-                percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
-                updateContextState(prediction, percent);
-              }
-            } catch (error) { logWarn(`Automatic persistent compaction failed session=${session}`, error); }
-          }
+        const safeBoundary = currentIndex > 0 ? storedHistory[currentIndex - 1]?.id : undefined;
+        if (safeBoundary) {
+          try {
+            const previousCheckpoint = store.compactCheckpoint(session)?.throughMessageId;
+            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, keepRecent: recentCount, throughMessageId: safeBoundary });
+            const checkpoint = store.compactCheckpoint(session);
+            if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
+              store.clearContextUsage(session);
+              priorUsage = undefined;
+              compactInput = [{ role: 'user', content: `Prior conversation summary (historical background):\n${checkpoint.summary}` }];
+              stableInput = [...workspaceInput, ...runtimeInput, ...toolIndexInput, ...skillsInput, ...openingInput, ...compactInput, ...(memory ? [{ role: 'user', content: memory }] : [])];
+              const checkpointIndex = storedHistory.findIndex(message => message.id === checkpoint.throughMessageId);
+              const retained = liveGroups.map((group, index) => ({ group, protected: liveGroupProtected[index] ?? false }))
+                .filter(({ group }) => { const messageId = initialGroupReferences.get(group); return messageId === undefined || storedHistory.findIndex(message => message.id === messageId) > checkpointIndex; });
+              liveGroups.splice(0, liveGroups.length, ...retained.map(item => item.group));
+              liveGroupProtected.splice(0, liveGroupProtected.length, ...retained.map(item => item.protected));
+              input.splice(0, input.length, ...stableInput, liveSummaryState, ...liveGroups.flat(), ...runtimeReminders, contextState);
+              prediction = await countAndCalibrate();
+              percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
+              updateContextState(prediction, percent);
+            }
+          } catch (error) { logWarn(`Automatic persistent compaction failed session=${session}`, error); }
         }
       }
       if (percent >= 80) {

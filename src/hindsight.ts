@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 import { constants as fsConstants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import type { Store } from './store.js';
@@ -382,24 +383,9 @@ function auditView(value: unknown): unknown { const r = asRecord(value); if (!r)
 function safeError(error: unknown): string { return error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500); }
 function errorType(error: unknown): string { return error instanceof Error ? error.name : typeof error; }
 async function readBounded(response: Response): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 1_000_000) {
-        await reader.cancel();
-        throw new Error('Hindsight response exceeded size limit');
-      }
-      chunks.push(value);
-    }
-  } finally { reader.releaseLock(); }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return new TextDecoder().decode(bytes);
+  try { return new TextDecoder().decode(await readResponseBytes(response, 1_000_000)); }
+  catch (error) {
+    if (error instanceof ResponseSizeLimitError) throw new Error('Hindsight response exceeded size limit');
+    throw error;
+  }
 }

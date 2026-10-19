@@ -1,4 +1,5 @@
 import type { GoogleAuth } from './google-auth.js';
+import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 
 export const GOOGLE_FILE_LIMIT = 10 * 1024 * 1024;
 export class GoogleClient {
@@ -43,18 +44,9 @@ export class GoogleClient {
 
 async function readLimited(response: Response): Promise<Buffer> {
   if (Number(response.headers.get('content-length')) > GOOGLE_FILE_LIMIT) { await response.body?.cancel(); throw new Error('Google file exceeds the 10 MiB read limit'); }
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  if (!response.body) return Buffer.alloc(0);
-  const reader = response.body.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > GOOGLE_FILE_LIMIT) { await reader.cancel(); throw new Error('Google file exceeds the 10 MiB read limit'); }
-      chunks.push(value);
-    }
-    return Buffer.concat(chunks, size);
-  } finally { reader.releaseLock(); }
+  try { return await readResponseBytes(response, GOOGLE_FILE_LIMIT); }
+  catch (error) {
+    if (error instanceof ResponseSizeLimitError) throw new Error('Google file exceeds the 10 MiB read limit');
+    throw error;
+  }
 }

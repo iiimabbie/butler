@@ -1,4 +1,5 @@
 import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
+import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 const RESPONSE_LIMIT = 5 * 1024 * 1024;
 // Leave room for the agent's tool_history_id envelope.
 const OUTPUT_LIMIT = 64 * 1024 - 256;
@@ -154,27 +155,13 @@ async function request(endpoint: 'search' | 'extract' | 'map' | 'usage', body: R
     throw new Error(`Tavily ${endpoint}: response exceeds 5 MiB limit`);
   }
   if (!response.body) throw new Error(`Tavily ${endpoint}: invalid response`);
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > RESPONSE_LIMIT) {
-        await reader.cancel().catch(() => {});
-        throw new Error('response exceeds 5 MiB limit');
-      }
-      chunks.push(value);
-    }
-  } catch {
-    throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : length > RESPONSE_LIMIT ? 'response exceeds 5 MiB limit' : 'response read failed'}`);
-  } finally {
-    reader.releaseLock();
+  let bytes: Buffer;
+  try { bytes = await readResponseBytes(response, RESPONSE_LIMIT); }
+  catch (error) {
+    throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : error instanceof ResponseSizeLimitError ? 'response exceeds 5 MiB limit' : 'response read failed'}`);
   }
   let result: unknown;
-  try { result = JSON.parse(Buffer.concat(chunks, length).toString('utf8')); }
+  try { result = JSON.parse(bytes.toString('utf8')); }
   catch { throw new Error(`Tavily ${endpoint}: invalid response`); }
   if (!isRecord(result)) throw new Error(`Tavily ${endpoint}: invalid response`);
   return result;

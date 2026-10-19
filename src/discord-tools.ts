@@ -129,12 +129,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const target = asRecord(await api('GET', `/channels/${id}`));
     if (String(target.id) !== id) throw new Error('Discord returned a different channel than requested');
     const type = Number(target.type);
-    if ([10, 11, 12].includes(type)) {
-      if (String(target.id) !== id) throw new Error('Discord returned a different channel than requested');
-      if (requireThread && ![10, 11, 12].includes(type)) throw new ToolUsageError('Target is not a thread');
-      return target;
-    }
-    if (requireThread) throw new ToolUsageError('Target is not a thread');
+    if (requireThread && ![10, 11, 12].includes(type)) throw new ToolUsageError('Target is not a thread');
     return target;
   };
   return { definitions: discordMessageTools, context: options.context, takeInputMessages, async execute(name, args) {

@@ -36,7 +36,7 @@ try {
     const closeSettingsWatch = store.watchFileSettings((error, file) => logWarn('File-backed settings reload rejected; retaining last valid snapshot', error, { file }));
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
-    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, onCandidate: candidate => { const next = buildBundle(candidate); store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }; } });
+    const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }; } });
     try {
       await memoryCoordinator?.start();
       await startDiscord(getRuntime, store, dbPath, undefined, memoryCoordinator, () => { watcher.close(); closeSettingsWatch(); });

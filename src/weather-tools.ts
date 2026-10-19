@@ -1,4 +1,5 @@
 import { ToolUsageError } from './tool-errors.js';
+import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 const RESPONSE_LIMIT = 1024 * 1024;
 const SOURCE = 'https://open-meteo.com/';
 const CURRENT_FIELDS = ['temperature_2m', 'relative_humidity_2m', 'apparent_temperature', 'is_day', 'precipitation', 'weather_code', 'wind_speed_10m'] as const;
@@ -121,25 +122,13 @@ async function request(url: URL, fetcher: typeof fetch): Promise<Record<string, 
     throw new Error('Open-Meteo: response exceeds 1 MiB limit');
   }
   if (!response.body) invalidResponse();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      length += value.byteLength;
-      if (length > RESPONSE_LIMIT) {
-        await reader.cancel().catch(() => {});
-        throw new Error('response too large');
-      }
-      chunks.push(value);
-    }
-  } catch {
-    throw new Error(`Open-Meteo: ${signal.aborted ? 'request timed out' : length > RESPONSE_LIMIT ? 'response exceeds 1 MiB limit' : 'response read failed'}`);
-  } finally { reader.releaseLock(); }
+  let bytes: Buffer;
+  try { bytes = await readResponseBytes(response, RESPONSE_LIMIT); }
+  catch (error) {
+    throw new Error(`Open-Meteo: ${signal.aborted ? 'request timed out' : error instanceof ResponseSizeLimitError ? 'response exceeds 1 MiB limit' : 'response read failed'}`);
+  }
   let body: unknown;
-  try { body = JSON.parse(Buffer.concat(chunks, length).toString('utf8')); }
+  try { body = JSON.parse(bytes.toString('utf8')); }
   catch { invalidResponse(); }
   const result = record(body);
   if (result.error === true) throw new Error('Open-Meteo: API reported an error');

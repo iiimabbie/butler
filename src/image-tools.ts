@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { open, mkdir, writeFile, copyFile, unlink, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { readResponseBytes } from './response-body.js';
 
 export interface ImageConfig {
   baseUrl: string;
@@ -183,7 +184,8 @@ async function readIdentityReference(path: string): Promise<{ bytes: Buffer; ext
 
 async function readGeneratedImage(response: Response, sensitive: Array<string | undefined>): Promise<Buffer> {
   try {
-    const body = await readBoundedBody(response, RESPONSE_LIMIT);
+    if (!response.body) throw new Error('Missing response body');
+    const body = await readResponseBytes(response, RESPONSE_LIMIT);
     if (!response.ok) throw new Error(formatImageServiceError(response, body, sensitive));
     const payload: unknown = JSON.parse(body.toString('utf8'));
     if (!isRecord(payload) || !Array.isArray(payload.data) || !isRecord(payload.data[0]) || typeof payload.data[0].b64_json !== 'string') {
@@ -199,28 +201,6 @@ async function readGeneratedImage(response: Response, sensitive: Array<string | 
     if (!response.ok) throw new Error(`Image generation service returned HTTP ${response.status}`);
     throw new Error('Image generation response was invalid or exceeded the response limit; outcome is unknown and must not be retried automatically');
   }
-}
-
-async function readBoundedBody(response: Response, limit: number): Promise<Buffer> {
-  if (!response.body) throw new Error('Missing response body');
-  const reader = response.body.getReader();
-  const chunks: Buffer[] = [];
-  let size = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) {
-        await reader.cancel();
-        throw new Error('Response exceeded limit');
-      }
-      chunks.push(Buffer.from(value));
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  return Buffer.concat(chunks, size);
 }
 
 function detectImage(bytes: Buffer): { extension: 'png' | 'jpg' | 'webp'; mime: string } | undefined {

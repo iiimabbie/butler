@@ -169,7 +169,7 @@ function validateCandidate(current: ButlerConfig, candidate: ButlerConfig): void
   if (cold.length) throw new ConfigConflictError(`Config changes require restart: ${cold.join(', ')}`, cold);
 }
 
-export function watchConfig(options: { onCandidate(config: ButlerConfig): void; prepareCandidate?(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
+export function watchConfig(options: { prepareCandidate(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
   const path = options.path ?? CONFIG_PATH;
   let current = options.initial ?? readConfig(path);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -177,8 +177,8 @@ export function watchConfig(options: { onCandidate(config: ButlerConfig): void; 
   let closed = false;
   const applyCandidate = (candidate: ButlerConfig) => {
     validateCandidate(current, candidate);
-    const apply = options.prepareCandidate?.(candidate);
-    if (apply) apply(); else options.onCandidate(candidate);
+    const apply = options.prepareCandidate(candidate);
+    apply();
     current = candidate;
   };
   const reload = () => {
