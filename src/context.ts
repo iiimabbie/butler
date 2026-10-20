@@ -22,7 +22,7 @@ export async function loadWorkspaceContext(directory = defaultWorkspace): Promis
       throw error;
     }
     if (!content.trim()) continue;
-    const section = `## ${name}\n\n${content.trim()}`;
+    const section = content.trim();
     (name === 'SOUL.md' || name === 'AGENT.md' ? developer : background).push(section);
   }
   return { developer, background };
