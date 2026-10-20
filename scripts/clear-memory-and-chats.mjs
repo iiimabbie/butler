@@ -16,7 +16,7 @@ export const CLEAR_TABLES = [
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
 export const KEEP_TABLES = [
-  'schedule_runtime', 'schedule_runs', 'channel_policy_runtime', 'file_settings_migrations',
+  'schedule_runtime', 'schedule_runs',
 ];
 const LINK_TABLES = ['channel_state'];
 const HELP = `用法：node scripts/clear-memory-and-chats.mjs [--help] [--bank-id <id>] [--base-url <url>] [--database <absolute-path>] [--execute --confirm-bank <id> --confirm-database <absolute-path>]

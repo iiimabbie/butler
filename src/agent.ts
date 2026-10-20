@@ -71,14 +71,11 @@ export interface AgentConfig {
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
   discordContext?: { channelId: string; messageId?: string; requesterId?: string };
-  deploymentSource?: { sourceKind: 'subagent_event'; eventId: string; parentInputId: string; triggerInputId?: string; parentSession: string; channelId: string; requesterId?: string };
   workspaceDirectory?: string;
   subagent?: SubagentConfig;
   subagentCoordinator?: SubagentCoordinator;
   subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string };
   subagentEvent?: boolean;
-  deploymentResultEvent?: boolean;
-  deploymentResultStatus?: () => unknown;
 }
 
 interface FunctionCall {
@@ -194,10 +191,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const fullAvailableTools = (config.deploymentResultEvent
-      ? (config.deploymentResultStatus ? [{ type: 'function', name: 'deployment_result_status', description: 'Read the persistent status evidence for this deployment event only.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } }] : [])
-      : [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])]).map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
-    const catalog = config.deploymentResultEvent ? undefined : createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
+    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const catalog = createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
     const toolsForRequest = () => {
       if (!catalog) return fullAvailableTools;
       const loaded = catalog.loadedDefinitions();
@@ -453,7 +448,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
       }
       if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
-      if (config.deploymentResultEvent && calls.some(call => call.name !== 'deployment_result_status' || !config.deploymentResultStatus)) throw new Error('Deployment result event tool call is not authorized');
       for (const call of calls) {
         const toolTrace = { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id };
         logTrace('model_tool_start', toolTrace);
@@ -522,7 +516,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   }
   if (config.subagentEvent && config.subagent?.toolsEnabled === false && ['subagent_run', 'subagent_list', 'subagent_status'].includes(call.name)) throw new ToolUsageError('Only send/stop are allowed during internal subagent handoff');
   if (executionSource === 'subagent' && call.name === 'butler_deploy') throw new ToolUsageError('Subagent workers cannot request deployment');
-  if (config.deploymentResultEvent && (call.name !== 'deployment_result_status' || !config.deploymentResultStatus || Object.keys(args).some(key => key !== 'label'))) throw new ToolUsageError('Deployment result event tool call is not authorized');
   const id = store.beginTool(session, call.name, args);
   const label = typeof args.label === 'string' ? args.label.trim() : '';
   const { label: _label, ...runtimeArgs } = args;
@@ -532,9 +525,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     if (call.name === 'tools_catalog') {
       if (!catalog) throw new ToolUsageError('Tool catalog is unavailable in this execution');
       result = catalog.execute(runtimeArgs);
-    } else if (call.name === 'deployment_result_status') {
-      if (!config.deploymentResultEvent || !config.deploymentResultStatus) throw new ToolUsageError('Deployment result status is unavailable');
-      result = config.deploymentResultStatus();
     } else if (call.name === 'subagent_run') {
       if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       const required = ['task', 'context', 'constraints', 'expected_output'];
@@ -572,7 +562,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
         ? await config.hindsight.recall(query)
         : await config.hindsight.reflect(query);
     } else if (call.name.startsWith('hledger_')) {
-      if (executionSource !== 'agent' || !config.hledgerTools || !isAuthorizedFinanceOrigin(config.executionOrigin)) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
+      if (executionSource !== 'agent' || !config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
       result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!);
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
@@ -582,9 +572,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await config.webTools.execute(call.name, runtimeArgs, { signal: config.signal });
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
       if (!config.localTools) throw new ToolUsageError('Local tools are unavailable in this entry point');
-      result = await config.localTools.execute(call.name, runtimeArgs, config.deploymentSource
-        ? { sessionId: session, channelId: config.deploymentSource.channelId, requesterId: config.deploymentSource.requesterId, sourceKind: 'subagent_event', sourceEventId: config.deploymentSource.eventId, sourceInputId: config.deploymentSource.parentInputId, sourceTriggerInputId: config.deploymentSource.triggerInputId, sourceParentSession: config.deploymentSource.parentSession }
-        : { sessionId: session, channelId: config.discordContext?.channelId, messageId: config.discordContext?.messageId, requesterId: config.discordContext?.requesterId, sourceKind: 'discord_external' });
+      result = await config.localTools.execute(call.name, runtimeArgs, { channelId: config.discordContext?.channelId ?? (config.subagentEvent ? config.discordTools?.context.channelId : undefined) });
     } else if (call.name.startsWith('discord_')) {
       if (!config.discordTools) throw new ToolUsageError('Discord tools are unavailable in this entry point');
       result = await config.discordTools.execute(call.name, runtimeArgs);
@@ -624,8 +612,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   }
   // Persistence failures are intentionally outside the tool execution catch. Do not replay a completed tool.
   try { store.finishTool(id, 'completed', result); }
-  catch (error) { if (call.name === 'butler_deploy') config.localTools?.cancelDeployRequest(); throw Object.assign(error instanceof Error ? error : new Error(String(error)), { auditPersistenceFailure: true }); }
-  if (call.name === 'butler_deploy') config.localTools?.confirmDeployRequest();
+  catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { auditPersistenceFailure: true }); }
   emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: 'completed' });
   return { tool_history_id: id, ...asOutput(result) };
 }

@@ -20,14 +20,14 @@ const shortDescriptions: Record<string, string> = {
   skills_list: '列出已安裝 Skills', skills_read: '讀取 Skill 檔案', skills_prepare: '準備 Skill 候選項', skills_install: '安裝 Skill', skills_remove: '移除 Skill',
   schedule_create: '建立排程', schedule_list: '列出排程', schedule_update: '更新排程', schedule_enable: '啟用排程', schedule_disable: '停用排程', schedule_delete: '刪除排程',
   image_generate: '生成圖像', image_generate_self: '生成自畫像', image_save: '保存生成圖像',
-  hledger_accounts: '查詢私有 hledger 帳戶及原幣餘額', hledger_post: '新增、更正或刪除多分錄帳務交易', hledger_reconcile: '按指定日期以 equity 校正並核對餘額', hledger_reconciliation_reopen: '明確重開舊校正供歷史更正並待重新對帳', hledger_forecast: '查詢不入帳的固定收支預測', hledger_budget: '比較預算規則與實際支出', hledger_backup_list: '列出私有帳本版本備份', hledger_backup_restore: '驗證後還原私有帳本備份', hledger_lock_status: '唯讀檢查帳本 writer lock', hledger_operations_list: '查看獨立持久操作去重紀錄', hledger_account_manage: '管理帳戶 metadata', hledger_schedules_list: '查詢固定收支規劃', hledger_schedule_manage: '管理月雙月 forecast 規則', deployment_result_status: '讀取本次部署事件狀態',
+  hledger_accounts: '查詢私有 hledger 帳戶及原幣餘額', hledger_post: '新增、更正或刪除多分錄帳務交易', hledger_reconcile: '按指定日期以 equity 校正並核對餘額', hledger_reconciliation_reopen: '移除指定帳戶自某日起的本工具校正分錄', hledger_forecast: '查詢不入帳的固定收支預測', hledger_budget: '比較預算規則與實際支出', hledger_backup_list: '列出私有帳本版本備份', hledger_backup_restore: '以備份取代現行帳本',hledger_account_manage: '管理帳戶 metadata', hledger_schedules_list: '查詢固定收支規劃', hledger_schedule_manage: '管理月雙月 forecast 規則',
 
 };
 
 export type ToolCatalog = { definitions: Array<Record<string, unknown>>; execute(args: Record<string, unknown>): unknown; loadedDefinitions(): Array<Record<string, unknown>>; index(): Array<{ name: string; description: string }> };
 
 export function createToolCatalog(fullDefinitions: Array<Record<string, unknown>>): ToolCatalog {
-  const available = fullDefinitions.filter(t => typeof t.name === 'string' && t.name !== 'deployment_result_status' && t.name !== 'tools_catalog');
+  const available = fullDefinitions.filter(t => typeof t.name === 'string' && t.name !== 'tools_catalog');
   const byName = new Map<string, Record<string, unknown>>();
   for (const tool of available) {
     const name = tool.name as string;

@@ -1,6 +1,6 @@
 import { ToolUsageError } from './tool-errors.js';
 import { constants } from 'node:fs';
-import { open, opendir, realpath, stat, writeFile } from 'node:fs/promises';
+import { open, opendir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -28,60 +28,60 @@ const definitions = [
   definition('local_process_stop', 'Stop a task created by this runtime. For other existing host processes, use local_shell. Tasks do not survive service restart.', { task_id: string }, ['task_id']),
 ];
 
-export type DeploymentRequestSource = { sessionId: string; channelId: string; messageId?: string; requesterId?: string; sourceKind: 'discord_external' | 'subagent_event'; sourceEventId?: string; sourceInputId?: string; sourceTriggerInputId?: string; sourceParentSession?: string };
-
 export class LocalToolRuntime {
   readonly definitions = definitions;
   private readonly processes = new LocalProcesses();
   private closed = false;
-  private deployPending = false;
-  private deployPersisted = false;
+  private pendingDeploy?: { channelId: string };
+  private deployRunning = false;
   private deployTimer?: ReturnType<typeof setTimeout>;
-  private deploymentQueueIdle: () => boolean = () => false;
-  private deploymentAdapter?: { accept: (source: DeploymentRequestSource) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void };
-  setDeploymentAdapter(adapter: { accept: (source: DeploymentRequestSource) => string; pending: () => string | undefined; active?: () => string | undefined; running?: (id: string) => boolean; failed?: (id: string, error: string) => void }) { this.deploymentAdapter = adapter; if (adapter.pending()) { this.deployPending = true; this.deployPersisted = true; } }
-  restoreQueuedDeploy() { if (this.deploymentAdapter?.pending()) { this.deployPending = true; this.deployPersisted = true; } }
+  private deployIdle: () => boolean = () => false;
+  private deployNotify: (channelId: string, text: string) => Promise<void> = async () => undefined;
   constructor(private readonly root = ROOT) {}
-  setDeploymentQueueIdleCheck(check: () => boolean) { this.deploymentQueueIdle = check; }
-  confirmDeployRequest() { if (this.deployPending) this.deployPersisted = true; }
-  cancelDeployRequest() { this.deployPending = false; this.deployPersisted = false; if (this.deployTimer) clearTimeout(this.deployTimer); this.deployTimer = undefined; }
+  setDeployHooks(hooks: { idle: () => boolean; notify: (channelId: string, text: string) => Promise<void> }) { this.deployIdle = hooks.idle; this.deployNotify = hooks.notify; }
   startQueuedDeploy() {
-    if (!this.deployPending || !this.deployPersisted || this.closed || !this.deploymentQueueIdle()) return false;
+    if (!this.pendingDeploy || this.deployRunning || this.closed || !this.deployIdle()) return;
     if (this.processes.activeCount > 0) {
-      if (!this.deployTimer) this.deployTimer = setTimeout(() => { this.deployTimer = undefined; if (this.deploymentQueueIdle()) this.startQueuedDeploy(); }, 1000);
-      return false;
+      if (!this.deployTimer) this.deployTimer = setTimeout(() => { this.deployTimer = undefined; this.startQueuedDeploy(); }, 1000);
+      return;
     }
-    this.deployPending = false;
-    this.deployPersisted = false;
-    const script = join(this.root, 'scripts/butler-deploy.mjs');
-    const deploymentId = this.deploymentAdapter?.pending();
-    if (!deploymentId) return false;
-    if (!this.deploymentAdapter?.running?.(deploymentId)) { this.deployPending = false; this.deployPersisted = false; return false; }
-    try {
-      const child = spawn('setsid', [process.execPath, script, deploymentId], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
-      child.once('error', error => { this.deploymentAdapter?.failed?.(deploymentId, error.message); void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ id: deploymentId, status: 'failed', error: error.message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined); });
-      child.unref();
-      return true;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.deploymentAdapter?.failed?.(deploymentId, message);
-      void writeFile(join(this.root, '.data/service/deploy-start-error.json'), JSON.stringify({ id: deploymentId, status: 'failed', error: message, at: new Date().toISOString() }), { mode: 0o600 }).catch(() => undefined);
-      return false;
+    const { channelId } = this.pendingDeploy;
+    this.pendingDeploy = undefined;
+    this.deployRunning = true;
+    void this.runDeploy(channelId).catch(async error => {
+      this.deployRunning = false;
+      await this.deployNotify(channelId, `部署失敗：${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
+    });
+  }
+  private async runDeploy(channelId: string) {
+    const build = join(this.root, '.data/deploy/build');
+    await rm(build, { recursive: true, force: true });
+    const { code, output } = await new Promise<{ code: number; output: string }>((resolveRun, reject) => {
+      const child = spawn(process.execPath, [join(this.root, 'node_modules/typescript/bin/tsc'), '--outDir', build], { cwd: this.root, stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      child.stdout.setEncoding('utf8').on('data', chunk => { output += chunk; });
+      child.stderr.setEncoding('utf8').on('data', chunk => { output += chunk; });
+      child.once('error', reject);
+      child.once('close', code => resolveRun({ code: code ?? 1, output }));
+    });
+    if (code !== 0) {
+      await rm(build, { recursive: true, force: true });
+      this.deployRunning = false;
+      await this.deployNotify(channelId, `部署失敗：建置錯誤，未重啟。\n\`\`\`\n${output.trim().slice(-1500)}\n\`\`\``);
+      return;
     }
+    const runner = spawn('setsid', [process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
+    runner.once('error', error => { this.deployRunning = false; void this.deployNotify(channelId, `部署失敗：無法啟動部署程序：${error.message}`).catch(() => undefined); });
+    runner.unref();
   }
   get activeCount() { return this.processes.activeCount; }
-  async close() { this.closed = true; this.cancelDeployRequest(); await this.processes.close(); }
-  async execute(name: string, args: Record<string, unknown>, source?: Partial<DeploymentRequestSource>): Promise<unknown> {
+  async close() { this.closed = true; this.pendingDeploy = undefined; if (this.deployTimer) clearTimeout(this.deployTimer); await this.processes.close(); }
+  async execute(name: string, args: Record<string, unknown>, deploy?: { channelId?: string }): Promise<unknown> {
     if (this.closed) throw new Error('Local runtime is closing');
     if (name === 'butler_deploy') {
-      const internalSourceValid = source?.sourceKind === 'subagent_event' && source.sourceParentSession === source.sessionId && Boolean(source.sourceEventId && source.sourceInputId);
-      const externalSourceValid = source?.sourceKind === 'discord_external';
-      if (!this.deploymentAdapter || !source?.sessionId || !source.channelId || (!internalSourceValid && !externalSourceValid)) throw new Error('Deployment request source metadata is unavailable; request was not queued');
-      const existing = this.deploymentAdapter.active?.() ?? this.deploymentAdapter.pending();
-      if (existing) return { accepted: true, duplicate: true, deployment_id: existing, message: '部署已排隊，完成後回報結果。' };
-      const id = this.deploymentAdapter.accept({ sessionId: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId, sourceKind: source.sourceKind!, sourceEventId: source.sourceEventId, sourceInputId: source.sourceInputId, sourceTriggerInputId: source.sourceTriggerInputId, sourceParentSession: source.sourceParentSession });
-      this.deployPending = true;
-      return { accepted: true, deployment_id: id, message: '部署已排隊，完成後回報結果。' };
+      if (!deploy?.channelId) throw new ToolUsageError('Deployment needs a Discord channel to report to');
+      if (!this.pendingDeploy && !this.deployRunning) this.pendingDeploy = { channelId: deploy.channelId };
+      return { accepted: true, message: '部署已排隊：這輪回覆與排隊工作完成後建置並重啟，結果會回報在此頻道。' };
     }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');

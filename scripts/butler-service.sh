@@ -4,112 +4,50 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 STATE="$ROOT/.data/service"
 PID_FILE="$STATE/butler.pid"
-READY_FILE="$STATE/butler.ready" # deployment build evidence (JSON)
 LIVENESS_FILE="$STATE/butler.liveness"
 LOG_FILE="$STATE/butler.log"
-LOCK_FILE="$STATE/lock"
 SCRIPT="$ROOT/scripts/discord-restart.sh"
-NODE=${BUTLER_NODE:-node}
+NODE=${BUTLER_NODE:-$(command -v node)}
 WAIT_SECONDS=${BUTLER_SERVICE_TIMEOUT_SECONDS:-60}
 umask 077
 mkdir -p "$STATE"
-chmod 700 "$STATE"
-exec 9>"$LOCK_FILE"
-if [ "${BUTLER_DEPLOY_LOCKED:-}" != 1 ]; then flock -x 9; fi
 
-valid_pid() { case ${1:-} in ''|*[!0-9]*) return 1;; esac; [ "$1" -gt 1 ]; }
-managed_pid() {
-  pid=$1
-  valid_pid "$pid" || return 1
-  [ -r "/proc/$pid/cmdline" ] || return 1
-  tr '\000' '\n' <"/proc/$pid/cmdline" | grep -Fqx "$SCRIPT"
-}
-read_pid() {
-  [ -f "$PID_FILE" ] || return 1
-  IFS= read -r pid <"$PID_FILE" || true
-  valid_pid "${pid:-}" || return 1
-  printf '%s\n' "$pid"
-}
 running_pid() {
-  pid=$(read_pid) || return 1
-  if kill -0 "$pid" 2>/dev/null && managed_pid "$pid"; then printf '%s\n' "$pid"; return 0; fi
-  return 1
-}
-unmanaged_process() {
-  for proc in /proc/[0-9]*; do
-    [ -r "$proc/cmdline" ] || continue
-    proc_pid=${proc##*/}
-    [ "$proc_pid" -gt 1 ] 2>/dev/null || continue
-    if tr '\000' '\n' <"$proc/cmdline" 2>/dev/null | grep -Fqx "$ROOT/dist/main.js"; then
-      printf '%s\n' "$proc_pid"; return 0
-    fi
-    if tr '\000' '\n' <"$proc/cmdline" 2>/dev/null | grep -Fqx "$SCRIPT"; then
-      printf '%s\n' "$proc_pid"; return 0
-    fi
-    if [ -r "$proc/cwd" ] && [ "$(readlink "$proc/cwd" 2>/dev/null || true)" = "$ROOT" ] && tr '\000' '\n' <"$proc/cmdline" 2>/dev/null | grep -Fqx 'dist/main.js'; then
-      printf '%s\n' "$proc_pid"; return 0
-    fi
-  done
-  return 1
-}
-check_node() {
-  node_path=$(command -v "$NODE" 2>/dev/null) || { echo 'Node executable not found; set BUTLER_NODE or PATH' >&2; return 1; }
-  [ -x "$node_path" ] || { echo 'Node executable is not executable' >&2; return 1; }
-  NODE=$node_path
-  version=$("$NODE" -p 'process.versions.node' 2>/dev/null) || return 1
-  major=${version%%.*}; rest=${version#*.}; minor=${rest%%.*}
-  if [ "$major" -lt 24 ] || { [ "$major" -eq 24 ] && [ "$minor" -lt 17 ]; }; then
-    echo "Node.js >=24.17 is required (found $version)" >&2; return 1
-  fi
+  [ -f "$PID_FILE" ] || return 1
+  pid=$(cat "$PID_FILE")
+  kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s\n' "$pid"
 }
 
 start_service() {
   if pid=$(running_pid); then echo "Butler already running (PID $pid)"; return 0; fi
-  if pid=$(read_pid); then
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "Refusing to start: recorded PID $pid is not the managed launcher" >&2; return 1
-    fi
-    rm -f "$PID_FILE" "$READY_FILE" "$LIVENESS_FILE"
-  fi
-  if pid=$(unmanaged_process); then
-    echo "Refusing to start: Butler process $pid is already running unmanaged" >&2; return 1
-  fi
-  check_node || return 1
-  rm -f "$READY_FILE" "$LIVENESS_FILE"
-  BUTLER_NODE="$NODE" BUTLER_SERVICE_READY_FILE="$READY_FILE" BUTLER_SERVICE_LIVENESS_FILE="$LIVENESS_FILE" nohup setsid sh "$SCRIPT" </dev/null >>"$LOG_FILE" 2>&1 9>&- &
+  rm -f "$PID_FILE" "$LIVENESS_FILE"
+  BUTLER_NODE="$NODE" BUTLER_SERVICE_LIVENESS_FILE="$LIVENESS_FILE" nohup setsid sh "$SCRIPT" </dev/null >>"$LOG_FILE" 2>&1 &
   pid=$!
   printf '%s\n' "$pid" >"$PID_FILE"
   elapsed=0
   while [ "$elapsed" -lt "$WAIT_SECONDS" ]; do
     if ! kill -0 "$pid" 2>/dev/null; then
-      rm -f "$PID_FILE" "$READY_FILE" "$LIVENESS_FILE"
+      rm -f "$PID_FILE" "$LIVENESS_FILE"
       echo "Butler failed to start; see $LOG_FILE" >&2; return 1
     fi
-    if [ -f "$LIVENESS_FILE" ] && [ -f "$READY_FILE" ]; then
-      evidence_ok=0
-      if "$NODE" -e 'const fs=require("node:fs"); const raw=fs.readFileSync(process.argv[1],"utf8"); const pid=Number(fs.readFileSync(process.argv[2],"utf8").trim()); let e; try{e=JSON.parse(raw)}catch{if(process.env.BUTLER_ALLOW_LEGACY_READY==="1"&&raw.trim()==="ready"){try{process.kill(pid,0);process.exit(0)}catch{process.exit(1)}}process.exit(1)}; if(e.ready!==true||!Number.isSafeInteger(e.pid)||e.pid<=1||e.pid!==pid||!e.buildId||!e.buildDigest||((process.env.BUTLER_ALLOW_LEGACY_READY!=="1")&&(typeof e.startupId!=="string"||!e.startupId)))process.exit(1); try{process.kill(e.pid,0)}catch{process.exit(1)}; if(process.env.BUTLER_EXPECTED_BUILD_ID&&e.buildId!==process.env.BUTLER_EXPECTED_BUILD_ID)process.exit(1); if(process.env.BUTLER_EXPECTED_BUILD_DIGEST&&e.buildDigest!==process.env.BUTLER_EXPECTED_BUILD_DIGEST)process.exit(1);' "$READY_FILE" "$STATE/app.pid"; then evidence_ok=1; fi
-      if [ "$evidence_ok" -eq 1 ] && managed_pid "$pid"; then echo "Butler ready (PID $pid); log $LOG_FILE"; return 0; fi
-      echo 'Butler readiness evidence or launcher PID did not match' >&2; return 1
-    fi
+    if [ -f "$LIVENESS_FILE" ]; then echo "Butler ready (PID $pid); log $LOG_FILE"; return 0; fi
     sleep 1; elapsed=$((elapsed + 1))
   done
-  echo "Butler readiness timed out; PID $pid retained for inspection; see $LOG_FILE" >&2
+  echo "Butler readiness timed out; see $LOG_FILE" >&2
   return 1
 }
+
 stop_service() {
-  if ! pid=$(read_pid); then
-    rm -f "$PID_FILE" "$READY_FILE" "$LIVENESS_FILE"
-    echo 'Butler is not running'; return 0
-  fi
-  if ! kill -0 "$pid" 2>/dev/null || ! managed_pid "$pid"; then
-    rm -f "$PID_FILE" "$READY_FILE" "$LIVENESS_FILE"
+  if ! pid=$(running_pid); then
+    rm -f "$PID_FILE" "$LIVENESS_FILE"
     echo 'Butler is not running'; return 0
   fi
   kill -TERM "$pid"
   elapsed=0
-  while kill -0 "$pid" 2>/dev/null && managed_pid "$pid" && [ "$elapsed" -lt "$WAIT_SECONDS" ]; do sleep 1; elapsed=$((elapsed + 1)); done
-  if kill -0 "$pid" 2>/dev/null && managed_pid "$pid"; then echo "Butler did not stop within ${WAIT_SECONDS}s; see $LOG_FILE" >&2; return 1; fi
-  rm -f "$PID_FILE" "$READY_FILE" "$LIVENESS_FILE"
+  while kill -0 "$pid" 2>/dev/null && [ "$elapsed" -lt "$WAIT_SECONDS" ]; do sleep 1; elapsed=$((elapsed + 1)); done
+  if kill -0 "$pid" 2>/dev/null; then echo "Butler did not stop within ${WAIT_SECONDS}s; see $LOG_FILE" >&2; return 1; fi
+  rm -f "$PID_FILE" "$LIVENESS_FILE"
   echo 'Butler stopped'
 }
 
@@ -117,8 +55,6 @@ case ${1:-} in
   start) start_service ;;
   stop) stop_service ;;
   restart) stop_service && start_service ;;
-  deploy-stop) [ "${BUTLER_DEPLOY_LOCKED:-}" = 1 ] || { echo 'deploy-stop is internal' >&2; exit 2; }; stop_service ;;
-  deploy-start) [ "${BUTLER_DEPLOY_LOCKED:-}" = 1 ] || { echo 'deploy-start is internal' >&2; exit 2; }; start_service ;;
   status)
     if pid=$(running_pid); then
       printf 'Butler running (PID %s)\nLog: %s\n' "$pid" "$LOG_FILE"

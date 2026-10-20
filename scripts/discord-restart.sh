@@ -5,7 +5,6 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 NODE=${BUTLER_NODE:-node}
 READY_DIR=$(mktemp -d "${TMPDIR:-/tmp}/butler-restart.XXXXXX")
 READY_FILE="$READY_DIR/ready"
-SERVICE_READY_FILE=${BUTLER_SERVICE_READY_FILE:-}
 SERVICE_LIVENESS_FILE=${BUTLER_SERVICE_LIVENESS_FILE:-}
 child=
 signal_status=0
@@ -28,7 +27,6 @@ wait_child() {
 
 while :; do
   rm -f "$READY_FILE"
-  if [ -n "$SERVICE_READY_FILE" ]; then rm -f "$SERVICE_READY_FILE"; fi
   if [ -n "$SERVICE_LIVENESS_FILE" ]; then rm -f "$SERVICE_LIVENESS_FILE"; fi
   BUTLER_RESTART_READY_FILE="$READY_FILE" "$NODE" --network-family-autoselection-attempt-timeout=2000 "$ROOT/dist/main.js" &
   child=$!
@@ -46,9 +44,7 @@ while :; do
   fi
 
   if [ -f "$READY_FILE" ]; then
-    "$NODE" "$ROOT/scripts/butler-deploy.mjs" --record-baseline
     if [ -n "$SERVICE_LIVENESS_FILE" ]; then printf 'ready\n' >"$SERVICE_LIVENESS_FILE"; fi
-    if [ "${BUTLER_ALLOW_LEGACY_READY:-}" = 1 ] && [ -n "$SERVICE_READY_FILE" ] && [ ! -f "$SERVICE_READY_FILE" ]; then printf 'ready\n' >"$SERVICE_READY_FILE"; fi
   fi
 
   if [ ! -f "$READY_FILE" ]; then

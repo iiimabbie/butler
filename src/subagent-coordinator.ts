@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { MemoryWriteToken } from './store.js';
 
 export type SubagentStatus = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped' | 'handoff';
-export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; questionId: string; message: string; waitForReply: boolean; kind?: 'question' | 'progress' | 'completed' | 'failed' | 'interrupted' | 'stopped' | 'handoff'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
-export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string; memoryWriteToken?: MemoryWriteToken | null }; result?: unknown; error?: string; question?: { id: string; message: string; callId?: string }; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
+export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; questionId?: string; message: string; waitForReply: boolean; kind?: 'question' | 'progress' | 'completed' | 'failed' | 'interrupted' | 'stopped' | 'handoff'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
+export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string }; result?: unknown; error?: string; question?: { id: string; message: string; callId?: string }; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
 type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<unknown>;
 type Entry = { snapshot: SubagentSnapshot; abort: AbortController; answer?: (value: string) => void };
 type Options = {
@@ -159,9 +158,10 @@ export class SubagentCoordinator {
     if (!entry || entry.snapshot.runId !== runId) throw new Error('Subagent run is no longer active');
     entry.abort.signal.throwIfAborted();
     if (entry.snapshot.stopRequested) return `Parent requested stop: ${entry.snapshot.stopRequested.reason}. Finish the handoff without waiting for an answer.`;
-    const questionId = randomUUID();
+    let questionId: string | undefined;
     let response: Promise<string> | undefined;
     if (wait) {
+      questionId = callId || randomUUID();
       response = new Promise<string>((resolve, reject) => {
         const aborted = () => reject(new Error('Subagent run was interrupted'));
         entry.answer = value => { entry.abort.signal.removeEventListener('abort', aborted); resolve(value); };
@@ -170,7 +170,7 @@ export class SubagentCoordinator {
       entry.snapshot.question = { id: questionId, message, callId };
       this.update(entry, 'waiting');
     }
-    this.publish({ id: randomUUID(), runId, subagentId: id, parentSession: entry.snapshot.parentSession, questionId, message, waitForReply: wait, kind: wait ? 'question' : 'progress', status: 'pending' });
+    this.publish({ id: randomUUID(), runId, subagentId: id, parentSession: entry.snapshot.parentSession, ...(questionId ? { questionId } : {}), message, waitForReply: wait, kind: wait ? 'question' : 'progress', status: 'pending' });
     return response;
   }
 
@@ -198,7 +198,7 @@ export class SubagentCoordinator {
     this.persist(entry.snapshot);
   }
   private emit(entry: Entry, kind: 'completed' | 'failed' | 'interrupted' | 'stopped' | 'handoff', message: string) {
-    this.publish({ id: randomUUID(), runId: entry.snapshot.runId, subagentId: entry.snapshot.id, parentSession: entry.snapshot.parentSession, questionId: randomUUID(), message, waitForReply: false, kind, status: 'pending' });
+    this.publish({ id: randomUUID(), runId: entry.snapshot.runId, subagentId: entry.snapshot.id, parentSession: entry.snapshot.parentSession, message, waitForReply: false, kind, status: 'pending' });
   }
   private publish(event: SubagentEvent, notify = true) {
     this.options.persistEvent?.(event);

@@ -10,9 +10,9 @@ const READ_ONLY_TOOLS = new Set([
   'local_read', 'local_search', 'local_process_output',
   'web_search', 'web_fetch', 'web_extract', 'web_map', 'web_usage',
   'weather_search', 'weather_forecast', 'skills_list', 'skills_read', 'schedule_list',
-  'subagent_list', 'subagent_status', 'deployment_result_status',
+  'subagent_list', 'subagent_status',
   'hledger_accounts', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
-  'hledger_lock_status', 'hledger_operations_list', 'hledger_schedules_list',
+  'hledger_schedules_list',
 ]);
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'waiting', 'stopping', 'pending', 'in_progress', 'requires_action', 'requires_approval', 'awaiting_approval']);
 const UNCERTAIN_STATUSES = new Set(['failed', 'unknown', 'failed_unknown', 'interrupted', 'cancelled', 'canceled', 'handoff']);

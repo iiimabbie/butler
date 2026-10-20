@@ -15,7 +15,7 @@ nvm use 24.21.0
 | 查看服務狀態 | `npm run status` | 查看服務是否執行及程序／log 資訊。 |
 | 停止 Butler | `npm stop` | 要求正常停止並等待結束。 |
 | 重啟目前版本 | `npm restart` | 停止後重啟現有 `dist`；不 build、不 slash-register。 |
-| 建置並部署程式 | `npm run deploy` | 暫存 build；最多等 10 分鐘讓 queue 與 local jobs 收尾，備份並切換 `dist`，正常停止舊版後啟動新版並等待 ready；candidate 失敗時確認程序退出後回復一次。`package.json` 或 `package-lock.json` 與 ready baseline 不同時拒絕部署。 |
+| 建置並部署程式 | `npm run deploy` | build 到 `.data/deploy/build`；正常停止舊版（等工作收尾），切換 `dist` 後啟動新版；新版未 ready 就換回舊版再啟動。依賴變更需另行安裝；部署不安裝依賴。 |
 | Discord slash command 有變更 | `npm run discord:register` | 明確同步 commands；會清除本 application 的 global commands 與 joined guild commands，再註冊完整 guild commands。 |
 
 日常編輯根目錄 `config.yaml` 後，服務會自動熱更新可熱更新欄位；改到冷欄位（Discord token/owner、paths、UI、Google、memory 啟停或目標）或同次候選混有冷熱變更時，整份候選會拒絕，請修正為純熱變更或安排重啟。無效 YAML／缺檔／設定錯誤保留最後有效版本，修正後存檔重試。
@@ -62,11 +62,11 @@ Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進�
 
 ## 部署與回復
 
-部署流程先在暫存目錄 build；build 成功後最多等待 10 分鐘讓 queue 與 local jobs 收尾，quiesce 會保持到舊版停止。接著備份目前 `dist`、切換 candidate，正常停止舊 worker，再啟動新版並等待 Discord ready。candidate 未 ready 時先確認 candidate 程序已退出，再回復備份 `dist` 並嘗試啟動舊版一次；不會無限重試。`package.json` 或 `package-lock.json` 與最近一次 ready baseline 不同時，拒絕自動部署。
+部署流程先 build 到 `.data/deploy/build`；build 失敗就不重啟。build 成功後正常停止舊版（SIGTERM，舊版會等進行中的工作收尾，最多 15 分鐘），把目前 `dist` 移到 `.data/deploy/previous-dist`、換上新 build，再啟動並等待 Discord ready。新版未 ready 時停止它、換回舊 `dist` 再啟動一次；舊版也起不來時會發錯誤通知。
 
-回復範圍僅是 `dist`。不會回復來源碼、UI 檔案、資料庫、workspace、設定、附件或 OAuth token。`package.json`／lockfile／依賴變更不由 dist 回復處理；`package.json` 或 `package-lock.json` 與最近一次 ready baseline 不同時，部署會拒絕自動進行，依賴更新需人工另行處理。UI 或 schema 變更也需另外人工確認。部署不自動改 Discord slash commands。
+回復範圍僅是 `dist`。不會回復來源碼、UI 檔案、資料庫、workspace、設定、附件或 OAuth token。`package.json`／lockfile／依賴變更不由 dist 回復處理；部署不安裝或回復依賴，依賴更新需另行處理。UI 或 schema 變更也需另外人工確認。部署不自動改 Discord slash commands。
 
-若要在 Discord 請 Butler 修改完成後部署，可直接告訴它「修改完成後部署」。這會透過 `butler_deploy` 排定本輪結束後執行部署，先回報已受理，不會讓聊天等待同步 shell 重啟；受理不代表部署已完成。結果可請 Butler 用 `local_read` 讀取 `.data/deploy/last-result.json`。
+若要在 Discord 請 Butler 修改完成後部署，可直接告訴它「修改完成後部署」。這會透過 `butler_deploy` 排定：本輪回覆與排隊工作完成後 build 並重啟。build 失敗會直接在該頻道回報錯誤；重啟後由新啟動的 Butler 在該頻道回報「部署完成」或「部署失敗，已回到舊版」。
 
 ## 看 log
 
@@ -77,19 +77,17 @@ tail -n 80 .data/service/butler.log
 tail -f .data/service/butler.log
 ```
 
-第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。每次部署 log 位於 `.data/deploy/runs/<UUID>/deploy.log`，最近一次結果仍位於 `.data/deploy/last-result.json`；worker 啟動錯誤資訊位於 `.data/service/deploy-start-error.json`。部署紀錄會自動保留最近 3 次已結束（completed 或 failed）的部署；執行中、待核對及無法確認狀態的紀錄不會刪除。
+第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。部署 log 位於 `.data/deploy/deploy.log`（每次部署附加在後）：
 
 ```sh
-jq . .data/deploy/last-result.json
-jq . .data/service/deploy-start-error.json
-DEPLOY_LOG="$(jq -r '.log' .data/deploy/last-result.json)" && tail -n 80 "$DEPLOY_LOG"
+tail -n 80 .data/deploy/deploy.log
 ```
 
 ## 簡單故障處理
 
 1. 先看 `npm run status`，確認服務狀態與 PID 資訊。
-2. 用 `tail -n 80 .data/service/butler.log` 看服務錯誤；部署問題再查看 `.data/deploy/last-result.json`、最近的 `.data/deploy/runs/<UUID>/deploy.log`，或 `.data/service/deploy-start-error.json`。
-3. 確認沒有工作要保留後，才考慮 `npm restart`；要切換新版時使用 `npm run deploy`。若 `package.json` 或 `package-lock.json` 與 ready baseline 不同，部署會拒絕自動進行。
+2. 用 `tail -n 80 .data/service/butler.log` 看服務錯誤；部署問題再查看 `.data/deploy/deploy.log`。
+3. 確認沒有工作要保留後，才考慮 `npm restart`；要切換新版時使用 `npm run deploy`。若有依賴變更，先完成依賴安裝再部署。
 
 不要用 `killall` 或不分辨程序的強制終止命令，也不要 reset/清空資料庫。服務不會開機自啟，也不會自動 crash-replay；一般異常不會自動重啟或重播未完成請求。
 
