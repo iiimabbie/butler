@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { GoogleClientConfig } from './config.js';
 
 export const GOOGLE_SCOPES = [
@@ -10,7 +10,7 @@ export const GOOGLE_SCOPES = [
   'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file',
 ];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
-const TOKEN_PATH = join(homedir(), '.local/share/butler/google-token.json');
+const TOKEN_PATH = fileURLToPath(new URL('../.data/google/token.json', import.meta.url));
 
 type OAuthClient = { client_id: string; client_secret: string };
 type Token = { access_token: string; refresh_token?: string; scope: string; expiry_date: number; reauthorization_required?: boolean };
