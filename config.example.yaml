@@ -18,9 +18,31 @@ llm:
     gpt-6.1-sol: 272000
 
 web:
-  provider: tavily
-  baseUrl: https://api.tavily.com
-  apiKey: YOUR_TAVILY_API_KEY
+  # All providers default to disabled. Enabling requires an API key and explicit daily request limit.
+  # Optional serial fallback. Unsupported hard filters skip a provider, never silently downgrade.
+  pool:
+    searchOrder: [tavily, anysearch, firecrawl]
+    fetchOrder: [tavily, anysearch, firecrawl]
+    searchTimeoutMs: 30000
+    fetchTimeoutMs: 45000
+    attemptTimeoutMs: 15000
+    maxAttempts: 3
+  tavily:
+    enabled: true
+    apiKey: YOUR_TAVILY_API_KEY
+    baseUrl: https://api.tavily.com
+    dailyRequestLimit: 100
+  # Keep disabled until free-plan/account limits and small live samples have been checked.
+  anysearch:
+    enabled: false
+    # apiKey: YOUR_ANYSEARCH_API_KEY
+    baseUrl: https://api.anysearch.com/v1
+    dailyRequestLimit: 20
+  firecrawl:
+    enabled: false
+    # apiKey: YOUR_FIRECRAWL_API_KEY
+    baseUrl: https://api.firecrawl.dev/v2
+    dailyRequestLimit: 10
 
 # Optional. Omit to disable the web UI.
 ui:

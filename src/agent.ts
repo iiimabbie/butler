@@ -1,7 +1,7 @@
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
-import { DiscordReactionInputError, ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
+import { DiscordReactionInputError, ToolUsageError, WebFetchExtractionError, WebPoolError } from './tool-errors.js';
 import { requestModel, logTrace, traceTextMetadata } from './model-request.js';
 import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagnostic.js';
 import { IncompleteTurnRecovery, unfinishedDelegateStatus } from './incomplete-turn-recovery.js';
@@ -42,6 +42,7 @@ export interface AgentConfig {
   modelContextTokens?: Record<string, number>;
   fetcher?: typeof fetch;
   timeoutMs?: number;
+  signal?: AbortSignal;
   askId?: string; traceId?: string;
   consumeSteer?: () => { content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined | Promise<{ content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined>;
   initialAttachments?: MessageInputAttachment[];
@@ -491,7 +492,7 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
       },
       executeTool: async (childWindowId, model, name, childArgs, callId) => {
         const childCall: FunctionCall = { type: 'function_call', name, call_id: callId, arguments: JSON.stringify({ ...childArgs, label: `Subagent ${model}: ${name}` }) };
-        try { return await executeCall(store, childWindowId, childCall, { baseUrl: config.baseUrl, apiKey: config.apiKey, model, fetcher: config.fetcher, localTools: config.localTools, webTools: config.webTools }, undefined, 'subagent'); }
+        try { return await executeCall(store, childWindowId, childCall, { baseUrl: config.baseUrl, apiKey: config.apiKey, model, fetcher: config.fetcher, localTools: config.localTools, webTools: config.webTools, signal }, undefined, 'subagent'); }
         catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { auditPersistenceFailure: true }); }
       },
     }, { ...task, task: taskText, subagent_id: id });
@@ -578,7 +579,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await config.weatherTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('web_')) {
       if (!config.webTools) throw new ToolUsageError('Web tools are unavailable in this entry point');
-      result = await config.webTools.execute(call.name, runtimeArgs);
+      result = await config.webTools.execute(call.name, runtimeArgs, { signal: config.signal });
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
       if (!config.localTools) throw new ToolUsageError('Local tools are unavailable in this entry point');
       result = await config.localTools.execute(call.name, runtimeArgs, config.deploymentSource
@@ -612,6 +613,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   } catch (error) {
     if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) throw error;
     if (error instanceof DiscordReactionInputError) logError(`Tool reaction input rejected tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
+    else if (error instanceof WebPoolError && !error.notify) logWarn(`Web request ended tool=${call.name}`, undefined, { category: error.message });
     else if (error instanceof WebFetchExtractionError) logError(`Tool execution fallback available tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
     else if (!(error instanceof ToolUsageError)) logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: true, deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });
     result = { error: errorMessage(error) };

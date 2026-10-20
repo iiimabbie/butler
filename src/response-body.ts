@@ -5,14 +5,18 @@ export class ResponseSizeLimitError extends Error {
   }
 }
 
-export async function readResponseBytes(response: Response, limit: number): Promise<Buffer> {
+export async function readResponseBytes(response: Response, limit: number, signal?: AbortSignal): Promise<Buffer> {
   if (!response.body) return Buffer.alloc(0);
+  if (signal?.aborted) { await response.body.cancel().catch(() => {}); signal.throwIfAborted(); }
   const reader = response.body.getReader();
+  const abort = () => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
   const chunks: Buffer[] = [];
   let size = 0;
   try {
     while (true) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       size += value.byteLength;
       if (size > limit) {
@@ -22,6 +26,7 @@ export async function readResponseBytes(response: Response, limit: number): Prom
       chunks.push(Buffer.from(value));
     }
   } finally {
+    signal?.removeEventListener('abort', abort);
     reader.releaseLock();
   }
   return Buffer.concat(chunks, size);

@@ -1,255 +1,330 @@
-import { ToolUsageError, WebFetchExtractionError } from './tool-errors.js';
-import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
-const RESPONSE_LIMIT = 5 * 1024 * 1024;
-// Leave room for the agent's tool_history_id envelope.
-const OUTPUT_LIMIT = 64 * 1024 - 256;
-const SEARCH_DEPTH = ['basic', 'advanced'] as const;
-const EXTRACT_DEPTH = ['basic', 'advanced'] as const;
-const TOPICS = ['general', 'news', 'finance'] as const;
-const TIME_RANGES = ['day', 'week', 'month', 'year', 'd', 'w', 'm', 'y'] as const;
-const FORMATS = ['markdown', 'text'] as const;
-const COUNTRIES = ['afghanistan','albania','algeria','andorra','angola','argentina','armenia','australia','austria','azerbaijan','bahamas','bahrain','bangladesh','barbados','belarus','belgium','belize','benin','bhutan','bolivia','bosnia and herzegovina','botswana','brazil','brunei','bulgaria','burkina faso','burundi','cambodia','cameroon','canada','cape verde','central african republic','chad','chile','china','colombia','comoros','congo','costa rica','croatia','cuba','cyprus','czech republic','denmark','djibouti','dominican republic','ecuador','egypt','el salvador','equatorial guinea','eritrea','estonia','ethiopia','fiji','finland','france','gabon','gambia','georgia','germany','ghana','greece','guatemala','guinea','haiti','honduras','hungary','iceland','india','indonesia','iran','iraq','ireland','israel','italy','jamaica','japan','jordan','kazakhstan','kenya','kuwait','kyrgyzstan','latvia','lebanon','lesotho','liberia','libya','liechtenstein','lithuania','luxembourg','madagascar','malawi','malaysia','maldives','mali','malta','mauritania','mauritius','mexico','moldova','monaco','mongolia','montenegro','morocco','mozambique','myanmar','namibia','nepal','netherlands','new zealand','nicaragua','niger','nigeria','north korea','north macedonia','norway','oman','pakistan','panama','papua new guinea','paraguay','peru','philippines','poland','portugal','qatar','romania','russia','rwanda','saudi arabia','senegal','serbia','singapore','slovakia','slovenia','somalia','south africa','south korea','south sudan','spain','sri lanka','sudan','sweden','switzerland','syria','taiwan','tajikistan','tanzania','thailand','togo','trinidad and tobago','tunisia','turkey','turkmenistan','uganda','ukraine','united arab emirates','united kingdom','united states','uruguay','uzbekistan','venezuela','vietnam','yemen','zambia','zimbabwe'] as const;
-const string = { type: 'string', minLength: 1 };
-const stringArray = (maxItems: number) => ({ type: 'array', items: string, minItems: 1, maxItems });
-const optionalArray = (maxItems: number) => ({ type: 'array', items: string, maxItems });
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { createTavilyToolRuntime, prepareWebRequest, webDefinitions } from './web-tavily.js';
+import { ToolUsageError, WebFetchExtractionError, WebPoolError, WebProviderError } from './tool-errors.js';
+import { readResponseBytes } from './response-body.js';
+import { assertPublicWebUrl, withWebSignal } from './web-url.js';
+import { logInfo, logWarn } from './log.js';
+export { webDefinitions } from './web-tavily.js';
 
-export const webDefinitions: { type: 'function'; name: string; description: string; parameters: Record<string, unknown> }[] = [
-  { type: 'function', name: 'web_search', description: 'Search the public web. Uses basic depth by default; advanced costs more and must be requested explicitly. Date windows and domain filters narrow results.', parameters: { type: 'object', properties: {
-    query: string, max_results: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, search_depth: { type: 'string', enum: SEARCH_DEPTH, default: 'basic' }, topic: { type: 'string', enum: TOPICS },
-    include_domains: optionalArray(300), exclude_domains: optionalArray(150), include_domains_mode: { type: 'string', enum: ['restrict', 'prefer'] }, time_range: { type: 'string', enum: TIME_RANGES }, start_date: { type: 'string', format: 'date' }, end_date: { type: 'string', format: 'date' }, country: { type: 'string', enum: COUNTRIES },
-  }, required: ['query'], additionalProperties: false } },
-  { type: 'function', name: 'web_fetch', description: 'Extract content from one public HTTP(S) URL using basic extraction; truncated indicates incomplete content.', parameters: { type: 'object', properties: { url: string }, required: ['url'], additionalProperties: false } },
-  { type: 'function', name: 'web_extract', description: 'Extract content from 1–20 public HTTP(S) URLs in one request. Use query for a specific question and relevant chunks; omit query to read the full content. chunks_per_source requires query. Returns successes and per-URL failures; advanced extraction may cost more. Content may be truncated.', parameters: { type: 'object', properties: { urls: stringArray(20), extract_depth: { type: 'string', enum: EXTRACT_DEPTH, default: 'basic' }, format: { type: 'string', enum: FORMATS, default: 'markdown' }, query: string, chunks_per_source: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['urls'], additionalProperties: false } },
-  { type: 'function', name: 'web_map', description: 'Map a website to discover URLs only; this does not crawl or extract page contents. Mapping costs credits per successful pages; instructions raise the rate from 1 to 2 credits per 10 successful pages. Conservative defaults: depth 1, breadth 5, limit 10, external domains excluded.', parameters: { type: 'object', properties: { url: string, instructions: { type: 'string', minLength: 1, maxLength: 1000 }, max_depth: { type: 'integer', minimum: 1, maximum: 5, default: 1 }, max_breadth: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 }, select_paths: optionalArray(20), exclude_paths: optionalArray(20) }, required: ['url'], additionalProperties: false } },
-  { type: 'function', name: 'web_usage', description: 'Read-only Tavily API key and account usage for the current billing cycle.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } },
-];
+type Provider = 'tavily' | 'firecrawl' | 'anysearch';
+type Operation = 'search' | 'fetch';
+export type ProviderConfig = { enabled?: boolean; apiKey?: string; baseUrl?: string; dailyRequestLimit?: number };
+export type WebConfig = {
+  pool?: { searchOrder?: Provider[]; fetchOrder?: Provider[]; searchTimeoutMs?: number; fetchTimeoutMs?: number; attemptTimeoutMs?: number; maxAttempts?: number };
+  tavily?: ProviderConfig;
+  firecrawl?: ProviderConfig;
+  anysearch?: ProviderConfig;
+};
+export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown> };
+type Kind = 'timeout' | 'network' | 'rate_limit' | 'upstream' | 'parse' | 'auth' | 'quota' | 'endpoint' | 'invalid_request' | 'source_unreadable' | 'encoding_suspect' | 'not_found' | 'empty' | 'cancelled' | 'budget' | 'cooldown' | 'unsupported' | 'unconfigured';
+type Attempt = { provider: Provider; outcome: string; duration_ms: number; credit_usage?: string; estimated_credits?: number; actual_credits?: number };
+class ProviderError extends WebProviderError { declare readonly kind: Kind; constructor(kind: Kind) { super(kind); } }
+type Health = { failures: number; until: number; probe: boolean; disabled?: 'auth' | 'quota' | 'endpoint' };
+type Budget = { date: string; requests: number };
+type SharedState = { usage: Record<string, Budget>; health: Map<string, Health> };
+// Shared across runtime hot reloads, including overlapping requests. Credential hashes never contain keys.
+const states = new Map<string, SharedState>();
+const transient = new Set<Kind>(['timeout','network','rate_limit','upstream','parse']);
+const technical = new Set<Kind>([...transient, 'auth','quota','endpoint']);
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
-export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
-export function createWebToolRuntime(config: { provider?: 'tavily'; baseUrl?: string; apiKey?: string; fetcher?: typeof fetch } = {}): WebToolRuntime {
-  const apiKey = config.apiKey?.trim();
+export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetch; statePath?: string } = {}): WebToolRuntime {
   const fetcher = config.fetcher ?? fetch;
-  const baseUrl = (config.baseUrl?.trim() || 'https://api.tavily.com').replace(/\/+$/, '');
+  const tavilyKey = config.tavily?.enabled === true ? config.tavily.apiKey?.trim() : undefined;
+  const fireKey = config.firecrawl?.enabled === true ? config.firecrawl.apiKey?.trim() : undefined;
+  const anyKey = config.anysearch?.enabled === true ? config.anysearch.apiKey?.trim() : undefined;
+  const keys: Record<Provider, string | undefined> = { tavily: tavilyKey, firecrawl: fireKey, anysearch: anyKey };
+  const namespace = config.statePath ?? 'process';
+  let state = states.get(namespace);
+  if (!state) {
+    let usage: Record<string, Budget> = {};
+    if (config.statePath) {
+      try {
+        const saved: unknown = JSON.parse(readFileSync(config.statePath, 'utf8'));
+        if (!record(saved) || !Object.values(saved).every(item => record(item) && typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date) && Number.isSafeInteger(item.requests) && Number(item.requests) >= 0)) throw new Error();
+        usage = saved as Record<string, Budget>;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Web usage state is unreadable; refusing to reset request budgets'); }
+    }
+    state = { usage, health: new Map() }; states.set(namespace, state);
+  }
+  const shared = state;
+  const providerKey = (provider: Provider) => keys[provider];
+  const providerConfig = (provider: Provider) => config[provider];
+  const providerBase = (provider: Provider) => providerConfig(provider)?.baseUrl ?? (provider === 'tavily' ? 'https://api.tavily.com' : provider === 'firecrawl' ? 'https://api.firecrawl.dev/v2' : 'https://api.anysearch.com/v1');
+  const keyFor = (provider: Provider) => createHash('sha256').update(`${provider}:${providerKey(provider) ?? ''}`).digest('hex');
+  const redact = (text: string) => [config.tavily?.apiKey, config.firecrawl?.apiKey, config.anysearch?.apiKey].reduce<string>((value, key) => key ? value.replaceAll(key, '[redacted]') : value, text);
+  const reserve = (provider: Provider) => {
+    const key = keyFor(provider), date = new Date().toISOString().slice(0,10);
+    const previous = shared.usage[key];
+    const used = previous?.date === date ? previous.requests : 0;
+    const limit = providerConfig(provider)?.dailyRequestLimit ?? 0;
+    if (used >= limit) throw new ProviderError('budget');
+    shared.usage[key] = { date, requests: used + 1 };
+    if (config.statePath) {
+      try {
+        mkdirSync(dirname(config.statePath), { recursive: true, mode: 0o700 });
+        const temp = `${config.statePath}.tmp`;
+        writeFileSync(temp, JSON.stringify(shared.usage), { mode: 0o600 }); renameSync(temp, config.statePath);
+      } catch { throw new ProviderError('budget'); } // Fail closed; never release uncertain reservations.
+    }
+  };
+  const healthFor = (provider: Provider, operation: Operation) => {
+    const key = `${keyFor(provider)}:${operation}`;
+    let health = shared.health.get(key);
+    if (!health) { health = { failures: 0, until: 0, probe: false }; shared.health.set(key, health); }
+    return health;
+  };
+  const tavily = (signal?: AbortSignal, transport = fetcher, onUsage?: (credits: number) => void) => createTavilyToolRuntime({ baseUrl: config.tavily?.baseUrl, apiKey: tavilyKey, fetcher: transport, signal, onUsage });
   return {
-    definitions: apiKey ? webDefinitions : [],
-    async execute(name, args) {
-      if (!apiKey) throw new Error('Web API key is not configured');
-      if (config.provider !== undefined && config.provider !== 'tavily') throw new Error('Unsupported web provider');
-      const allowedByName: Record<string, string[]> = {
-        web_search: ['query','max_results','search_depth','topic','include_domains','exclude_domains','include_domains_mode','time_range','start_date','end_date','country'],
-        web_fetch: ['url'], web_extract: ['urls','extract_depth','format','query','chunks_per_source'],
-        web_map: ['url','instructions','max_depth','max_breadth','limit','select_paths','exclude_paths'], web_usage: [],
-      };
-      const allowed = allowedByName[name];
-      if (!allowed) throw new ToolUsageError('Unknown web tool');
-      if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown web tool argument');
-      const redact = (value: string) => value.replaceAll(apiKey, '[redacted]');
-      if (name === 'web_search') {
-        const query = requiredString(args.query, 'query');
-        const maxResults = integer(args.max_results, 5, 1, 20, 'max_results');
-        const depth = oneOf(args.search_depth, 'basic', SEARCH_DEPTH, 'search_depth');
-        const body: Record<string, unknown> = { query, max_results: maxResults, search_depth: depth, auto_parameters: false, include_answer: false, include_raw_content: false };
-        if (args.topic !== undefined) body.topic = oneOf(args.topic, 'general', TOPICS, 'topic');
-        if (args.include_domains !== undefined) body.include_domains = domainList(args.include_domains, 300, 'include_domains');
-        if (args.exclude_domains !== undefined) body.exclude_domains = domainList(args.exclude_domains, 150, 'exclude_domains');
-        if (args.include_domains_mode !== undefined) {
-          body.include_domains_mode = oneOf(args.include_domains_mode, 'restrict', ['restrict', 'prefer'] as const, 'include_domains_mode');
-          if (!Array.isArray(body.include_domains) || body.include_domains.length === 0) throw new ToolUsageError('include_domains_mode requires a non-empty include_domains list');
-        }
-        if (args.time_range !== undefined) body.time_range = oneOf(args.time_range, 'day', TIME_RANGES, 'time_range');
-        if (args.start_date !== undefined) body.start_date = validDate(args.start_date, 'start_date');
-        if (args.end_date !== undefined) body.end_date = validDate(args.end_date, 'end_date');
-        if (args.start_date !== undefined && args.end_date !== undefined && String(args.start_date) > String(args.end_date)) throw new ToolUsageError('start_date must be on or before end_date');
-        if (args.country !== undefined) {
-          body.country = oneOf(args.country, 'united states', COUNTRIES, 'country');
-          if (body.topic !== undefined && body.topic !== 'general') throw new ToolUsageError('country is only supported with topic=general');
-        }
-        const response = await request('search', body, apiKey, fetcher, baseUrl);
-        if (!Array.isArray(response.results) || response.results.length > maxResults) throw new Error('Tavily search: invalid response');
-        const results = response.results.map(item => {
-          if (!isRecord(item) || typeof item.title !== 'string' || typeof item.url !== 'string' || typeof item.content !== 'string' || typeof item.score !== 'number' || !Number.isFinite(item.score)) throw new Error('Tavily search: invalid response');
-          return { title: redact(item.title), url: redact(item.url), content: redact(item.content), score: item.score, truncated: false };
-        });
-        return boundedOutput({ query: redact(query), result_count: results.length, results, truncated: false }, results);
+    definitions: webDefinitions.filter(tool => tool.name === 'web_search' || tool.name === 'web_fetch' ? Boolean(tavilyKey || fireKey || anyKey) : Boolean(tavilyKey)),
+    async execute(name, args, options = {}) {
+      const prepared = prepareWebRequest(name, args); // Invalid arguments stop before DNS, budget or providers.
+      const pooled = name === 'web_search' || name === 'web_fetch' || (name === 'web_extract' && (prepared.body!.urls as string[]).length === 1 && !args.query && (args.extract_depth ?? 'basic') === 'basic' && (args.format ?? 'markdown') === 'markdown');
+      const operation: Operation = name === 'web_search' ? 'search' : 'fetch';
+      const totalMs = operation === 'search' ? config.pool?.searchTimeoutMs ?? 30_000 : config.pool?.fetchTimeoutMs ?? 45_000;
+      const started = Date.now();
+      const total = AbortSignal.timeout(pooled ? totalMs : 35_000);
+      const signal = options.signal ? AbortSignal.any([options.signal, total]) : total;
+      const urls = prepared.endpoint === 'extract' ? prepared.body!.urls as string[] : prepared.endpoint === 'map' ? [prepared.body!.url as string] : [];
+      for (const url of urls) {
+        try { await assertPublicWebUrl(url, signal); }
+        catch (error) { if (error instanceof ToolUsageError) throw error; throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'URL validation failed or timed out', false); }
       }
-      if (name === 'web_fetch' || name === 'web_extract') {
-        const urls = name === 'web_fetch' ? [validUrl(args.url)] : validateUrls(args.urls);
-        const depth = name === 'web_fetch' ? 'basic' : oneOf(args.extract_depth, 'basic', EXTRACT_DEPTH, 'extract_depth');
-        const format = name === 'web_extract' ? oneOf(args.format, 'markdown', FORMATS, 'format') : undefined;
-        const query = name === 'web_extract' && args.query !== undefined ? requiredString(args.query, 'query') : undefined;
-        const chunksPerSource = name === 'web_extract' && args.chunks_per_source !== undefined
-          ? integer(args.chunks_per_source, 3, 1, 5, 'chunks_per_source')
-          : undefined;
-        if (chunksPerSource !== undefined && query === undefined) throw new ToolUsageError('chunks_per_source requires query');
-        const body: Record<string, unknown> = { urls, extract_depth: depth, timeout: 20, ...(format ? { format } : {}), ...(query !== undefined ? { query } : {}), ...(chunksPerSource !== undefined ? { chunks_per_source: chunksPerSource } : {}) };
-        const response = await request('extract', body, apiKey, fetcher, baseUrl);
-        if (!Array.isArray(response.failed_results) || !Array.isArray(response.results)) throw new Error('Tavily extract: invalid response');
-        const failed = response.failed_results.map(item => {
-          if (!isRecord(item) || typeof item.url !== 'string' || typeof item.error !== 'string') throw new Error('Tavily extract: invalid response');
-          return { url: item.url, error: item.error };
-        });
-        const results = response.results.map(item => {
-          if (!isRecord(item) || typeof item.url !== 'string' || typeof item.raw_content !== 'string') throw new Error('Tavily extract: invalid response');
-          return { url: redact(item.url), content: redact(item.raw_content), truncated: false };
-        });
-        if (name === 'web_fetch') {
-          if (failed.length) {
-            const requestedUrl = urls[0]!;
-            const failure = failed[0];
-            const isKnownSinglePageFailure = failed.length === 1
-              && results.length === 0
-              && failure?.url === requestedUrl
-              && failure.error.trim() === 'Error fetching content';
-            if (results.length === 0 && failed.length > 0) {
-              if (isKnownSinglePageFailure) throw new WebFetchExtractionError(redact(requestedUrl), redact(failure.error));
-              const details = failed.map(item => `${redact(item.url)}: ${redact(item.error)}`).join('; ');
-              throw new WebFetchExtractionError(redact(requestedUrl), redact(failure?.error ?? 'URL extraction failed'), `Tavily extract: URL extraction failed${details ? ` (${details})` : ''}`);
-            }
-            const details = failed.map(item => `${redact(item.url)}: ${redact(item.error)}`).join('; ');
-            throw new Error(`Tavily extract: URL extraction failed${details ? ` (${details})` : ''}`);
+      if (!pooled) {
+        if (!tavilyKey) throw new ToolUsageError('This web operation requires enabled Tavily configuration');
+        // Batch extraction, query chunks, advanced/text extraction, map and usage retain their Tavily contract.
+        signal.throwIfAborted();
+        if (name !== 'web_usage') {
+          if (healthFor('tavily', 'fetch').disabled) throw new WebPoolError('Tavily is disabled after a credential/account failure', false);
+          try { reserve('tavily'); } catch { throw new WebPoolError('Tavily daily request budget', false); }
+        }
+        const result = await withWebSignal(tavily(signal).execute(name, args), signal);
+        return record(result) ? redactObject(result, redact) : result;
+      }
+      const attempts: Attempt[] = [];
+      const order = operation === 'search' ? config.pool?.searchOrder ?? ['tavily','anysearch','firecrawl'] : config.pool?.fetchOrder ?? ['tavily','anysearch','firecrawl'];
+      let count = 0, empty: Record<string, unknown> | undefined, partial: Record<string, unknown> | undefined;
+      for (const provider of [...new Set(order)]) {
+        if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+        if (count >= (config.pool?.maxAttempts ?? 3)) break;
+        const skip = (kind: Kind) => attempts.push({ provider, outcome: kind, duration_ms: 0 });
+        if (!providerKey(provider)) { skip('unconfigured'); continue; }
+        if (provider === 'firecrawl' && !supportsFirecrawl(operation, prepared.body!)) { skip('unsupported'); continue; }
+        if (provider === 'anysearch' && !supportsAnySearch(operation, prepared.body!)) { skip('unsupported'); continue; }
+        const health = healthFor(provider, operation);
+        if (health.disabled) { skip(health.disabled); continue; }
+        if (health.probe || health.until > Date.now()) { skip('cooldown'); continue; }
+        try { reserve(provider); } catch { skip('budget'); continue; }
+        const wasProbe = health.until > 0;
+        if (wasProbe) health.probe = true;
+        count++;
+        const at = Date.now();
+        const attemptTimeout = AbortSignal.timeout(Math.min(config.pool?.attemptTimeoutMs ?? 15_000, Math.max(1, totalMs - (at - started))));
+        const attemptSignal = AbortSignal.any([signal, attemptTimeout]);
+        let actualCredits: number | undefined;
+        const transport: typeof fetch = async (input, init) => {
+          let response: Response;
+          try { response = await withWebSignal(fetcher(input, { ...init, signal: attemptSignal }), attemptSignal); }
+          catch { throw new ProviderError(options.signal?.aborted ? 'cancelled' : attemptSignal.aborted ? 'timeout' : 'network'); }
+          if (!response.ok) {
+            await response.body?.cancel().catch(() => {});
+            throw new ProviderError(response.status === 401 || response.status === 403 ? 'auth' : response.status === 402 || response.status === 432 ? 'quota' : response.status === 404 || response.status === 410 ? 'endpoint' : response.status === 422 ? 'source_unreadable' : response.status === 429 ? 'rate_limit' : response.status >= 500 ? 'upstream' : 'invalid_request');
           }
-          if (results.length !== 1) throw new Error('Tavily extract: invalid response');
-          return boundedOutput(results[0]!, [results[0]!]);
-        }
-        const safeFailed = failed.map(item => ({ url: redact(item.url), error: redact(item.error) }));
-        const result = { result_count: results.length, failed_count: safeFailed.length, results, failed_results: safeFailed, truncated: false, ...(query !== undefined ? { content_scope: 'query_relevant_chunks' as const, content_scope_description: 'Content contains query-relevant chunks, not the full source content.' } : {}) };
-        return boundedOutput(result, results);
+          return response;
+        };
+        const estimate = provider === 'anysearch' ? undefined : provider === 'tavily' ? (operation === 'search' ? prepared.body!.search_depth === 'advanced' ? 2 : 1 : 1) : operation === 'search' ? Math.ceil(Number(prepared.body!.max_results) / 10) * 2 : 1;
+        try {
+          let result: unknown;
+          if (provider === 'tavily') {
+            result = await withWebSignal(tavily(attemptSignal, transport, credits => { actualCredits = credits; }).execute(name, args), attemptSignal);
+          } else if (provider === 'anysearch') {
+            result = await anysearch(operation, prepared.body!, providerBase(provider), anyKey!, transport, attemptSignal);
+          } else {
+            const response = await firecrawl(operation, prepared.body!, providerBase(provider), fireKey!, transport, attemptSignal);
+            actualCredits = response.actualCredits; result = response.result;
+          }
+          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+          if (!record(result)) throw new ProviderError('parse');
+          if (operation === 'fetch' && provider !== 'tavily' && name === 'web_extract') result = { result_count: 1, failed_count: 0, results: [result], failed_results: [], truncated: Boolean(result.truncated) };
+          if (!record(result)) throw new ProviderError('parse');
+          if (operation === 'fetch') {
+            if (Array.isArray(result.results) && !result.results.length && Array.isArray(result.failed_results) && result.failed_results.length) throw new ProviderError('source_unreadable');
+            const pages = Array.isArray(result.results) ? result.results : [result];
+            if (pages.some(page => !record(page) || page.url !== urls[0])) throw new ProviderError('parse');
+          }
+          if (operation === 'search' && Array.isArray(result.results)) {
+            result.results = result.results.filter(item => record(item) && typeof item.url === 'string' && domainAllowed(item.url, prepared.body!));
+            result.result_count = (result.results as unknown[]).length;
+          }
+          const status = assess(result, operation);
+          const entry: Attempt = { provider, outcome: status, duration_ms: Date.now() - at, ...(estimate !== undefined ? { estimated_credits: estimate } : {}), credit_usage: actualCredits !== undefined ? 'reported' : estimate !== undefined ? 'estimated' : 'unknown', ...(actualCredits !== undefined ? { actual_credits: actualCredits } : {}) };
+          attempts.push(entry);
+          logInfo('web_pool_attempt', { operation, ...entry, ...(urls.length ? { domain: new URL(urls[0]!).hostname } : {}) });
+          health.failures = 0; health.until = 0;
+          if (status === 'empty') { empty = decorate(redactObject(result, redact), provider, attempts, operation); continue; }
+          if (status === 'source_unreadable' || status === 'encoding_suspect') continue;
+          if (status === 'partial') { partial ??= decorate(redactObject(result, redact), provider, attempts, operation); continue; }
+          if (status === 'not_found') throw new ProviderError('not_found');
+          if (attempts.some(item => technical.has(item.outcome as Kind) || ['source_unreadable','encoding_suspect','partial'].includes(item.outcome))) logWarn('Web pool fallback succeeded', undefined, { operation, provider, attempts: attempts.length });
+          return boundPoolOutput(decorate(redactObject(result, redact), provider, attempts, operation));
+        } catch (error) {
+          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+          const kind = classify(error, attemptSignal);
+          if (attempts.at(-1)?.provider !== provider || !['not_found'].includes(attempts.at(-1)!.outcome)) {
+            const entry: Attempt = { provider, outcome: kind, duration_ms: Date.now() - at, ...(estimate !== undefined ? { estimated_credits: estimate } : {}), credit_usage: actualCredits !== undefined ? 'reported' : estimate !== undefined ? 'estimated' : 'unknown', ...(actualCredits !== undefined ? { actual_credits: actualCredits } : {}) };
+            attempts.push(entry); logInfo('web_pool_attempt', { operation, ...entry });
+          }
+          if (kind === 'cancelled' || kind === 'invalid_request' || kind === 'not_found') throw new WebPoolError(kind, false);
+          if (kind === 'auth' || kind === 'quota' || kind === 'endpoint') {
+            // Credential/account failures apply to both capabilities, not a target domain.
+            if (kind === 'endpoint') health.disabled = kind;
+            else { healthFor(provider, 'search').disabled = kind; healthFor(provider, 'fetch').disabled = kind; }
+            logWarn('Web provider disabled until credentials change or process restart', undefined, { provider, kind });
+          } else if (transient.has(kind)) {
+            health.failures++;
+            if (health.failures >= 3 || wasProbe) health.until = Date.now() + 5 * 60_000;
+          }
+        } finally { health.probe = false; }
       }
-      if (name === 'web_map') {
-        const url = validUrl(args.url);
-        const mapBody: Record<string, unknown> = { url, max_depth: integer(args.max_depth, 1, 1, 5, 'max_depth'), max_breadth: integer(args.max_breadth, 5, 1, 20, 'max_breadth'), limit: integer(args.limit, 10, 1, 20, 'limit'), allow_external: false, timeout: 30 };
-        if (args.instructions !== undefined) mapBody.instructions = boundedString(args.instructions, 'instructions', 1000);
-        if (args.select_paths !== undefined) mapBody.select_paths = stringList(args.select_paths, 20, 'select_paths');
-        if (args.exclude_paths !== undefined) mapBody.exclude_paths = stringList(args.exclude_paths, 20, 'exclude_paths');
-        const response = await request('map', mapBody, apiKey, fetcher, baseUrl);
-        if (typeof response.base_url !== 'string' || !Array.isArray(response.results) || response.results.some(item => typeof item !== 'string')) throw new Error('Tavily map: invalid response');
-        const mapped = response.results.map(item => redact(item as string));
-        return boundedOutput({ base_url: redact(response.base_url), result_count: mapped.length, results: mapped, truncated: false }, []);
-      }
-      const response = await request('usage', undefined, apiKey, fetcher, baseUrl);
-      if (!isRecord(response.key) || !isRecord(response.account)) throw new Error('Tavily usage: invalid response');
-      return boundedUsageOutput(redactDeep(response, apiKey));
+      if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+      if (partial) return boundPoolOutput({ ...partial, attempts });
+      if (empty) return boundPoolOutput({ ...empty, attempts });
+      const failed = attempts.some(item => technical.has(item.outcome as Kind));
+      throw new WebPoolError(`no usable ${operation} result (${attempts.map(item => `${item.provider}:${item.outcome}`).join(', ')})`, failed);
     },
   };
 }
 
-async function request(endpoint: 'search' | 'extract' | 'map' | 'usage', body: Record<string, unknown> | undefined, apiKey: string, fetcher: typeof fetch, baseUrl: string): Promise<Record<string, unknown>> {
-  const signal = AbortSignal.timeout(endpoint === 'map' ? 35_000 : 30_000);
-  let response: Response;
-  try {
-    response = await fetcher(`${baseUrl}/${endpoint}`, {
-      method: endpoint === 'usage' ? 'GET' : 'POST',
-      headers: { authorization: `Bearer ${apiKey}`, ...(body ? { 'content-type': 'application/json' } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-      signal,
-      redirect: 'error',
-    });
-  } catch {
-    throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : 'request failed'}`);
-  }
-  if (!response.ok) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`Tavily ${endpoint}: HTTP ${response.status}`);
-  }
-  if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`Tavily ${endpoint}: response exceeds 5 MiB limit`);
-  }
-  if (!response.body) throw new Error(`Tavily ${endpoint}: invalid response`);
-  let bytes: Buffer;
-  try { bytes = await readResponseBytes(response, RESPONSE_LIMIT); }
-  catch (error) {
-    throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : error instanceof ResponseSizeLimitError ? 'response exceeds 5 MiB limit' : 'response read failed'}`);
-  }
-  let result: unknown;
-  try { result = JSON.parse(bytes.toString('utf8')); }
-  catch { throw new Error(`Tavily ${endpoint}: invalid response`); }
-  if (!isRecord(result)) throw new Error(`Tavily ${endpoint}: invalid response`);
-  return result;
+function supportsAnySearch(operation: Operation, body: Record<string, unknown>): boolean {
+  if (operation === 'fetch') return true;
+  return body.search_depth === 'basic' && (body.topic === undefined || body.topic === 'general') && !body.country && !body.start_date && !body.end_date && !body.time_range && !body.include_domains_mode && !(body.include_domains as unknown[] | undefined)?.length && !(body.exclude_domains as unknown[] | undefined)?.length && Number(body.max_results) <= 10;
 }
-
-function boundedOutput<T extends { truncated: boolean }>(result: T, contents: { content: string; truncated: boolean }[]): T {
-  const size = () => Buffer.byteLength(JSON.stringify(result), 'utf8');
-  if (size() <= OUTPUT_LIMIT) return result;
+async function anysearch(operation: Operation, body: Record<string, unknown>, base: string, key: string, transport: typeof fetch, signal: AbortSignal): Promise<Record<string, unknown>> {
+  const payload = operation === 'search' ? { query: body.query, max_results: body.max_results, format: 'json' } : { url: (body.urls as string[])[0] };
+  const response = await transport(`${base.replace(/\/+$/, '')}/${operation === 'search' ? 'search' : 'extract'}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(payload), signal, redirect: 'error' });
+  if (Number(response.headers.get('content-length')) > 5 * 1024 * 1024) { await response.body?.cancel().catch(() => {}); throw new ProviderError('parse'); }
+  let data: unknown;
+  try { data = JSON.parse((await withWebSignal(readResponseBytes(response, 5 * 1024 * 1024, signal), signal)).toString('utf8')); }
+  catch { throw new ProviderError(signal.aborted ? 'timeout' : 'parse'); }
+  // Never log message: 402 responses may contain generated account credentials.
+  if (!record(data) || data.code !== 0 || !record(data.data)) throw new ProviderError('parse');
+  if (operation === 'search') {
+    if (!Array.isArray(data.data.results)) throw new ProviderError('parse');
+    const results = data.data.results.map(item => {
+      if (!record(item) || typeof item.title !== 'string' || typeof item.url !== 'string' || (item.snippet !== undefined && typeof item.snippet !== 'string')) throw new ProviderError('parse');
+      return { title: item.title, url: item.url, content: item.snippet ?? '', truncated: false, content_scope: 'search_snippet' };
+    }).slice(0, Number(body.max_results));
+    return { query: body.query, result_count: results.length, results, truncated: false };
+  }
+  if (data.data.url !== (body.urls as string[])[0] || typeof data.data.content !== 'string') throw new ProviderError('parse');
+  // The API may return cleaned HTML, JSON or text; do not pretend this is necessarily Markdown.
+  return { url: data.data.url, content: data.data.content, content_format: 'provider_content', truncated: false };
+}
+function supportsFirecrawl(operation: Operation, body: Record<string, unknown>): boolean {
+  if (operation === 'fetch') return true;
+  // Conservatively skip filters whose semantics have not been live evaluated. Never silently drop them.
+  if (body.search_depth !== 'basic' || (body.topic !== undefined && body.topic !== 'general') || body.country || body.start_date || body.end_date || body.time_range || body.include_domains_mode === 'prefer' || String(body.query).length > 500) return false;
+  const include = body.include_domains as string[] | undefined, exclude = body.exclude_domains as string[] | undefined;
+  return !(include?.length && exclude?.length) && ![...(include ?? []), ...(exclude ?? [])].some(domain => domain.startsWith('*.'));
+}
+async function firecrawl(operation: Operation, body: Record<string, unknown>, base: string, key: string, transport: typeof fetch, signal: AbortSignal): Promise<{ result: Record<string, unknown>; actualCredits?: number }> {
+  const payload = operation === 'search' ? { query: body.query, limit: body.max_results, sources: ['web'], highlights: false, ...(Array.isArray(body.include_domains) && body.include_domains.length ? { includeDomains: body.include_domains } : {}), ...(Array.isArray(body.exclude_domains) && body.exclude_domains.length ? { excludeDomains: body.exclude_domains } : {}), timeout: 15_000 }
+    : { url: (body.urls as string[])[0], formats: ['markdown'], onlyMainContent: true, onlyCleanContent: false, proxy: 'basic', parsers: [], skipTlsVerification: false, timeout: 15_000, storeInCache: false };
+  const response = await transport(`${base.replace(/\/+$/, '')}/${operation === 'search' ? 'search' : 'scrape'}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(payload), signal, redirect: 'error' });
+  if (Number(response.headers.get('content-length')) > 5 * 1024 * 1024) { await response.body?.cancel().catch(() => {}); throw new ProviderError('parse'); }
+  let data: unknown;
+  try { data = JSON.parse((await withWebSignal(readResponseBytes(response, 5 * 1024 * 1024, signal), signal)).toString('utf8')); }
+  catch { throw new ProviderError(signal.aborted ? 'timeout' : 'parse'); }
+  if (!record(data)) throw new ProviderError('parse');
+  if (data.success !== true) throw new ProviderError(data.code === 'insufficient_credits' ? 'quota' : 'parse');
+  if (!record(data.data)) throw new ProviderError('parse');
+  const actualCredits = number(data.creditsUsed);
+  if (operation === 'search') {
+    if (!Array.isArray(data.data.web)) throw new ProviderError('parse');
+    const results = data.data.web.map(item => {
+      if (!record(item) || typeof item.title !== 'string' || typeof item.url !== 'string' || typeof item.description !== 'string') throw new ProviderError('parse');
+      try { if (!['http:', 'https:'].includes(new URL(item.url).protocol)) throw new Error(); } catch { throw new ProviderError('parse'); }
+      return { title: item.title, url: item.url, content: item.description, truncated: false };
+    }).filter(item => domainAllowed(item.url, body)).slice(0, Number(body.max_results));
+    return { result: { query: body.query, result_count: results.length, results, truncated: false }, actualCredits };
+  }
+  const page = data.data, metadata = record(page.metadata) ? page.metadata : {};
+  if (metadata.statusCode === 404 || metadata.statusCode === 410) throw new ProviderError('not_found');
+  if (typeof metadata.statusCode === 'number' && metadata.statusCode >= 400) throw new ProviderError('source_unreadable');
+  if (metadata.error) throw new ProviderError('source_unreadable');
+  if (typeof page.markdown !== 'string') throw new ProviderError('parse');
+  const item = { url: (body.urls as string[])[0], content: page.markdown, truncated: Boolean(page.warning), ...(typeof metadata.url === 'string' ? { final_url: metadata.url } : {}), ...(typeof metadata.statusCode === 'number' ? { source_status: metadata.statusCode } : {}), ...(typeof metadata.contentType === 'string' ? { source_content_type: metadata.contentType } : {}) };
+  return { result: item, actualCredits };
+}
+function domainAllowed(value: string, body: Record<string, unknown>): boolean {
+  let host: string;
+  try { const url = new URL(value); if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return false; host = url.hostname.toLowerCase().replace(/\.$/, ''); } catch { return false; }
+  const match = (domain: string) => { const plain = domain.replace(/^\*\./, '').toLowerCase(); return host === plain || host.endsWith(`.${plain}`); };
+  const include = body.include_domains as string[] | undefined, exclude = body.exclude_domains as string[] | undefined;
+  return !(exclude?.some(match)) && (!include?.length || body.include_domains_mode === 'prefer' || include.some(match));
+}
+function classify(error: unknown, signal: AbortSignal): Kind {
+  if (error instanceof WebProviderError) return error.kind as Kind;
+  if (signal.aborted) return 'timeout';
+  if (error instanceof WebFetchExtractionError) return 'source_unreadable';
+  // Legacy adapter deliberately strips response bodies and underlying error messages.
+  const message = error instanceof Error ? error.message : '';
+  const status = /HTTP (\d+)/.exec(message)?.[1];
+  if (status) return ['401','403'].includes(status) ? 'auth' : ['402','432'].includes(status) ? 'quota' : ['404','410'].includes(status) ? 'endpoint' : status === '429' ? 'rate_limit' : Number(status) >= 500 ? 'upstream' : 'invalid_request';
+  if (message.includes('timed out')) return 'timeout';
+  if (message.includes('request failed')) return 'network';
+  return 'parse';
+}
+function assess(result: Record<string, unknown>, operation: Operation): 'success' | 'partial' | 'empty' | 'source_unreadable' | 'encoding_suspect' | 'not_found' {
+  if (operation === 'search') {
+    if (!Array.isArray(result.results)) throw new ProviderError('parse');
+    return result.results.length ? 'success' : 'empty';
+  }
+  const pages = Array.isArray(result.results) ? result.results : [result];
+  if (!pages.length) return 'source_unreadable';
+  for (const page of pages) {
+    if (!record(page) || typeof page.content !== 'string') throw new ProviderError('parse');
+    const text = page.content.trim();
+    const replacement = (text.match(/\uFFFD/g) ?? []).length;
+    const latinExtended = (text.match(/[\u0100-\u02ff]/g) ?? []).length;
+    const greek = (text.match(/[\u0370-\u03ff]/g) ?? []).length;
+    const cjk = (text.match(/[\u3400-\u9fff]/g) ?? []).length;
+    // A conservative corruption heuristic, not a guarantee of correct character decoding.
+    // GBK mis-decoded and then stripped by providers can lose U+FFFD but retain mixed-script fragments.
+    if ((replacement >= 3 && replacement / text.length > 0.002) || (latinExtended >= 8 && greek >= 3 && cjk < latinExtended / 3 && (latinExtended + greek) / text.length > 0.02)) return 'encoding_suspect';
+    // Template-like short pages only; do not reject long articles that discuss CAPTCHAs or logins.
+    if (text.length < 300 && /^(?:#{1,6}\s*)?(?:404(?:[ :-]+(?:page )?not found)?|410[ :-]+gone)[.! ]*(?:\n|$)/i.test(text)) return 'not_found';
+    if (!text || (text.length < 2000 && /(?:^|\n)(?:#{1,6}\s*)?(?:just a moment|access denied|verify (?:that )?you are human|checking your browser|sign in to continue|log in to continue|請先登入|請驗證您是人類)[.!…\s]*(?:\n|$)/i.test(text))) return 'source_unreadable';
+  }
+  return result.truncated || pages.some(page => record(page) && page.truncated) ? 'partial' : 'success';
+}
+function decorate(result: Record<string, unknown>, provider: Provider, attempts: Attempt[], operation: Operation): Record<string, unknown> {
+  const add = (page: Record<string, unknown>) => ({ ...page, provider, ...(operation === 'fetch' ? { status: page.truncated ? 'partial' : 'available', completeness: 'unverified' } : {}) });
+  return { ...add(result), ...(Array.isArray(result.results) ? { results: result.results.map(item => record(item) ? add(item) : item) } : {}), attempts: [...attempts] };
+}
+function redactObject(value: Record<string, unknown>, redact: (value: string) => string): Record<string, unknown> {
+  return JSON.parse(redact(JSON.stringify(value))) as Record<string, unknown>;
+}
+function boundPoolOutput(result: Record<string, unknown>): Record<string, unknown> {
+  const limit = 64 * 1024 - 256, size = () => Buffer.byteLength(JSON.stringify(result));
+  const pages = (Array.isArray(result.results) ? result.results : [result]).filter(record);
+  if (size() <= limit) return result;
   result.truncated = true;
-  const originals = contents.map(item => item.content);
-  for (const item of contents) { item.truncated = item.content.length > 0; item.content = ''; }
-  if (size() > OUTPUT_LIMIT) throw new Error('Tavily: result metadata exceeds 64 KiB output limit');
-  for (let i = 0; i < contents.length; i++) {
-    const item = contents[i]!, original = originals[i]!;
+  for (const page of pages) {
+    if (typeof page.content !== 'string') continue;
+    const original = page.content;
+    page.content = ''; page.truncated = true;
+    if ('status' in page) page.status = 'partial';
     let low = 0, high = original.length;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      item.content = original.slice(0, middle);
-      item.truncated = middle < original.length;
-      if (size() <= OUTPUT_LIMIT) low = middle;
-      else high = middle - 1;
-    }
-    if (low < original.length && /[\uD800-\uDBFF]/.test(original[low - 1] ?? '')) low--;
-    item.content = original.slice(0, low);
-    item.truncated = low < original.length;
+    while (low < high) { const mid = Math.ceil((low + high) / 2); page.content = original.slice(0,mid); if (size() <= limit) low = mid; else high = mid - 1; }
+    if (low > 0 && /[\uD800-\uDBFF]/.test(original[low - 1]!)) low--;
+    page.content = original.slice(0,low);
+    if (size() <= limit) break;
   }
-  result.truncated = true;
+  if (size() > limit) throw new ProviderError('parse');
+  if ('status' in result) result.status = 'partial';
   return result;
-}
-function boundedUsageOutput(value: unknown): unknown {
-  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > OUTPUT_LIMIT) {
-    throw new Error('Tavily usage: result metadata exceeds 64 KiB output limit');
-  }
-  return value;
-}
-
-function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new ToolUsageError(`${name} must be a non-empty string`);
-  return value.trim();
-}
-function boundedString(value: unknown, name: string, max: number): string {
-  const result = requiredString(value, name);
-  if (result.length > max) throw new ToolUsageError(`${name} must be at most ${max} characters`);
-  return result;
-}
-function integer(value: unknown, fallback: number, min: number, max: number, name: string): number {
-  const result = value ?? fallback;
-  if (!Number.isSafeInteger(result) || (result as number) < min || (result as number) > max) throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`);
-  return result as number;
-}
-function oneOf<T extends string>(value: unknown, fallback: T, allowed: readonly T[], name: string): T {
-  const result = value ?? fallback;
-  if (typeof result !== 'string' || !allowed.includes(result as T)) throw new ToolUsageError(`${name} must be one of the supported values`);
-  return result as T;
-}
-function validDate(value: unknown, name: string): string {
-  const result = requiredString(value, name);
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(result) || !Number.isFinite(Date.parse(`${result}T00:00:00Z`)) || new Date(`${result}T00:00:00Z`).toISOString().slice(0, 10) !== result) throw new ToolUsageError(`${name} must be a valid YYYY-MM-DD date`);
-  return result;
-}
-function stringList(value: unknown, max: number, name: string): string[] {
-  if (!Array.isArray(value) || value.length > max || value.some(item => typeof item !== 'string' || !item.trim())) throw new ToolUsageError(`${name} must be an array of 1-${max} non-empty strings`);
-  return value.map(item => (item as string).trim());
-}
-function domainList(value: unknown, max: number, name: string): string[] {
-  const domains = stringList(value, max, name);
-  if (domains.some(domain => !/^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(domain))) {
-    throw new ToolUsageError(`${name} must contain valid domain names`);
-  }
-  return domains;
-}
-function validUrl(value: unknown): string {
-  const url = requiredString(value, 'url');
-  let parsed: URL;
-  try { parsed = new URL(url); } catch { throw new ToolUsageError('url must be an HTTP(S) URL without credentials'); }
-  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
-    throw new ToolUsageError('url must be an HTTP(S) URL without credentials');
-  }
-  return url;
-}
-function validateUrls(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new ToolUsageError('urls must contain 1 to 20 HTTP(S) URLs');
-  return value.map(validUrl);
-}
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function redactDeep(value: unknown, apiKey: string): unknown {
-  if (typeof value === 'string') return value.replaceAll(apiKey, '[redacted]');
-  if (Array.isArray(value)) return value.map(item => redactDeep(item, apiKey));
-  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, redactDeep(item, apiKey)]));
-  return value;
 }

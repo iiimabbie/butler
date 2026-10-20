@@ -30,7 +30,7 @@ try {
     prepareDatabaseDirectory(dbPath);
     const store = new Store(dbPath, { alertChannelIds: configuredAlertChannelIds(config), timezone: config.schedule?.timezone ?? 'Asia/Taipei' });
     let current: RuntimeBundle;
-    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime(candidate.web), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger' }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
+    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime({ ...candidate.web, statePath: fileURLToPath(new URL('../.data/web-pool-usage.json', import.meta.url)) }), hledgerTools: createHledgerToolRuntime(candidate.hledger ?? { enabled:false, journalPath:fileURLToPath(new URL('../.data/finance/main.journal', import.meta.url)), executablePath:'/usr/bin/hledger' }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
     current = buildBundle(config);
     store.setAlertChannelIds(configuredAlertChannelIds(config));
     const closeSettingsWatch = store.watchFileSettings((error, file) => logWarn('File-backed settings reload rejected; retaining last valid snapshot', error, { file }));

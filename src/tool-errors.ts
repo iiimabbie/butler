@@ -32,3 +32,13 @@ export class DiscordReactionInputError extends Error {
     this.name = 'DiscordReactionInputError';
   }
 }
+
+/** Safe, classified pool failure; the caller owns the single aggregated notification. */
+export class WebPoolError extends Error {
+  constructor(reason: string, readonly notify: boolean) {
+    super(`Web pool: ${reason}`); this.name = 'WebPoolError';
+  }
+}
+export class WebProviderError extends Error {
+  constructor(readonly kind: string) { super(`Web provider: ${kind}`); this.name = 'WebProviderError'; }
+}

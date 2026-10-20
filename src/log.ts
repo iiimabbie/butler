@@ -16,7 +16,7 @@ export type LogMethods = { logInfo: typeof logInfo; logWarn: typeof logWarn; log
 export function configureLogging(config: ButlerConfig): void {
   const discord = config.discord;
   webhookUrl = discord?.errorWebhookUrl; mentionUserId = discord?.errorWebhookMentionUserId; threadId = discord?.errorWebhookThreadId;
-  secrets = [discord?.token, config.llm?.apiKey, config.web?.apiKey, config.google?.clientSecret, config.image?.apiKey, discord?.errorWebhookUrl].filter((value): value is string => Boolean(value));
+  secrets = [discord?.token, config.llm?.apiKey, config.web?.tavily?.apiKey, config.web?.firecrawl?.apiKey, config.web?.anysearch?.apiKey, config.google?.clientSecret, config.image?.apiKey, discord?.errorWebhookUrl].filter((value): value is string => Boolean(value));
 }
 function redact(value: string): string {
   let result = value;

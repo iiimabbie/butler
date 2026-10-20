@@ -2,6 +2,7 @@ import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { isAbsolute, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
+import type { WebConfig } from './web-tools.js';
 import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 import type { LogMethods } from './log.js';
@@ -10,7 +11,7 @@ export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
   discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
-  web?: { provider: 'tavily'; baseUrl?: string; apiKey?: string };
+  web?: WebConfig;
   hledger?: { enabled: boolean; journalPath: string; executablePath: string };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
   paths?: { database?: string; attachments?: string };
@@ -75,10 +76,38 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (!isAbsolute(executablePath)) throw new Error('Butler config hledger.executablePath must be absolute');
       config.hledger = { enabled, journalPath, executablePath };
     } else if (name === 'web') {
-      if (section.provider !== 'tavily') throw new Error('Butler config web.provider must be tavily');
-      const baseUrl = string('baseUrl');
-      if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'web.baseUrl');
-      config.web = { provider: 'tavily', baseUrl, apiKey: string('apiKey') };
+      for (const field of ['provider','apiKey','baseUrl']) if (section[field] !== undefined) throw new Error(`Butler config web.${field} is no longer supported; configure web.tavily instead`);
+      config.web = {};
+      if (section.pool !== undefined) {
+        if (!isRecord(section.pool)) throw new Error('Butler config web.pool must be an object');
+        const pool = section.pool;
+        const order = (field: string): ('tavily' | 'firecrawl' | 'anysearch')[] | undefined => {
+          const value = pool[field];
+          if (value === undefined) return undefined;
+          if (!Array.isArray(value) || !value.length || value.length > 3 || new Set(value).size !== value.length || value.some(item => !['tavily','firecrawl','anysearch'].includes(item))) throw new Error(`Butler config web.pool.${field} must contain unique supported providers`);
+          return value;
+        };
+        const limit = (field: string, min: number, max: number): number | undefined => {
+          const value = pool[field];
+          if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max)) throw new Error(`Butler config web.pool.${field} is outside its allowed range`);
+          return value as number | undefined;
+        };
+        if (pool.tavilyDailyRequestLimit !== undefined) throw new Error('Butler config web.pool.tavilyDailyRequestLimit is no longer supported; configure web.tavily.dailyRequestLimit');
+        config.web.pool = { searchOrder: order('searchOrder'), fetchOrder: order('fetchOrder'), searchTimeoutMs: limit('searchTimeoutMs',1,120000), fetchTimeoutMs: limit('fetchTimeoutMs',1,120000), attemptTimeoutMs: limit('attemptTimeoutMs',1,45000), maxAttempts: limit('maxAttempts',1,3) };
+      }
+      for (const provider of ['tavily','firecrawl','anysearch'] as const) {
+        if (section[provider] !== undefined) {
+          if (!isRecord(section[provider])) throw new Error(`Butler config web.${provider} must be an object`);
+          const providerConfig = section[provider];
+          if (providerConfig.enabled !== undefined && typeof providerConfig.enabled !== 'boolean') throw new Error(`Butler config web.${provider}.enabled must be boolean`);
+          for (const field of ['apiKey','baseUrl']) if (providerConfig[field] !== undefined && (typeof providerConfig[field] !== 'string' || !String(providerConfig[field]).trim())) throw new Error(`Butler config web.${provider}.${field} must be a nonempty string`);
+          if (providerConfig.baseUrl !== undefined) validateHttpUrl(String(providerConfig.baseUrl), `web.${provider}.baseUrl`);
+          const daily = providerConfig.dailyRequestLimit;
+          if (daily !== undefined && (!Number.isSafeInteger(daily) || Number(daily) < 0 || Number(daily) > 10000)) throw new Error(`Butler config web.${provider}.dailyRequestLimit must be an integer from 0 to 10000`);
+          if (providerConfig.enabled === true && (!providerConfig.apiKey || daily === undefined)) throw new Error(`Enabled ${provider} requires an API key and explicit dailyRequestLimit`);
+          config.web[provider] = { enabled: providerConfig.enabled as boolean | undefined, apiKey: providerConfig.apiKey as string | undefined, baseUrl: providerConfig.baseUrl as string | undefined, dailyRequestLimit: daily as number | undefined };
+        }
+      }
     } else if (name === 'paths') {
       const database = string('database');
       const attachments = string('attachments');
