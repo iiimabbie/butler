@@ -10,14 +10,14 @@ import { isAuthorizedFinanceOrigin } from './finance-origin.js';
 export type HledgerConfig = { enabled: boolean; journalPath: string; executablePath: string };
 const str = { type: 'string', minLength: 1 };
 const date = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' };
-const posting = { type: 'object', properties: { account: str, amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, cost_currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' } }, required: ['account','amount','currency'], additionalProperties: false };
+const posting = { type: 'object', properties: { account: str, amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, cost_currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_type: { type: 'string', enum: ['unit','total'] } }, required: ['account','amount','currency'], additionalProperties: false };
 const tool = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 export const hledgerDefinitions = [
   tool('hledger_accounts', '查詢 hledger 科目 metadata 與指定日期各原幣餘額。', { as_of: date, account: str }, []),
   tool('hledger_account_manage', '建立或更新受控科目 metadata；hide 只隱藏不刪歷史。只接受結構化名稱、類型、幣別與備註，不接受 journal 片段。', { action:{type:'string',enum:['create','update','hide','show']}, name:str, type:{type:'string',enum:['asset','liability','equity','income','expense']}, currency:{type:'string',pattern:'^[A-Z][A-Z0-9]{2,11}$'}, note:{type:'string',maxLength:200} }, ['action','name']),
   tool('hledger_schedules_list', '查詢月／雙月 periodic 規劃與啟停狀態。規則只供 forecast/budget，不代表實際付款。', {}, []),
   tool('hledger_schedule_manage', '新增、修改、啟用、停用或刪除月／雙月規劃。結構化生成 periodic 規則；不自動入帳為實際交易。', {action:{type:'string',enum:['create','update','enable','disable','delete']},schedule_id:{type:'string',pattern:'^[A-Za-z0-9._:-]{1,120}$'},name:str,frequency:{type:'string',enum:['monthly','bimonthly']},start_date:date,postings:{type:'array',minItems:2,maxItems:30,items:posting}},['action','schedule_id']),
-  tool('hledger_post', '新增、修改或刪除一筆多 postings 帳務交易。source_id 為穩定外部唯一識別；重複建立會拒絕。金額方向依帳戶類型確認。每 posting 一科目，可拆分帳單；換匯以 cost_amount/cost_currency 表示成本。', { action: { type: 'string', enum: ['create','update','delete'] }, source_id: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,120}$' }, date, description: str, postings: { type: 'array', minItems: 2, maxItems: 30, items: posting } }, ['action','source_id']),
+  tool('hledger_post', '新增、修改或刪除一筆多 postings 帳務交易。source_id 為穩定外部唯一識別；重複建立會拒絕。金額方向依帳戶類型確認。每 posting 一科目，可拆分帳單；換匯／證券以 cost_amount/cost_currency 表示成本，cost_type=unit 為單價（預設），total 為整筆總成本；證券代碼可含數字。', { action: { type: 'string', enum: ['create','update','delete'] }, source_id: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,120}$' }, date, description: str, postings: { type: 'array', minItems: 2, maxItems: 30, items: posting } }, ['action','source_id']),
   tool('hledger_reconcile', '核對某帳戶指定日期銀行餘額；差額以 equity:reconciliation 新增獨立調整分錄，並在同日 posting 上附 balance assertion。從不改寫既有歷史、絕不記收入/支出。需要來源識別碼。', { account: str, date, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, target_balance: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, source_id: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,120}$' } }, ['account','date','currency','target_balance','source_id']),
   tool('hledger_reconciliation_reopen', '明確重開指定帳戶/幣別 from_date 起的 runtime 校正；只移除可精確驗證的本工具校正分錄及 assertion，保留業務交易。外部/不明 assertion 或多帳戶調整會拒絕；成功只回報待重對清單，不代表已對帳。', {account:str,currency:{type:'string',pattern:'^[A-Z][A-Z0-9]{2,11}$'},from_date:date,reason:{type:'string',minLength:1,maxLength:300}}, ['account','currency','from_date','reason']),
   tool('hledger_forecast', '以 hledger periodic rules 查詢預測；結果是虛擬 forecast，不會寫成實際帳務。', { begin: date, end: date }, ['begin','end']),
@@ -28,7 +28,7 @@ export const hledgerDefinitions = [
   tool('hledger_operations_list', '查看獨立持久操作紀錄的狀態與來源 ID；不包含帳本交易內容。', {}, []),
 ] as const;
 
-type Posting = { account: string; amount: string; currency: string; cost_amount?: string; cost_currency?: string };
+type Posting = { account: string; amount: string; currency: string; cost_amount?: string; cost_currency?: string; cost_type?: 'unit' | 'total' };
 type Args = Record<string, unknown>;
 const ID = /^[A-Za-z0-9._:-]{1,120}$/;
 const ACCOUNT = /^[\p{L}\p{N}][\p{L}\p{N}\p{M} _:-]{0,159}$/u;
@@ -96,14 +96,17 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     if (/^\s*(?:include|source)\s+/im.test(text)) throw new ToolUsageError('目前不接受 include/source 外部帳本檔，避免寫入範圍外。');
     return text;
   }
-  function transaction(sourceId: string, day: string, description: string, postings: Posting[], assertion?: { account: string; currency: string; amount: string }): string {
+  function transaction(sourceId: string, day: string, description: string, postings: Posting[], assertion?: { account: string; currency: string; amount: string }, legacyFormat = false): string {
     if (!ID.test(sourceId) || !validDate(day) || !description.trim() || description.length > 300 || postings.length < 2 || postings.length > 30) throw new ToolUsageError('交易欄位無效。');
     const rows = postings.map(p => {
       if (!ACCOUNT.test(p.account) || !MONEY.test(p.amount) || !CURRENCY.test(p.currency)) throw new ToolUsageError('posting 科目、金額或幣別格式無效。');
       if ((p.cost_amount === undefined) !== (p.cost_currency === undefined) || (p.cost_amount !== undefined && (!MONEY.test(p.cost_amount) || !CURRENCY.test(p.cost_currency!)))) throw new ToolUsageError('換匯 cost 欄位須成對且格式正確。');
-      return `    ${p.account.padEnd(40)} ${p.currency} ${p.amount}${p.cost_amount === undefined ? '' : ` @ ${p.cost_currency} ${p.cost_amount}`}`;
+      if (p.cost_type !== undefined && (!['unit','total'].includes(p.cost_type) || p.cost_amount === undefined)) throw new ToolUsageError('cost_type 須為 unit 或 total，且須提供成本欄位。');
+      // hledger requires at least two spaces after an account; a single space
+      // silently becomes part of long account names. Digit commodities must be quoted.
+      return `    ${p.account.padEnd(40)}${legacyFormat ? ' ' : '  '}${legacyFormat ? p.currency : commodity(p.currency)} ${p.amount}${p.cost_amount === undefined ? '' : ` ${p.cost_type === 'total' ? '@@' : '@'} ${legacyFormat ? p.cost_currency : commodity(p.cost_currency!)} ${p.cost_amount}`}`;
     });
-    if (assertion) rows[0] += ` = ${assertion.currency} ${assertion.amount}`;
+    if (assertion) rows[0] += ` = ${legacyFormat ? assertion.currency : commodity(assertion.currency)} ${assertion.amount}`;
     return `${day} ${description.replace(/[\r\n;]/g, ' ').trim()}  ; source-id=${sourceId}\n${rows.join('\n')}\n`;
   }
   function periodicRule(rule: ScheduleMetadata): string {
@@ -193,9 +196,9 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
       if (validDate(line.slice(0,10))) { date=line.slice(0,10); sourceId=/; source-id=([^\s]+)/.exec(line)?.[1]; continue; }
       if (!line.trim() || line.trimStart().startsWith('~')) { date=undefined; sourceId=undefined; continue; }
       if (!date || !line.includes('=')) continue;
-      const tokens=line.trim().split(/\s+/), index=tokens.findIndex((token,i)=>i>0&&CURRENCY.test(token)&&i+2<tokens.length&&MONEY.test(tokens[i+1]!));
-      if(index<1||!tokens.includes('=',index+2)) continue;
-      records.push({account:tokens.slice(0,index).join(' '),currency:tokens[index]!,date,raw:line,...(sourceId?{sourceId}:{})});
+      const ref = postingReference(line);
+      if (!ref || !/\s=\s/.test(line)) continue;
+      records.push({...ref,date,raw:line,...(sourceId?{sourceId}:{})});
     }
     return records;
   }
@@ -332,7 +335,7 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
       if(!targetOp || !(targetOp.result as any)?.target_balance) throw new ToolUsageError(`備份會移除 ${account} ${currency} 的 cutoff ${day}；拒絕還原以免暗中解除校正。`);
       const output=await run(['-f',candidatePath,'balance','--flat','--end',nextDate(day),account]);
       const escaped=account.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-      const pattern=new RegExp(`^\\s*${currency}\\s+(-?(?:\\d+)(?:\\.\\d+)?)\\s+${escaped}\\s*$`);
+      const pattern=new RegExp(`^\\s*"?${currency}"?\\s+(-?(?:\\d+)(?:\\.\\d+)?)\\s+${escaped}\\s*$`);
       const values=output.split('\n').map(line=>pattern.exec(line)?.[1]).filter((x):x is string=>x!==undefined);
       if(values.length!==1 || values[0]!==String((targetOp.result as any).target_balance)) throw new ToolUsageError(`備份無法證明還原後 ${account} ${currency} ${day} 仍符合校正目標；拒絕還原。`);
       preserve.push(targetOp.sourceId!);
@@ -349,9 +352,8 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
         const start = offset; let end = offset + lines[i]!.length + 1; let j = i + 1;
         const postings: SourceRef[] = [];
         for (; j < lines.length && lines[j]!.trim() !== ''; j++) {
-          const tokens = lines[j]!.trim().split(/\s+/);
-          const currencyIndex = tokens.findIndex((token, index) => index > 0 && CURRENCY.test(token));
-          if (currencyIndex > 0) postings.push({ account: tokens.slice(0,currencyIndex).join(' '), currency: tokens[currencyIndex]! });
+          const ref = postingReference(lines[j]!);
+          if (ref) postings.push(ref);
           end += lines[j]!.length + 1;
         }
         result.push({ id: header[2]!, date: header[1]!, index: start, length: end - start, postings });
@@ -462,7 +464,8 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
           if(result.adjusted){
             if(matches.length!==1||typeof result.delta!=='string'||typeof result.target_balance!=='string') throw new ToolUsageError(`Runtime reconciliation ${sourceId} cannot be uniquely verified; no changes made.`);
             const expected=transaction(sourceId,result.date,'Balance reconciliation adjustment',[{account,amount:result.delta,currency},{account:'equity:reconciliation',amount:decimal(-Number(result.delta)),currency}],{account,currency,amount:result.target_balance});
-            const block=matches[0]!; if(text.slice(block.index,block.index+block.length)!==expected) throw new ToolUsageError(`Runtime reconciliation ${sourceId} was changed or is not the expected single-account adjustment; no changes made.`);
+            const legacyExpected=transaction(sourceId,result.date,'Balance reconciliation adjustment',[{account,amount:result.delta,currency},{account:'equity:reconciliation',amount:decimal(-Number(result.delta)),currency}],{account,currency,amount:result.target_balance},true);
+            const block=matches[0]!; if(![expected,legacyExpected].includes(text.slice(block.index,block.index+block.length))) throw new ToolUsageError(`Runtime reconciliation ${sourceId} was changed or is not the expected single-account adjustment; no changes made.`);
             removeBlocks.push({index:block.index,length:block.length,sourceId}); allowedAssertions.add(sourceId);
           } else if(matches.length) throw new ToolUsageError(`Zero-difference reconciliation ${sourceId} unexpectedly has a journal transaction; no changes made.`);
           targets.push({source_id:sourceId,date:result.date,target_balance:result.target_balance,delta:result.delta??'0',adjusted:result.adjusted===true});
@@ -497,7 +500,7 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
       const text = await readJournal(); if (text.includes(`source-id=${sourceId}`)) throw new ToolUsageError('source_id already exists; no write performed.');
       const actualOutput = await run(['-f',journal,'balance','--flat','--end',nextDate(day),account]);
       const escapedAccount = account.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
-      const balances = actualOutput.split(/\r?\n/).map(line => new RegExp(`^\\s*${currency}\\s+(-?(?:\\d+)(?:\\.\\d+)?)\\s+${escapedAccount}\\s*$`).exec(line)?.[1]).filter((x): x is string => x !== undefined);
+      const balances = actualOutput.split(/\r?\n/).map(line => new RegExp(`^\\s*"?${currency}"?\\s+(-?(?:\\d+)(?:\\.\\d+)?)\\s+${escapedAccount}\\s*$`).exec(line)?.[1]).filter((x): x is string => x !== undefined);
       if (balances.length !== 1) throw new ToolUsageError(`Could not unambiguously read ${currency} balance for ${account}; no adjustment made.`);
       const current = Number(balances[0]), desired = Number(target), delta = desired-current; if (!Number.isFinite(delta)) throw new ToolUsageError('Balance calculation failed.');
       if (delta === 0) return { adjusted: false, account, date: day, currency, current_balance: balances[0], target_balance: target };
@@ -549,3 +552,13 @@ function validDate(value: string): boolean { const m=/^(\d{4})-(\d{2})-(\d{2})$/
 function nextDate(value: string): string { const d=new Date(`${value}T00:00:00Z`); d.setUTCDate(d.getUTCDate()+1); return d.toISOString().slice(0,10); }
 function addDays(value: string, days: number): string { const d=new Date(`${value}T00:00:00Z`); d.setUTCDate(d.getUTCDate()+days); return d.toISOString().slice(0,10); }
 function decimal(value: number): string { return value.toFixed(8).replace(/\.?0+$/,'') || '0'; }
+
+// Only digit-bearing commodities need quoting; preserve established money output.
+function commodity(value: string): string { return /\d/.test(value) ? `"${value}"` : value; }
+function postingReference(line: string): SourceRef | undefined {
+  // Accept both current two-space separation and historical one-space output.
+  // Anchor the amount, rather than mistaking an uppercase word in an account for a commodity.
+  const match = /^\s+(.+?)\s+(?:"([A-Z][A-Z0-9]{2,11})"|([A-Z][A-Z0-9]{2,11}))\s+(-?(?:0|[1-9]\d*)(?:\.\d+)?)(?=\s|$)/.exec(line);
+  if (!match || !ACCOUNT.test(match[1]!)) return undefined;
+  return { account: match[1]!, currency: (match[2] ?? match[3])! };
+}
