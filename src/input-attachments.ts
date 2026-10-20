@@ -136,7 +136,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       continue;
     }
     let data: string;
-    let inputMimeType = attachment.mimeType;
+    let inputMimeType = safeMime(attachment.mimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
     try {
       const path = safeLocalPath(attachment.localPath, attachmentDir);
       const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -155,8 +155,18 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
           }
           continue;
         }
-        const imageType = resolveSupportedImageType(raw, attachment.filename, attachment.mimeType);
+        // Historical/outgoing metadata may classify the same SVG as image/svg+xml or text/plain.
+        // Neither representation is a supported native model upload; keep the original, not a mislabeled payload.
+        if (extension(attachment.filename) === '.svg' || inputMimeType === 'image/svg+xml') {
+          content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；SVG 不支援直接作為模型圖片或檔案輸入，原檔已保留，未轉檔或上傳；不能據此聲稱已讀取圖像內容。]` });
+          continue;
+        }
+        const imageType = resolveSupportedImageType(raw, attachment.filename, inputMimeType);
         if (imageType) inputMimeType = imageType.mimeType;
+        else if (inputMimeType.startsWith('image/')) {
+          content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；未辨識到支援的 PNG/JPEG/GIF/WebP 圖片簽章，原檔已保留，未上傳。]` });
+          continue;
+        }
         data = raw.toString('base64');
       } finally { closeSync(fd); }
     } catch (error) {
