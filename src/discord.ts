@@ -79,13 +79,15 @@ export class DiscordHandler {
   private deployCheckRunning = false;
   private deploymentPollPromise?: Promise<void>;
   private notificationClaimsPaused = false;
+  private startupRunningDeploymentId?: string;
   private readonly deploymentNotifications = new Set<Promise<boolean>>();
   private readonly deployPoll = (() => { const timer = setInterval(() => { if (!this.deployCheckRunning && !this.stopping) { this.deployCheckRunning = true; const poll = this.checkDeployRequest().then(() => this.processDeploymentResults()).catch(error => logError('Deployment handshake check failed', error, { mention: !isHttp429(error) })).finally(() => { this.deployCheckRunning = false; }); this.deploymentPollPromise = poll; void poll; } }, 250); timer.unref(); return timer; })();
   constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) {
     this.outputChannel = options.outputChannel ?? (async () => undefined);
     this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
     this.memoryCoordinator = options.memoryCoordinator;
-    this.store.recoverRunningDeployments();
+    const startupDeployment = this.store.activeDeploymentRequest();
+    if (startupDeployment?.status === 'running' && typeof startupDeployment.id === 'string') this.startupRunningDeploymentId = startupDeployment.id;
     this.localTools?.setDeploymentAdapter({
       accept: source => { const id = randomUUID(); if (this.store.createDeploymentRequest({ id, parentSession: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId, provenance: { sourceKind: source.sourceKind, ...(source.sourceEventId ? { eventId: source.sourceEventId } : {}), ...(source.sourceInputId ? { parentInputId: source.sourceInputId } : {}), ...(source.sourceTriggerInputId ? { triggerInputId: source.sourceTriggerInputId } : {}), ...(source.sourceParentSession ? { sourceParentSession: source.sourceParentSession } : {}) } })) return id; const existing = this.store.activeDeploymentRequest()?.id; if (typeof existing === 'string') return existing; throw new Error('Could not persist deployment request'); },
       pending: () => { const row = this.store.queuedDeploymentRequest(); return row?.id as string | undefined; },
@@ -696,13 +698,30 @@ export class DiscordHandler {
     const active = this.store.activeDeploymentRequest();
     if (active?.status === 'queued' && !this.stopping && !this.deploying) this.localTools?.startQueuedDeploy();
     if (active?.status === 'running' || active?.status === 'needs_reconciliation') {
-      const resultPath = join(root, '.data/deploy/runs', String(active.id), 'result.json');
-      if (existsSync(resultPath)) {
-        try {
-          const result = JSON.parse(readFileSync(resultPath, 'utf8')) as { id: string; status: string; [key: string]: unknown };
-          if (result.id === active.id && (result.status === 'completed' || result.status === 'failed')) this.store.completeDeployment(active.id as string, result.status, result);
-        } catch (error) { logError('Could not read deployment result record', error, { notify: false }); }
-      }
+      const runDirectory = join(root, '.data/deploy/runs', String(active.id));
+      const resultPath = join(runDirectory, 'result.json');
+      const collectResult = (): boolean => {
+        if (!existsSync(resultPath)) return false;
+        const result = JSON.parse(readFileSync(resultPath, 'utf8')) as { id: string; status: string; [key: string]: unknown };
+        if (result.id === active.id && (result.status === 'completed' || result.status === 'failed')) {
+          this.store.completeDeployment(active.id as string, result.status, result);
+          return true;
+        }
+        return false;
+      };
+      try {
+        if (!collectResult() && active.status === 'running') {
+          const markerPath = join(runDirectory, 'runner-started');
+          if (existsSync(markerPath)) {
+            const marker = JSON.parse(readFileSync(markerPath, 'utf8')) as { id?: unknown; pid?: unknown; startedAt?: unknown };
+            if (marker.id !== active.id || typeof marker.pid !== 'number' || !Number.isSafeInteger(marker.pid) || marker.pid <= 1 || typeof marker.startedAt !== 'string') throw new Error('Invalid deployment runner-started record');
+            const runnerAlive = isProcessAlive(marker.pid) && readFileSync(`/proc/${marker.pid}/cmdline`, 'utf8').split('\0').includes(String(active.id));
+            if (!runnerAlive && !collectResult()) this.store.completeDeployment(active.id as string, 'needs_reconciliation', { status: 'needs_reconciliation', reason: 'Deployment runner exited without a final result' });
+          } else if (this.startupRunningDeploymentId === active.id) {
+            this.store.completeDeployment(active.id as string, 'needs_reconciliation', { status: 'needs_reconciliation', reason: 'Deployment runner startup evidence unavailable' });
+          }
+        }
+      } catch (error) { logError('Could not read deployment result or runner record', error, { notify: false }); }
     }
     if (this.notificationClaimsPaused || this.stopping || this.deploying) return;
     for (const event of this.store.pendingDeploymentEvents()) {
@@ -743,9 +762,14 @@ export class DiscordHandler {
           },
           logSupplementError: error => logError(`Deployment result verification failed id=${event.id}`, error, { notify: false }),
         });
-        this.deploymentNotifications.add(notification);
-        try { await notification; }
-        finally { this.deploymentNotifications.delete(notification); if (this.deploying) void this.publishQuiesced(); }
+        const trackedNotification = notification.catch(error => {
+          logError(`Deployment result notification failed id=${event.id}`, error, { notify: false });
+          return false;
+        }).finally(() => {
+          this.deploymentNotifications.delete(trackedNotification);
+          if (this.deploying) void this.publishQuiesced();
+        });
+        this.deploymentNotifications.add(trackedNotification);
       } catch (error) {
         logError(`Deployment result notification failed id=${event.id}`, error, { notify: false });
       }

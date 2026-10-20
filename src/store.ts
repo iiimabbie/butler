@@ -761,17 +761,6 @@ export class Store implements SchedulerStore {
   }
   activeDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status IN ('queued','running','needs_reconciliation') ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
   queuedDeploymentRequest(): Record<string, unknown> | undefined { return this.db.prepare("SELECT * FROM deployment_requests WHERE status='queued' ORDER BY created_at LIMIT 1").get() as Record<string, unknown> | undefined; }
-  recoverRunningDeployments(): void {
-    this.db.exec('BEGIN IMMEDIATE'); try {
-      const rows=this.db.prepare("SELECT id FROM deployment_requests WHERE status='running'").all() as Array<{id:string}>;
-      const now=new Date().toISOString();
-      for (const row of rows) {
-        this.db.prepare("UPDATE deployment_requests SET status='needs_reconciliation',result_json=?,updated_at=? WHERE id=?").run(JSON.stringify({status:'needs_reconciliation',reason:'Service restarted while deployment was running; automatic replay refused'}),now,row.id);
-        this.db.prepare("INSERT OR IGNORE INTO deployment_result_events(id,deployment_id,status,created_at,updated_at) VALUES(?,?,'pending',?,?)").run(randomUUID(),row.id,now,now);
-      }
-      this.db.exec('COMMIT');
-    } catch(e) { this.db.exec('ROLLBACK'); throw e; }
-  }
   claimDeploymentRequest(id: string): boolean { return Number(this.db.prepare("UPDATE deployment_requests SET status='running',updated_at=? WHERE id=? AND status='queued'").run(new Date().toISOString(),id).changes)===1; }
   setDeploymentStatus(id: string, status: 'queued'|'running'|'completed'|'failed'|'interrupted'|'needs_reconciliation', result?: unknown): void {
     this.db.prepare('UPDATE deployment_requests SET status=?,result_json=COALESCE(?,result_json),updated_at=? WHERE id=?').run(status,result === undefined ? null : JSON.stringify(result),new Date().toISOString(),id);

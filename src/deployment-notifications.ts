@@ -27,7 +27,7 @@ export async function processDeploymentResultEvent(store: Store, event: Deployme
       if (!latest) throw new Error('Deployment result record is unavailable');
       const version = latest.version;
       const evidence = latest.result_json ? JSON.parse(latest.result_json) as Record<string, unknown> : { status: latest.status };
-      const content = `Internal deployment-result notice for deployment_id=${deploymentId}. Read the persistent result below and produce a natural, concise Traditional Chinese notification of the recorded outcome. If necessary, first use deployment_result_status to verify this deployment's latest persistent status. Do not claim that completion proves current service health. Do not deploy, modify files, or perform unrelated actions. If the evidence is insufficient, say so accurately. Persistent result: ${JSON.stringify(evidence)}`;
+      const content = `Deployment outcome for deployment_id=${deploymentId}. Reply with one or two short sentences stating the recorded deployment outcome and affected change. For completed deployments, report completion; for failures, give the concrete cause and next action; for unresolved outcomes, state the missing evidence and next action. Use deployment_result_status when current evidence is needed. Distinguish deployment readiness verification from feature acceptance. Persistent result: ${JSON.stringify(evidence)}`;
       const input = store.deploymentEventInput(eventId, session, content, { sourceKind: 'deployment_result', channelId: channel, authorId: typeof event.requester_id === 'string' ? event.requester_id : undefined } satisfies MessageSource, version);
       let stale = false;
       await dependencies.ask(input, content, {

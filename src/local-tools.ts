@@ -78,10 +78,10 @@ export class LocalToolRuntime {
       const externalSourceValid = source?.sourceKind === 'discord_external';
       if (!this.deploymentAdapter || !source?.sessionId || !source.channelId || (!internalSourceValid && !externalSourceValid)) throw new Error('Deployment request source metadata is unavailable; request was not queued');
       const existing = this.deploymentAdapter.active?.() ?? this.deploymentAdapter.pending();
-      if (existing) return { accepted: true, duplicate: true, deployment_id: existing, message: `部署已排隊，deployment_id=${existing}` };
+      if (existing) return { accepted: true, duplicate: true, deployment_id: existing, message: '部署已排隊，完成後回報結果。' };
       const id = this.deploymentAdapter.accept({ sessionId: source.sessionId, channelId: source.channelId, messageId: source.messageId, requesterId: source.requesterId, sourceKind: source.sourceKind!, sourceEventId: source.sourceEventId, sourceInputId: source.sourceInputId, sourceTriggerInputId: source.sourceTriggerInputId, sourceParentSession: source.sourceParentSession });
       this.deployPending = true;
-      return { accepted: true, deployment_id: id, message: `已受理，將在本輪結束後部署（${id}）。` };
+      return { accepted: true, deployment_id: id, message: '部署已排隊，完成後回報結果。' };
     }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');
