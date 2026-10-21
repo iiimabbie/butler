@@ -9,6 +9,7 @@ export const catalogDefinition = {
 export const residentToolNames: ReadonlySet<string> = new Set(['memory_recall','people_get','discord_fetch_message','discord_react','web_search','web_fetch','skills_list','skills_read']);
 const shortDescriptions: Record<string, string> = {
   tools_catalog: '列出可用工具並按名稱或關鍵字載入完整定義',
+  code_execute: '以隔離 JavaScript 串接唯讀工具並整理結果',
   memory_recall: '搜尋跨對話長期記憶', memory_reflect: '綜合長期記憶回答問題', memory_tags_list: '列出記憶標籤', knowledge_page_create: '建立知識頁',
   people_list: '列出人物資料', people_get: '查詢人物資料', people_upsert: '新增或更新人物資料',
   history_list: '列出工具操作紀錄', history_get: '讀取指定工具操作紀錄', history_search: '搜尋工具操作紀錄', journal_transcript_by_date: '按日期讀取已捕捉的 Discord 對話',
@@ -24,7 +25,7 @@ const shortDescriptions: Record<string, string> = {
 
 };
 
-export type ToolCatalog = { definitions: Array<Record<string, unknown>>; execute(args: Record<string, unknown>): unknown; loadedDefinitions(): Array<Record<string, unknown>>; index(): Array<{ name: string; description: string }> };
+export type ToolCatalog = { definitions: Array<Record<string, unknown>>; execute(args: Record<string, unknown>): unknown; loadedDefinitions(): Array<Record<string, unknown>>; index(): Array<{ name: string; description: string }>; getDefinition(name: string): Record<string, unknown> | undefined };
 
 export function createToolCatalog(fullDefinitions: Array<Record<string, unknown>>): ToolCatalog {
   const available = fullDefinitions.filter(t => typeof t.name === 'string' && t.name !== 'tools_catalog');
@@ -66,5 +67,5 @@ export function createToolCatalog(fullDefinitions: Array<Record<string, unknown>
     if (args.query === undefined && args.names === undefined) return { tools: index() };
     return { query_matches: matches, loaded_names: [...loaded] };
   };
-  return { definitions, execute, loadedDefinitions: () => [...loaded].map(name => byName.get(name)!), index };
+  return { definitions, execute, loadedDefinitions: () => [...loaded].map(name => byName.get(name)!), index, getDefinition: name => byName.get(name) };
 }

@@ -1,3 +1,4 @@
+import { codeExecuteDefinition, executeCode, readOnlyTools } from './code-mode.js';
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
@@ -107,6 +108,7 @@ const WRAP_UP_REMINDER_TURN = 45;
 const MAX_REASONING_ONLY_CONTINUATIONS = 2;
 
 export const tools = [
+  codeExecuteDefinition,
   memoryTagsDefinition,
   knowledgePageCreateDefinition,
   {
@@ -447,22 +449,30 @@ export async function ask(store: Store, session: string, prompt: string, config:
       }
       if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
-      for (const call of calls) {
+      const runCall = async (call: FunctionCall) => {
         const toolTrace = { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id };
         logTrace('model_tool_start', toolTrace);
-        let toolCompleted = false;
+        let returned = false;
         try {
           const output = await executeCall(store, session, call, config, googleRuntime, 'agent', catalog);
-          recovery.recordToolResult(call.name, output);
-          if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
-          input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
-          toolCompleted = true;
-          logTrace('model_tool_output_appended', { ...toolTrace, status: isRecord(output) && 'error' in output ? 'tool_error' : 'returned' });
-          await appendDiscordInput(false);
+          returned = true;
+          return output;
         } finally {
-          logTrace('model_tool_end', { ...toolTrace, outputAppended: toolCompleted });
+          logTrace('model_tool_end', { ...toolTrace, returned });
         }
-      }
+      };
+      const appendOutput = async (call: FunctionCall, output: unknown) => {
+        recovery.recordToolResult(call.name, output);
+        if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
+        input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
+        logTrace('model_tool_output_appended', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id, status: isRecord(output) && 'error' in output ? 'tool_error' : 'returned' });
+        await appendDiscordInput(false);
+      };
+      // Read-only batches run concurrently; a batch with any other tool keeps the model's order.
+      if (calls.length > 1 && calls.every(call => readOnlyTools.has(call.name))) {
+        const outputs = await Promise.all(calls.map(runCall));
+        for (const [index, call] of calls.entries()) await appendOutput(call, outputs[index]);
+      } else for (const call of calls) await appendOutput(call, await runCall(call));
       liveGroups.push(input.slice(responseInputStart)); liveGroupProtected.push(false);
     }
   } finally {
@@ -521,7 +531,13 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   emitProgress(config, { type: 'tool_start', callId: call.call_id, toolName: call.name, args: runtimeArgs, ...(label ? { description: label } : {}) });
   let result: unknown;
   try {
-    if (call.name === 'tools_catalog') {
+    if (call.name === 'code_execute') {
+      if (!catalog || executionSource !== 'agent') throw new ToolUsageError('CodeMode is unavailable in this execution');
+      result = await executeCode(runtimeArgs, {
+        available: name => catalog.getDefinition(name) !== undefined, callId: call.call_id, signal: config.signal,
+        execute: (name, args, callId) => executeCall(store, session, { type: 'function_call', name, call_id: callId, arguments: JSON.stringify(args) }, config, googleRuntime, executionSource, catalog),
+      });
+    } else if (call.name === 'tools_catalog') {
       if (!catalog) throw new ToolUsageError('Tool catalog is unavailable in this execution');
       result = catalog.execute(runtimeArgs);
     } else if (call.name === 'subagent_run') {
