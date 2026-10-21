@@ -11,8 +11,8 @@ nvm use 24.21.0
 
 | 想做什麼 | 命令 | 說明 |
 |---|---|---|
-| 啟動常駐 Butler | `npm start` | 啟動目前 `dist`；等 Discord ready 才回報成功。 |
-| 查看服務狀態 | `npm run status` | 查看服務是否執行及程序／log 資訊。 |
+| 啟動常駐 Butler | `npm start` | `sudo systemctl start butler`；等 Discord ready 才回報成功。開機會自動啟動，掛掉會自動重啟。 |
+| 查看服務狀態 | `npm run status` | `systemctl status butler`。 |
 | 停止 Butler | `npm stop` | 要求正常停止並等待結束。 |
 | 重啟目前版本 | `npm restart` | 停止後重啟現有 `dist`；不 build、不 slash-register。 |
 | 建置並部署程式 | `npm run deploy` | build 到 `.data/deploy/build`；正常停止舊版（等工作收尾），切換 `dist` 後啟動新版；新版未 ready 就換回舊版再啟動。依賴變更需另行安裝；部署不安裝依賴。 |
@@ -58,7 +58,7 @@ channels:
 
 ## Discord 的 `/restart` 與 `npm restart`
 
-Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進行中或排隊工作時才受理，並由 managed service 按既有流程重啟。終端機 `npm restart` 則由人直接停止並重新啟動常駐服務，使用目前已建置的 `dist`，不會重新 build。要更新程式時使用部署流程，不要把 restart 當成 deploy。
+Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進行中或排隊工作時才受理，Butler 以狀態碼 75 結束，由 systemd 重新啟動。終端機 `npm restart` 則由人直接停止並重新啟動常駐服務，使用目前已建置的 `dist`，不會重新 build。要更新程式時使用部署流程，不要把 restart 當成 deploy。
 
 ## 部署與回復
 
@@ -85,7 +85,7 @@ tail -n 80 .data/deploy/deploy.log
 
 ## 簡單故障處理
 
-1. 先看 `npm run status`，確認服務狀態與 PID 資訊。
+1. 先看 `npm run status`，確認服務狀態。
 2. 用 `tail -n 80 .data/service/butler.log` 看服務錯誤；部署問題再查看 `.data/deploy/deploy.log`。
 3. 確認沒有工作要保留後，才考慮 `npm restart`；要切換新版時使用 `npm run deploy`。若有依賴變更，先完成依賴安裝再部署。
 

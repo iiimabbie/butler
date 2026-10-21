@@ -5,7 +5,7 @@ import { ToolUsageError } from './tool-errors.js';
 import type { FinanceIdentity } from './finance-origin.js';
 import { isAuthorizedFinanceOrigin } from './finance-origin.js';
 
-export type HledgerConfig = { enabled: boolean; journalPath: string; executablePath: string };
+export type HledgerConfig = { enabled: boolean; journalPath: string; schedules: { load(): unknown[]; save(schedules: ScheduleMetadata[]): void } };
 const str = { type: 'string', minLength: 1 };
 const date = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' };
 const posting = { type: 'object', properties: { account: str, amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_amount: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, cost_currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, cost_type: { type: 'string', enum: ['unit','total'] } }, required: ['account','amount','currency'], additionalProperties: false };
@@ -37,8 +37,7 @@ type SourceRef = { account: string; currency: string };
 
 export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> };
 export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime {
-  const journal = resolve(config.journalPath), directory = dirname(journal), backups = resolve(directory, 'backups'), schedulesPath = resolve(directory, 'schedules.json');
-  const executable = resolve(config.executablePath);
+  const journal = resolve(config.journalPath), directory = dirname(journal), backups = resolve(directory, 'backups');
   const definitions = config.enabled ? [...hledgerDefinitions] : [];
   let queue: Promise<unknown> = Promise.resolve();
   function serial<T>(work: () => Promise<T>): Promise<T> {
@@ -48,7 +47,9 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
   }
   async function check(path: string): Promise<void> { await run(['-f', path, 'check']); }
   async function run(args: string[]): Promise<string> {
-    const child = spawn(executable, args, { cwd: directory, shell: false, env: { PATH: '/usr/bin:/bin', HOME: directory, LANG: 'C.UTF-8' }, stdio: ['ignore','pipe','pipe'] });
+    // hledger runs in the butler-hledger container (services/hledger), which mounts the ledger directory at /finance.
+    const containerArgs = args.map(arg => arg.startsWith(`${directory}/`) ? `/finance/${arg.slice(directory.length + 1)}` : arg);
+    const child = spawn('docker', ['exec', 'butler-hledger', 'hledger', ...containerArgs], { stdio: ['ignore','pipe','pipe'] });
     let out = '', err = '', size = 0;
     child.stdout.setEncoding('utf8').on('data', chunk => { size += Buffer.byteLength(chunk); if (size <= SAFE_OUTPUT) out += chunk; else child.kill('SIGTERM'); });
     child.stderr.setEncoding('utf8').on('data', chunk => { size += Buffer.byteLength(chunk); if (size <= SAFE_OUTPUT) err += chunk; else child.kill('SIGTERM'); });
@@ -83,13 +84,9 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     return `~ ${period} from ${rule.startDate}  ${rule.name.replace(/[\r\n;]/g,' ').trim()}  ; schedule-id=${rule.id}\n${rows.join('\n')}\n`;
   }
   async function readSchedules(): Promise<Record<string, ScheduleMetadata>> {
-    try { return JSON.parse(await readFile(schedulesPath, 'utf8')) as Record<string, ScheduleMetadata>; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error; }
+    return Object.fromEntries((config.schedules.load() as ScheduleMetadata[]).map(schedule => [schedule.id, schedule]));
   }
-  async function saveSchedules(value: Record<string, ScheduleMetadata>): Promise<void> {
-    await writeFile(`${schedulesPath}.tmp`, JSON.stringify(value), 'utf8');
-    await rename(`${schedulesPath}.tmp`, schedulesPath);
-  }
+  async function saveSchedules(value: Record<string, ScheduleMetadata>): Promise<void> { config.schedules.save(Object.values(value)); }
   async function withPlanningJournal<T>(fn: (path: string) => Promise<T>): Promise<T> {
     const rules = Object.values(await readSchedules()).filter(rule => rule.enabled).map(periodicRule).join('\n');
     if (!rules) return fn(journal);

@@ -1,20 +1,20 @@
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
-import { isAbsolute, dirname, basename, resolve } from 'node:path';
+import { dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import type { WebConfig } from './web-tools.js';
 import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 import type { LogMethods } from './log.js';
+import { projectPath } from './paths.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type ButlerConfig = {
   discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: WebConfig;
-  hledger?: { enabled: boolean; journalPath: string; executablePath: string };
+  hledger?: { enabled: boolean };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
-  paths?: { database?: string; attachments?: string };
   google?: GoogleClientConfig;
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
@@ -40,7 +40,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
 function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'paths', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -69,12 +69,7 @@ function validateConfig(raw: unknown): ButlerConfig {
     } else if (name === 'hledger') {
       const enabled = section.enabled;
       if (typeof enabled !== 'boolean') throw new Error('Butler config hledger.enabled must be boolean');
-      const journalPath = requireSetting(string('journalPath'), 'hledger.journalPath');
-      const executablePath = requireSetting(string('executablePath'), 'hledger.executablePath');
-      const projectRoot = fileURLToPath(new URL('../', import.meta.url));
-      if (!isAbsolute(journalPath) || resolve(journalPath) !== resolve(projectRoot, '.data/finance/main.journal')) throw new Error('Butler config hledger.journalPath must be the private .data/finance/main.journal');
-      if (!isAbsolute(executablePath)) throw new Error('Butler config hledger.executablePath must be absolute');
-      config.hledger = { enabled, journalPath, executablePath };
+      config.hledger = { enabled };
     } else if (name === 'web') {
       for (const field of ['provider','apiKey','baseUrl']) if (section[field] !== undefined) throw new Error(`Butler config web.${field} is no longer supported; configure web.tavily instead`);
       config.web = {};
@@ -108,13 +103,6 @@ function validateConfig(raw: unknown): ButlerConfig {
           config.web[provider] = { enabled: providerConfig.enabled as boolean | undefined, apiKey: providerConfig.apiKey as string | undefined, baseUrl: providerConfig.baseUrl as string | undefined, dailyRequestLimit: daily as number | undefined };
         }
       }
-    } else if (name === 'paths') {
-      const database = string('database');
-      const attachments = string('attachments');
-      for (const [field, value] of Object.entries({ database, attachments })) {
-        if (value !== undefined && !isAbsolute(value)) throw new Error(`Butler config paths.${field} must be an absolute path`);
-      }
-      config.paths = { database, attachments };
     } else if (name === 'google') {
       config.google = { clientId: requireSetting(string('clientId'), 'google.clientId'), clientSecret: requireSetting(string('clientSecret'), 'google.clientSecret') };
     } else if (name === 'memory') {
@@ -129,8 +117,8 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (section.protocol !== 'images') throw new Error('Butler config image.protocol must be images');
       const timeoutMs = section.timeoutMs;
       if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300000)) throw new Error('Butler config image.timeoutMs must be an integer from 1 to 300000');
-      const identityReferencePath = string('identityReferencePath');
-      if (identityReferencePath !== undefined && !isAbsolute(identityReferencePath)) throw new Error('Butler config image.identityReferencePath must be an absolute path');
+      const identityReference = string('identityReferencePath');
+      const identityReferencePath = identityReference === undefined ? undefined : projectPath(identityReference);
       config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined, identityReferencePath };
     } else if (name === 'transcription') {
       if (section.provider !== 'groq') throw new Error('Butler config transcription.provider must be groq');
@@ -179,12 +167,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 
 const coldPaths = [
-  'discord.token', 'discord.ownerId', 'paths', 'ui', 'google',
+  'discord.token', 'discord.ownerId', 'ui', 'google',
   'memory.enabled', 'memory.baseUrl', 'memory.bankId',
 ] as const;
 function valueAt(config: ButlerConfig, path: string): unknown {
   if (path === 'memory.enabled') return Boolean(config.memory);
-  return path === 'paths' || path === 'ui' || path === 'google' ? config[path] : path.split('.').reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, config);
+  return path === 'ui' || path === 'google' ? config[path] : path.split('.').reduce<unknown>((value, key) => value && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined, config);
 }
 function sameValue(a: unknown, b: unknown): boolean { return JSON.stringify(a) === JSON.stringify(b); }
 

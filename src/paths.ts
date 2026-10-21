@@ -1,15 +1,11 @@
-import { resolve } from 'node:path';
-import { requireSetting, type ButlerConfig } from './config.js';
-import { mkdirSync, chmodSync, existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export function databasePath(config: ButlerConfig): string {
-  return requireSetting(config.paths?.database, 'paths.database');
-}
+const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export function prepareDatabaseDirectory(path: string): void {
-  const directory = resolve(path, '..');
-  if (!existsSync(directory)) {
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
-    chmodSync(directory, 0o700);
-  }
-}
+// Resolves a path relative to the Butler project root; absolute paths are returned unchanged.
+export function projectPath(path: string): string { return resolve(projectRoot, path); }
+
+export const databasePath = projectPath('.data/butler.sqlite');
+export const attachmentsPath = projectPath('.data/attachments');
+export const journalPath = projectPath('.data/finance/main.journal');

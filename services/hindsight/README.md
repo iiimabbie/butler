@@ -43,11 +43,7 @@ To stop the service while keeping its data:
 docker compose -f compose.yaml down
 ```
 
-To remove the evaluation data as well, explicitly remove the named volume:
-
-```sh
-docker volume rm butler-hindsight-evaluation-data
-```
+Data is stored in the project at `.data/hindsight/pg0` (bind-mounted to `/home/hindsight/.pg0`), so it moves with the project directory. Removing that directory deletes the memory data.
 
 ## Server-owned retrieval defaults (2026-10-08)
 

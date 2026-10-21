@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
@@ -16,7 +17,7 @@ export const CLEAR_TABLES = [
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
 export const KEEP_TABLES = [
-  'schedule_runtime', 'schedule_runs',
+  'schedule_runtime', 'schedule_runs', 'web_usage',
 ];
 const LINK_TABLES = ['channel_state'];
 const HELP = `用法：node scripts/clear-memory-and-chats.mjs [--help] [--bank-id <id>] [--base-url <url>] [--database <absolute-path>] [--execute --confirm-bank <id> --confirm-database <absolute-path>]
@@ -153,22 +154,7 @@ async function getPreserved(bank, bankId) {
   return { config, models, tree, pages: sorted(pages), directives, aliases, webhooks };
 }
 async function assertStopped() {
-  const launcher = path.join(ROOT, 'scripts', 'discord-restart.sh');
-  const main = path.join(ROOT, 'dist', 'main.js');
-  for (const pid of await fs.readdir('/proc')) {
-    if (!/^\d+$/.test(pid)) continue;
-    let argv;
-    try { argv = (await fs.readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0').filter(Boolean); }
-    catch { continue; }
-    let matched = argv.includes(launcher) || argv.includes(main);
-    if (!matched && argv.some(arg => arg === 'dist/main.js' || arg === 'scripts/discord-restart.sh')) {
-      try {
-        const cwd = await fs.readlink(`/proc/${pid}/cwd`);
-        matched = argv.some(arg => path.resolve(cwd, arg) === launcher || path.resolve(cwd, arg) === main);
-      } catch { /* process may have exited */ }
-    }
-    if (matched) throw new Error(`Butler PID ${pid} 仍在執行，請先停止服務`);
-  }
+  if (spawnSync('systemctl', ['is-active', '--quiet', 'butler']).status === 0) throw new Error('Butler 仍在執行，請先停止服務（npm stop）');
 }
 function rows(db, table) { return sorted(db.prepare(`SELECT * FROM "${table}"`).all()); }
 function counts(db) { return Object.fromEntries(CLEAR_TABLES.map(table => [table, Number(db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n)])); }

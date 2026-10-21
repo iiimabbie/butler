@@ -50,9 +50,6 @@ ui:
   publicOrigin: https://butler.example.com
   cookiePath: /
 
-paths:
-  database: /absolute/path/to/butler/.data/butler.sqlite
-  attachments: /absolute/path/to/butler/.data/attachments
 
 google:
   clientId: YOUR_GOOGLE_OAUTH_CLIENT_ID
@@ -80,8 +77,8 @@ image:
   model: gpt-image-2.5
   protocol: images
   timeoutMs: 300000
-  # Optional absolute path; when set, image_generate_self always includes this reference.
-  identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
+  # Optional path (relative to the project root); when set, image_generate_self always includes this reference.
+  identityReferencePath: workspace/renee/appearance-reference.png
 
 # Optional background subagent tool; uses llm.baseUrl/apiKey and this model.
 subagent:

@@ -70,9 +70,16 @@ export class LocalToolRuntime {
       await this.deployNotify(channelId, `部署失敗：建置錯誤，未重啟。\n\`\`\`\n${output.trim().slice(-1500)}\n\`\`\``);
       return;
     }
-    const runner = spawn('setsid', [process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, detached: true, stdio: 'ignore', env: process.env });
-    runner.once('error', error => { this.deployRunning = false; void this.deployNotify(channelId, `部署失敗：無法啟動部署程序：${error.message}`).catch(() => undefined); });
-    runner.unref();
+    // The runner gets its own transient unit: stopping butler.service ends every process in Butler's cgroup.
+    const runner = spawn('sudo', ['-n', 'systemd-run', '--quiet', '--collect', '--unit=butler-deploy', `--uid=${process.getuid!()}`, `--working-directory=${this.root}`, `--setenv=PATH=${process.env.PATH ?? ''}`, process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, stdio: ['ignore', 'ignore', 'pipe'] });
+    let stderr = '';
+    runner.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    runner.once('error', error => { stderr ||= error.message; });
+    runner.once('close', code => {
+      if (code === 0) return;
+      this.deployRunning = false;
+      void this.deployNotify(channelId, `部署失敗：無法啟動部署程序：${stderr.trim() || `exit ${code}`}`).catch(() => undefined);
+    });
   }
   get activeCount() { return this.processes.activeCount; }
   async close() { this.closed = true; this.pendingDeploy = undefined; if (this.deployTimer) clearTimeout(this.deployTimer); await this.processes.close(); }

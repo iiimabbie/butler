@@ -1,0 +1,29 @@
+# Install: sudo cp scripts/butler.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now butler
+# Paths below assume the project at /home/iiimabbie/workspace/butler and nvm Node 24.21.0; adjust them after moving.
+[Unit]
+Description=Butler Discord agent
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=iiimabbie
+WorkingDirectory=/home/iiimabbie/workspace/butler
+Environment=PATH=/home/iiimabbie/.nvm/versions/node/v24.21.0/bin:/usr/local/bin:/usr/bin:/bin
+UMask=0077
+ExecStart=/home/iiimabbie/.nvm/versions/node/v24.21.0/bin/node --network-family-autoselection-attempt-timeout=2000 dist/main.js
+# /restart exits with 75; systemd starts Butler again.
+SuccessExitStatus=75
+RestartForceExitStatus=75
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=120
+# SIGTERM lets Butler finish in-flight work before exiting.
+KillMode=mixed
+TimeoutStopSec=900
+StandardOutput=append:/home/iiimabbie/workspace/butler/.data/service/butler.log
+StandardError=append:/home/iiimabbie/workspace/butler/.data/service/butler.log
+
+[Install]
+WantedBy=multi-user.target

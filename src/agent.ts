@@ -6,7 +6,6 @@ import { requestModel, logTrace, traceTextMetadata } from './model-request.js';
 import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagnostic.js';
 import { IncompleteTurnRecovery, unfinishedDelegateStatus } from './incomplete-turn-recovery.js';
 import type { Store, ToolRecord } from './store.js';
-import { createHash } from 'node:crypto';
 import type { DiscordToolRuntime } from './discord-tools.js';
 import { loadWorkspaceContext } from './context.js';
 import type { GoogleToolRuntime } from './google-tools.js';
@@ -332,7 +331,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         }
       }
       if (percent >= 80) {
-        const candidate = createHash('sha256').update(JSON.stringify(liveGroups)).digest('hex');
+        const candidate = JSON.stringify(liveGroups);
         if (candidate !== liveCompactionCandidate) {
           liveCompactionCandidate = candidate;
           try {
@@ -713,7 +712,8 @@ function nativeAttachmentSignature(input: unknown[]): string {
     else for (const item of Object.values(value)) visit(item);
   };
   visit(input);
-  return createHash('sha256').update(JSON.stringify(native)).digest('hex');
+  // Count and serialized size: enough to tell whether the attached images/files changed.
+  return `${native.length}:${JSON.stringify(native).length}`;
 }
 
 function formatOpeningContext(opening: SessionOpeningContext): string {

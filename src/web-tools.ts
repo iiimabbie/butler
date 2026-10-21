@@ -1,6 +1,3 @@
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { createTavilyToolRuntime, prepareWebRequest, webDefinitions } from './web-tavily.js';
 import { ToolUsageError, WebFetchExtractionError, WebPoolError, WebProviderError } from './tool-errors.js';
 import { readResponseBytes } from './response-body.js';
@@ -22,60 +19,31 @@ type Kind = 'timeout' | 'network' | 'rate_limit' | 'upstream' | 'parse' | 'auth'
 type Attempt = { provider: Provider; outcome: string; duration_ms: number; credit_usage?: string; estimated_credits?: number; actual_credits?: number };
 class ProviderError extends WebProviderError { declare readonly kind: Kind; constructor(kind: Kind) { super(kind); } }
 type Health = { failures: number; until: number; probe: boolean; disabled?: 'auth' | 'quota' | 'endpoint' };
-type Budget = { date: string; requests: number };
-type SharedState = { usage: Record<string, Budget>; health: Map<string, Health> };
-// Shared across runtime hot reloads, including overlapping requests. Credential hashes never contain keys.
-const states = new Map<string, SharedState>();
 const transient = new Set<Kind>(['timeout','network','rate_limit','upstream','parse']);
 const technical = new Set<Kind>([...transient, 'auth','quota','endpoint']);
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
-export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetch; statePath?: string } = {}): WebToolRuntime {
+export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetch; reserveRequest: (provider: Provider, limit: number) => boolean }): WebToolRuntime {
   const fetcher = config.fetcher ?? fetch;
   const tavilyKey = config.tavily?.enabled === true ? config.tavily.apiKey?.trim() : undefined;
   const fireKey = config.firecrawl?.enabled === true ? config.firecrawl.apiKey?.trim() : undefined;
   const anyKey = config.anysearch?.enabled === true ? config.anysearch.apiKey?.trim() : undefined;
   const keys: Record<Provider, string | undefined> = { tavily: tavilyKey, firecrawl: fireKey, anysearch: anyKey };
-  const namespace = config.statePath ?? 'process';
-  let state = states.get(namespace);
-  if (!state) {
-    let usage: Record<string, Budget> = {};
-    if (config.statePath) {
-      try {
-        const saved: unknown = JSON.parse(readFileSync(config.statePath, 'utf8'));
-        if (!record(saved) || !Object.values(saved).every(item => record(item) && typeof item.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(item.date) && Number.isSafeInteger(item.requests) && Number(item.requests) >= 0)) throw new Error();
-        usage = saved as Record<string, Budget>;
-      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Web usage state is unreadable; refusing to reset request budgets'); }
-    }
-    state = { usage, health: new Map() }; states.set(namespace, state);
-  }
-  const shared = state;
+  const health = new Map<string, Health>();
   const providerKey = (provider: Provider) => keys[provider];
   const providerConfig = (provider: Provider) => config[provider];
   const providerBase = (provider: Provider) => providerConfig(provider)?.baseUrl ?? (provider === 'tavily' ? 'https://api.tavily.com' : provider === 'firecrawl' ? 'https://api.firecrawl.dev/v2' : 'https://api.anysearch.com/v1');
-  const keyFor = (provider: Provider) => createHash('sha256').update(`${provider}:${providerKey(provider) ?? ''}`).digest('hex');
   const redact = (text: string) => [config.tavily?.apiKey, config.firecrawl?.apiKey, config.anysearch?.apiKey].reduce<string>((value, key) => key ? value.replaceAll(key, '[redacted]') : value, text);
   const reserve = (provider: Provider) => {
-    const key = keyFor(provider), date = new Date().toISOString().slice(0,10);
-    const previous = shared.usage[key];
-    const used = previous?.date === date ? previous.requests : 0;
     const limit = providerConfig(provider)?.dailyRequestLimit ?? 0;
-    if (used >= limit) throw new ProviderError('budget');
-    shared.usage[key] = { date, requests: used + 1 };
-    if (config.statePath) {
-      try {
-        mkdirSync(dirname(config.statePath), { recursive: true, mode: 0o700 });
-        const temp = `${config.statePath}.tmp`;
-        writeFileSync(temp, JSON.stringify(shared.usage), { mode: 0o600 }); renameSync(temp, config.statePath);
-      } catch { throw new ProviderError('budget'); } // Fail closed; never release uncertain reservations.
-    }
+    if (!config.reserveRequest(provider, limit)) throw new ProviderError('budget');
   };
   const healthFor = (provider: Provider, operation: Operation) => {
-    const key = `${keyFor(provider)}:${operation}`;
-    let health = shared.health.get(key);
-    if (!health) { health = { failures: 0, until: 0, probe: false }; shared.health.set(key, health); }
-    return health;
+    const key = `${provider}:${operation}`;
+    let entry = health.get(key);
+    if (!entry) { entry = { failures: 0, until: 0, probe: false }; health.set(key, entry); }
+    return entry;
   };
   const tavily = (signal?: AbortSignal, transport = fetcher, onUsage?: (credits: number) => void) => createTavilyToolRuntime({ baseUrl: config.tavily?.baseUrl, apiKey: tavilyKey, fetcher: transport, signal, onUsage });
   return {

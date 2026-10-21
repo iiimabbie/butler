@@ -1,13 +1,17 @@
 import { logError } from './log.js';
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileBackedSettings, SettingsConflictError, type SettingsSnapshot } from './file-backed-settings.js';
 import { nextCronRun, scheduleNextRun } from './scheduler.js';
 import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
 import type { TranscriptEntry } from './journal-transcript.js';
+import { projectPath } from './paths.js';
+
+// Attachment paths are stored relative to the project root so the project directory can move.
+const storedPath = (path: string | undefined): string | null => path === undefined ? null : relative(projectPath('.'), path);
 
 export type ChannelReplyMode = 'all' | 'mention' | 'none';
 export interface ChannelPolicy { channelId: string; botReply: boolean | null; hindsightWrite: boolean | null; }
@@ -53,12 +57,6 @@ export interface ToolRecord {
   finished_at: string | null;
 }
 
-function sortJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJsonValue);
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).sort(([a],[b])=>a.localeCompare(b)).map(([key,item])=>[key,sortJsonValue(item)]));
-  return value;
-}
-
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
@@ -97,7 +95,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, question_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
-      CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, message_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS discord_actions(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, message_id TEXT, owner_id TEXT NOT NULL, expires_at TEXT NOT NULL, status TEXT NOT NULL, buttons TEXT NOT NULL, created_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS discord_action_claims(custom_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, status TEXT NOT NULL, actor_id TEXT NOT NULL, result TEXT, claimed_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -107,9 +105,12 @@ export class Store implements SchedulerStore {
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
       CREATE TABLE IF NOT EXISTS session_compact_checkpoints(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, summary TEXT NOT NULL, through_message_id TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_opening_context(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL, attachments_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS deploy_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS hledger_schedules(id TEXT PRIMARY KEY, schedule_json TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
-    this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_fingerprint TEXT NOT NULL,definition_fingerprint TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL);`);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
     this.initializeFileSettings();
@@ -124,15 +125,10 @@ export class Store implements SchedulerStore {
     this.reconcileFileSettings(state, state);
   }
 
-  private scheduleFingerprint(job: ScheduleJob): string {
-    return createHash('sha256').update(JSON.stringify({kind:job.kind,cron:job.cron,runAt:job.runAt,timezone:job.timezone,enabled:job.enabled})).digest('hex');
+  // The timing fields of a schedule; next_run is recomputed when they change in the settings file.
+  private scheduleKey(job: ScheduleJob): string {
+    return JSON.stringify({kind:job.kind,cron:job.cron,runAt:job.runAt,timezone:job.timezone,enabled:job.enabled});
   }
-
-  private definitionFingerprint(job: ScheduleJob): string {
-    const { nextRun: _nextRun, updatedAt: _updatedAt, ...definition } = job;
-    return createHash('sha256').update(JSON.stringify(sortJsonValue(definition))).digest('hex');
-  }
-
 
   private snapshotTracked(id: string, channels: SettingsSnapshot['channels']): boolean {
     return this.alertChannelIds.has(id) || Object.hasOwn(channels, id);
@@ -149,22 +145,17 @@ export class Store implements SchedulerStore {
   }
 
   private reconcileFileSettings(snapshot: SettingsSnapshot, previous: SettingsSnapshot): void {
-    const now = new Date().toISOString();
     const diskJobs = [...snapshot.crons, ...snapshot.reminders];
-    const existing = new Map((this.db.prepare('SELECT job_id,next_run,schedule_fingerprint,definition_fingerprint,created_at,updated_at FROM schedule_runtime').all() as Array<{job_id:string;next_run:string|null;schedule_fingerprint:string;definition_fingerprint:string;created_at:string;updated_at:string}>).map(row => [row.job_id,row]));
+    const existing = new Map((this.db.prepare('SELECT job_id,next_run,schedule_key FROM schedule_runtime').all() as Array<{job_id:string;next_run:string|null;schedule_key:string}>).map(row => [row.job_id,row]));
     const archiveIds = [...new Set([...this.knownChannelIds(), ...Object.keys(previous.channels)])].filter(id => (snapshot === previous || this.snapshotTracked(id, previous.channels)) && !this.snapshotTracked(id, snapshot.channels));
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const upsert = this.db.prepare('INSERT INTO schedule_runtime(job_id,next_run,schedule_fingerprint,definition_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET next_run=excluded.next_run,schedule_fingerprint=excluded.schedule_fingerprint,definition_fingerprint=excluded.definition_fingerprint,updated_at=excluded.updated_at');
+      const upsert = this.db.prepare('INSERT INTO schedule_runtime(job_id,next_run,schedule_key) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET next_run=excluded.next_run,schedule_key=excluded.schedule_key');
       for (const job of diskJobs) {
         const runtime = existing.get(job.id);
-        const scheduleFp = this.scheduleFingerprint(job);
-        const definitionFp = this.definitionFingerprint(job);
-        const changedDefinition = runtime?.definition_fingerprint !== definitionFp;
-        const changedSchedule = runtime?.schedule_fingerprint !== scheduleFp;
-        const nextRun = !runtime || changedSchedule ? (job.enabled ? scheduleNextRun(job) : null) : runtime.next_run;
-        const updatedAt = changedDefinition ? now : runtime!.updated_at;
-        upsert.run(job.id,nextRun,scheduleFp,definitionFp,runtime?.created_at??job.createdAt,updatedAt);
+        const key = this.scheduleKey(job);
+        const nextRun = runtime?.schedule_key === key ? runtime.next_run : (job.enabled ? scheduleNextRun(job) : null);
+        upsert.run(job.id,nextRun,key);
       }
       const ids = new Set(diskJobs.map(job => job.id));
       for (const id of existing.keys()) if (!ids.has(id)) this.db.prepare('DELETE FROM schedule_runtime WHERE job_id=?').run(id);
@@ -219,7 +210,7 @@ export class Store implements SchedulerStore {
       }
       this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'preparing',?)").run(message.id, message.createdAt);
       const insertAttachment = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,local_path,status,error,origin,memory_document_id,transcript,transcription_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
-      for (const attachment of attachments) insertAttachment.run(message.id, attachment.attachmentId, attachment.filename, attachment.mimeType, attachment.localPath ?? null, attachment.status, attachment.error ?? null, attachment.origin ?? null, attachment.memoryDocumentId ?? null, attachment.transcript ?? null, attachment.transcriptionError ?? null);
+      for (const attachment of attachments) insertAttachment.run(message.id, attachment.attachmentId, attachment.filename, attachment.mimeType, storedPath(attachment.localPath), attachment.status, attachment.error ?? null, attachment.origin ?? null, attachment.memoryDocumentId ?? null, attachment.transcript ?? null, attachment.transcriptionError ?? null);
       this.db.exec('COMMIT');
       return { message, created: true };
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
@@ -232,7 +223,7 @@ export class Store implements SchedulerStore {
       const insert = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,local_path,status,error,origin,memory_document_id,transcript,transcription_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
       for (const a of attachments) {
         const documentId = a.status === 'ready' && a.localPath ? a.memoryDocumentId ?? `attachment:${messageId}:${a.attachmentId}` : undefined;
-        insert.run(messageId, a.attachmentId, a.filename, a.mimeType, a.localPath ?? null, a.status, a.error ?? null, a.origin ?? null, documentId ?? null, a.transcript ?? null, a.transcriptionError ?? null);
+        insert.run(messageId, a.attachmentId, a.filename, a.mimeType, storedPath(a.localPath), a.status, a.error ?? null, a.origin ?? null, documentId ?? null, a.transcript ?? null, a.transcriptionError ?? null);
         if (documentId) {
           const channelId = (this.db.prepare('SELECT channel_id FROM message_sources WHERE message_id=?').get(messageId) as { channel_id: string | null } | undefined)?.channel_id ?? undefined;
           const eligible = this.memoryWriteAllowed(channelId);
@@ -273,7 +264,7 @@ export class Store implements SchedulerStore {
       WHERE j.state IN ('queued','submitting','converting','retaining','unknown') ORDER BY j.rowid`).all() as Array<Record<string, unknown>>;
     return rows.flatMap(row => typeof row.local_path === 'string' ? [{ messageId: String(row.message_id), attachmentId: String(row.attachment_id), documentId: String(row.document_id), state: row.state as AttachmentMemoryState,
       ...(typeof row.conversion_operation_id === 'string' ? { conversionOperationId: row.conversion_operation_id } : {}), ...(typeof row.retain_operation_id === 'string' ? { retainOperationId: row.retain_operation_id } : {}),
-      ...(typeof row.attempted_at === 'string' ? { attemptedAt: row.attempted_at } : {}), ...(typeof row.next_poll_at === 'string' ? { nextPollAt: row.next_poll_at } : {}), pollAttempt: Number(row.poll_attempt), ...(typeof row.error === 'string' ? { error: row.error } : {}), path: row.local_path, filename: String(row.filename), mimeType: String(row.mime_type), ...(row.origin === 'discord_attachment' || row.origin === 'butler_generated' ? { origin: row.origin } : {}),
+      ...(typeof row.attempted_at === 'string' ? { attemptedAt: row.attempted_at } : {}), ...(typeof row.next_poll_at === 'string' ? { nextPollAt: row.next_poll_at } : {}), pollAttempt: Number(row.poll_attempt), ...(typeof row.error === 'string' ? { error: row.error } : {}), path: projectPath(row.local_path), filename: String(row.filename), mimeType: String(row.mime_type), ...(row.origin === 'discord_attachment' || row.origin === 'butler_generated' ? { origin: row.origin } : {}),
       sourceJson: JSON.stringify({ authorId: row.author_id, authorName: row.author_name, channelId: row.channel_id, discordMessageId: row.discord_message_id, eventTime: row.event_time, sourceKind: row.source_kind, forwardedMessage: typeof row.forwarded_message_json === 'string' ? JSON.parse(row.forwarded_message_json) : undefined, createdAt: row.created_at }) }] : []);
   }
 
@@ -415,7 +406,7 @@ export class Store implements SchedulerStore {
     const segments = this.db.prepare('SELECT channel_id,discord_message_id,content,created_at,reply_to_message_id,reply_to_channel_id FROM discord_outgoing_segments WHERE message_id=? ORDER BY rowid');
     return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at, preparationStatus: row.preparation ?? 'ready',
       source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.author_name === null ? {} : { authorName: row.author_name }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.webhook_id === null ? {} : { webhookId: row.webhook_id }), ...(row.source_kind === null ? {} : { sourceKind: row.source_kind }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }), ...(row.reply_to_message_id === null ? {} : { replyToMessageId: row.reply_to_message_id }), ...(row.reply_to_channel_id === null ? {} : { replyToChannelId: row.reply_to_channel_id }), ...(row.forwarded_message_json === null ? {} : { forwardedMessage: JSON.parse(row.forwarded_message_json) as ForwardedMessage }) },
-      attachments: (attachments.all(row.id) as Array<{ attachment_id: string; filename: string; mime_type: string; local_path: string | null; status: 'ready' | 'failed'; error: string | null; origin: 'discord_attachment' | 'butler_generated' | null; memory_document_id: string | null; transcript: string | null; transcription_error: string | null }>).map(item => ({ attachmentId: item.attachment_id, filename: item.filename, mimeType: item.mime_type, ...(item.local_path ? { localPath: item.local_path } : {}), status: item.status, ...(item.origin ? { origin: item.origin } : {}), ...(item.memory_document_id ? { memoryDocumentId: item.memory_document_id } : {}), ...(item.transcript ? { transcript: item.transcript } : {}), ...(item.transcription_error ? { transcriptionError: item.transcription_error } : {}), ...(item.error ? { error: item.error } : {}) })),
+      attachments: (attachments.all(row.id) as Array<{ attachment_id: string; filename: string; mime_type: string; local_path: string | null; status: 'ready' | 'failed'; error: string | null; origin: 'discord_attachment' | 'butler_generated' | null; memory_document_id: string | null; transcript: string | null; transcription_error: string | null }>).map(item => ({ attachmentId: item.attachment_id, filename: item.filename, mimeType: item.mime_type, ...(item.local_path ? { localPath: projectPath(item.local_path) } : {}), status: item.status, ...(item.origin ? { origin: item.origin } : {}), ...(item.memory_document_id ? { memoryDocumentId: item.memory_document_id } : {}), ...(item.transcript ? { transcript: item.transcript } : {}), ...(item.transcription_error ? { transcriptionError: item.transcription_error } : {}), ...(item.error ? { error: item.error } : {}) })),
       discordSegments: (segments.all(row.id) as Array<{ channel_id: string; discord_message_id: string; content: string; created_at: string; reply_to_message_id: string | null; reply_to_channel_id: string | null }>).map(item => ({ channelId: item.channel_id, messageId: item.discord_message_id, content: item.content, eventTime: item.created_at, ...(item.reply_to_message_id ? { replyToMessageId: item.reply_to_message_id } : {}), ...(item.reply_to_channel_id ? { replyToChannelId: item.reply_to_channel_id } : {}) })) }));
   }
 
@@ -662,6 +653,15 @@ export class Store implements SchedulerStore {
     return this.channelPolicy(channelId)!;
   }
 
+  // Counts a web provider request against its daily limit (UTC date); false when the limit is reached.
+  reserveWebRequest(provider: string, limit: number): boolean {
+    const date = new Date().toISOString().slice(0, 10);
+    const used = (this.db.prepare('SELECT requests FROM web_usage WHERE provider=? AND date=?').get(provider, date) as { requests: number } | undefined)?.requests ?? 0;
+    if (used >= limit) return false;
+    this.db.prepare('INSERT INTO web_usage(provider,date,requests) VALUES(?,?,1) ON CONFLICT(provider,date) DO UPDATE SET requests=requests+1').run(provider, date);
+    return true;
+  }
+
   memoryWriteAllowed(channelId: string | undefined): boolean {
     if (!channelId) return false;
     const policy = this.effectiveChannelPolicy(channelId);
@@ -708,17 +708,35 @@ export class Store implements SchedulerStore {
   channelMode(channelId: string): 'queue' | 'steer' { return this.effectiveChannelPolicy(channelId).mode; }
   setChannelMode(channelId: string, mode: 'queue' | 'steer' | undefined): void { this.settings.patchChannel(channelId,{mode}); }
 
-  setRestartNotice(channelId: string | null, messageId?: string): void {
-    if (channelId === null) this.db.prepare('DELETE FROM restart_notice WHERE id=1').run();
-    else {
-      if (!messageId) throw new Error('Restart notice message ID is required');
-      this.db.prepare('INSERT INTO restart_notice(id,channel_id,message_id) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET channel_id=excluded.channel_id,message_id=excluded.message_id').run(channelId, messageId);
-    }
+  // The /restart interaction whose ephemeral reply is edited once Butler is back.
+  setRestartNotice(notice: { applicationId: string; interactionToken: string } | null): void {
+    if (notice === null) this.db.prepare('DELETE FROM restart_notice WHERE id=1').run();
+    else this.db.prepare('INSERT INTO restart_notice(id,application_id,interaction_token) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET application_id=excluded.application_id,interaction_token=excluded.interaction_token').run(notice.applicationId, notice.interactionToken);
   }
 
-  restartNotice(): { channelId: string; messageId: string } | undefined {
-    const row = this.db.prepare('SELECT channel_id,message_id FROM restart_notice WHERE id=1').get() as { channel_id: string; message_id: string } | undefined;
-    return row ? { channelId: row.channel_id, messageId: row.message_id } : undefined;
+  // Written by scripts/butler-deploy.mjs before it starts a build; the started Butler posts and clears it.
+  takeDeployNotice(): { channelId: string; text: string } | undefined {
+    const row = this.db.prepare('DELETE FROM deploy_notice WHERE id=1 RETURNING channel_id,text').get() as { channel_id: string; text: string } | undefined;
+    return row && { channelId: row.channel_id, text: row.text };
+  }
+
+  hledgerSchedules(): unknown[] {
+    return (this.db.prepare('SELECT schedule_json FROM hledger_schedules ORDER BY id').all() as Array<{ schedule_json: string }>).map(row => JSON.parse(row.schedule_json));
+  }
+
+  saveHledgerSchedules(schedules: Array<{ id: string }>): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM hledger_schedules');
+      const insert = this.db.prepare('INSERT INTO hledger_schedules(id,schedule_json) VALUES(?,?)');
+      for (const schedule of schedules) insert.run(schedule.id, JSON.stringify(schedule));
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  takeRestartNotice(): { applicationId: string; interactionToken: string } | undefined {
+    const row = this.db.prepare('DELETE FROM restart_notice WHERE id=1 RETURNING application_id,interaction_token').get() as { application_id: string; interaction_token: string } | undefined;
+    return row && { applicationId: row.application_id, interactionToken: row.interaction_token };
   }
 
   attachmentDelivery(toolCallId: string): unknown {
@@ -771,13 +789,13 @@ export class Store implements SchedulerStore {
   setChannelImageModel(channelId:string,model:string|undefined):void { this.settings.patchChannel(channelId,{imageModel:model}); }
 
   createSchedule(job:ScheduleJob):ScheduleJob { this.settings.refresh();if(this.getSchedule(job.id))throw new SettingsConflictError(`Schedule ${job.id} already exists`);this.settings.upsertSchedule(job);this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(job.nextRun,job.id);return this.getSchedule(job.id)!; }
-  getSchedule(id:string):ScheduleJob|undefined { const snapshot=this.settings.current();const job=[...snapshot.crons,...snapshot.reminders].find(item=>item.id===id);if(!job)return undefined;const runtime=this.db.prepare('SELECT next_run,updated_at FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null;updated_at:string}|undefined;return {...job,nextRun:runtime?runtime.next_run:null,updatedAt:runtime?.updated_at??job.updatedAt}; }
+  getSchedule(id:string):ScheduleJob|undefined { const snapshot=this.settings.current();const job=[...snapshot.crons,...snapshot.reminders].find(item=>item.id===id);if(!job)return undefined;const runtime=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;return {...job,nextRun:runtime?runtime.next_run:null}; }
   listSchedules():ScheduleJob[] { const snapshot=this.settings.current();return [...snapshot.crons,...snapshot.reminders].map(job=>this.getSchedule(job.id)!).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id)); }
   updateSchedule(id:string,patch:Partial<Pick<ScheduleJob,'outputChannelId'|'content'|'cron'|'runAt'|'timezone'|'enabled'|'nextRun'|'notify'>>):ScheduleJob|undefined { this.settings.refresh();const current=this.getSchedule(id);if(!current)return undefined;const {nextRun,...definitionPatch}=patch;if(Object.keys(definitionPatch).length)this.settings.patchSchedule(id,{...definitionPatch,updatedAt:new Date().toISOString()});if(Object.hasOwn(patch,'nextRun'))this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(nextRun??null,id);return this.getSchedule(id); }
   deleteSchedule(id:string):boolean { return Boolean(this.settings.deleteSchedule(id)); }
 
   claimScheduleRun(id:string,scheduledAt:string,nextRun:string|null,now:string):{job:ScheduleJob;run:ScheduleRun}|undefined {
-    this.db.exec('BEGIN IMMEDIATE');try{const job=this.getSchedule(id);const row=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;if(!job||!job.enabled||!row||row.next_run!==scheduledAt||scheduledAt>now){this.db.exec('COMMIT');return undefined;}const run:ScheduleRun={id:randomUUID(),jobId:id,scheduledAt,status:'running',claimedAt:now,finishedAt:null,error:null};try{this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id,id,scheduledAt,'running',now);}catch(error){if(error instanceof Error&&/UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)){this.db.exec('ROLLBACK');return undefined;}throw error;}const updated=this.db.prepare('UPDATE schedule_runtime SET next_run=?,updated_at=? WHERE job_id=? AND next_run=?').run(nextRun,now,id,scheduledAt);if(Number(updated.changes)!==1)throw new Error(`Could not advance schedule ${id}`);this.db.exec('COMMIT');return {job:{...job,nextRun},run};}catch(error){this.db.exec('ROLLBACK');throw error;}
+    this.db.exec('BEGIN IMMEDIATE');try{const job=this.getSchedule(id);const row=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;if(!job||!job.enabled||!row||row.next_run!==scheduledAt||scheduledAt>now){this.db.exec('COMMIT');return undefined;}const run:ScheduleRun={id:randomUUID(),jobId:id,scheduledAt,status:'running',claimedAt:now,finishedAt:null,error:null};try{this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id,id,scheduledAt,'running',now);}catch(error){if(error instanceof Error&&/UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)){this.db.exec('ROLLBACK');return undefined;}throw error;}const updated=this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=? AND next_run=?').run(nextRun,id,scheduledAt);if(Number(updated.changes)!==1)throw new Error(`Could not advance schedule ${id}`);this.db.exec('COMMIT');return {job:{...job,nextRun},run};}catch(error){this.db.exec('ROLLBACK');throw error;}
   }
 
   markRunningScheduleRunsUnknown(now: string): ScheduleRun[] {

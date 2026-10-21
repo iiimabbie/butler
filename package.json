@@ -5,14 +5,13 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "start": "sh scripts/butler-service.sh start",
-    "stop": "sh scripts/butler-service.sh stop",
-    "restart": "sh scripts/butler-service.sh restart",
-    "status": "sh scripts/butler-service.sh status",
+    "start": "sudo systemctl start butler",
+    "stop": "sudo systemctl stop butler",
+    "restart": "sudo systemctl restart butler",
+    "status": "systemctl status butler --no-pager",
     "deploy": "node scripts/butler-deploy.mjs",
     "test": "npm run typecheck",
     "discord": "node dist/main.js",
-    "discord:managed": "sh scripts/discord-restart.sh",
     "discord:register": "node dist/main.js register-discord-commands",
     "discord:deploy": "npm run build && npm run discord:register",
     "typecheck": "tsc --noEmit"

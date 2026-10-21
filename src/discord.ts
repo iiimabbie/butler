@@ -1,10 +1,11 @@
 import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 import type { Store } from './store.js';
 import type { ChannelManagement, ChannelSettings, ChannelSettingsPatch } from './channel-settings.js';
 import { ask } from './agent.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
 import { configuredAlertChannelIds, requireSetting, type ButlerConfig } from './config.js';
+import { attachmentsPath } from './paths.js';
 import type { WebToolRuntime } from './web-tools.js';
 import { createWeatherToolRuntime, type WeatherToolRuntime } from './weather-tools.js';
 import { startUi } from './ui.js';
@@ -21,7 +22,7 @@ import { createPeopleToolRuntime } from './people-tools.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { compactSession } from './compaction.js';
 import { formatDiscordUrls } from './discord-url.js';
 import { archiveOutgoingAttachment, AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
@@ -40,8 +41,7 @@ export type DiscordConfig = { token: string; ownerId: string; alertChannelIds: s
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsight?: Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
-export type CommandContext = {channelId: string; parentChannelId?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed; ephemeral?: boolean }): Promise<unknown> };
-export type RestartNotice = { channelId: string; messageId: string };
+export type CommandContext = {channelId: string; parentChannelId?: string; applicationId?: string; interactionToken?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed }): Promise<unknown> };
 const modelCache = new Map<string, { expiresAt: number; models: string[] }>();
 const modelInflight = new Map<string, Promise<string[]>>();
 const imageModelCache = new Map<string, { expiresAt: number; models: string[] }>();
@@ -439,12 +439,10 @@ export class DiscordHandler {
       if (this.queues.size > 0) { await context.reply('目前有頻道工作進行中或排隊，無法重啟。'); return; }
       if (this.localTools?.activeCount) { await context.reply('目前仍有主機工作運作，請先用 local_process_stop 停止，再重啟。'); return; }
       this.stopping = true;
-      let notice: unknown;
       try {
-        notice = await context.reply('重啟中', { ephemeral: false });
-        const messageId = typeof notice === 'object' && notice !== null && 'id' in notice ? String((notice as { id: unknown }).id) : '';
-        if (!messageId) throw new Error('restart acknowledgement did not return a message ID');
-        this.store.setRestartNotice(context.channelId, messageId);
+        if (!context.applicationId || !context.interactionToken) throw new Error('restart interaction token is unavailable');
+        await context.reply('重啟中');
+        this.store.setRestartNotice({ applicationId: context.applicationId, interactionToken: context.interactionToken });
       } catch (error) {
         this.stopping = false;
         try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError, { mention: !isHttp429(noticeError) }); }
@@ -800,7 +798,7 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     defaultModel: requireSetting(config.llm?.model, 'llm.model'),
     baseUrl: requireSetting(config.llm?.baseUrl, 'llm.baseUrl'),
     apiKey: config.llm?.apiKey,
-    attachmentDir: requireSetting(config.paths?.attachments, 'paths.attachments'),
+    attachmentDir: attachmentsPath,
     maxContextTokens: config.llm?.maxContextTokens ?? 150000,
     modelContextTokens: config.llm?.modelContextTokens ?? {},
   };
@@ -903,10 +901,10 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
     const restart = interaction.commandName === 'restart';
     const deferred = restart ? Promise.resolve(true) : interaction.deferReply({ flags: 64 }).then(() => true, () => false);
     let acknowledged = false;
-    await handler.command({channelId: interaction.channelId ?? '', parentChannelId: interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined, command: interaction.commandName as CommandContext['command'], enabled: interaction.commandName === 'bot_reply' ? interaction.options.getBoolean('enabled') ?? undefined : undefined, model: interaction.options.getString('id') ?? undefined, effort: interaction.commandName === 'model' ? interaction.options.getString('effort') as CommandContext['effort'] ?? undefined : undefined, replyMode: interaction.commandName === 'replymode' ? interaction.options.getString('value') as CommandContext['replyMode'] ?? undefined : undefined, mode: interaction.commandName === 'mode' ? interaction.options.getString('value') as 'queue' | 'steer' | null ?? undefined : undefined, reply: async (content, options) => {
+    await handler.command({channelId: interaction.channelId ?? '', applicationId: interaction.applicationId, interactionToken: interaction.token, parentChannelId: interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined, command: interaction.commandName as CommandContext['command'], enabled: interaction.commandName === 'bot_reply' ? interaction.options.getBoolean('enabled') ?? undefined : undefined, model: interaction.options.getString('id') ?? undefined, effort: interaction.commandName === 'model' ? interaction.options.getString('effort') as CommandContext['effort'] ?? undefined : undefined, replyMode: interaction.commandName === 'replymode' ? interaction.options.getString('value') as CommandContext['replyMode'] ?? undefined : undefined, mode: interaction.commandName === 'mode' ? interaction.options.getString('value') as 'queue' | 'steer' | null ?? undefined : undefined, reply: async (content, options) => {
       if (restart && !acknowledged) {
         acknowledged = true;
-        return interaction.reply({ content, ephemeral: options?.ephemeral ?? true, fetchReply: true, allowedMentions: ALLOWED_MENTIONS });
+        return interaction.reply({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS });
       }
       if (!await deferred) throw new Error('Discord interaction acknowledgement failed');
       if (interaction.deferred || interaction.replied) return interaction.editReply({ content, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
@@ -1072,12 +1070,13 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   const startup = getRuntime();
   const config = startup.discord;
   const settings = startup.settings;
-  const readyFile = process.env.BUTLER_RESTART_READY_FILE;
+  // Under systemd (scripts/butler.service), readiness is reported with sd_notify and exit 75 asks systemd to restart.
+  const managed = Boolean(process.env.NOTIFY_SOCKET);
   let finish!: () => void;
   const lifetime = new Promise<void>(resolve => { finish = resolve; });
   let exitCode = 0;
   let client!: Client;
-  const requestRestart = readyFile ? async () => {
+  const requestRestart = managed ? async () => {
     exitCode = 75;
     await shutdown();
     finish();
@@ -1138,21 +1137,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
     logInfo('Discord ready', { botId: readyClient.user.id });
     void syncGuildCommands([...readyClient.guilds.cache.keys()], 'startup').catch(error => reportCommandSyncFailure('startup', error));
-    const notice = store.restartNotice();
+    const notice = store.takeRestartNotice();
     if (notice) {
-      void (async () => {
-        const channel = await client.channels.fetch(notice.channelId);
-        if (!channel?.isTextBased() || !('messages' in channel)) throw new Error('restart notification channel unavailable');
-        const message = await channel.messages.fetch(notice.messageId);
-        await message.edit({ content: '重啟完成', allowedMentions: ALLOWED_MENTIONS });
-        store.setRestartNotice(null);
-      })().catch(error => logError('Discord restart readiness notification failed', error, { mention: !isHttp429(error) }));
+      // Interaction tokens stay valid for 15 minutes, which covers a restart; ephemeral replies are only editable through them.
+      void client.rest.patch(Routes.webhookMessage(notice.applicationId, notice.interactionToken, '@original'), { body: { content: '重啟完成' }, auth: false })
+        .catch(error => logError('Discord restart readiness notification failed', error, { mention: !isHttp429(error) }));
     }
-    const deployNoticePath = join(dirname(fileURLToPath(import.meta.url)), '../.data/deploy/notice.json');
-    if (existsSync(deployNoticePath)) {
+    const deployNotice = store.takeDeployNotice();
+    if (deployNotice) {
       void (async () => {
-        const deployNotice = JSON.parse(readFileSync(deployNoticePath, 'utf8')) as { channelId: string; text: string };
-        unlinkSync(deployNoticePath);
         const channel = await client.channels.fetch(deployNotice.channelId);
         if (!channel?.isTextBased() || !('send' in channel)) throw new Error('deployment notice channel unavailable');
         await channel.send({ content: deployNotice.text, allowedMentions: ALLOWED_MENTIONS });
@@ -1161,7 +1154,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     const scheduler = new Scheduler({ store, enqueue: request => handler.enqueueScheduled(request), log: { logInfo, logWarn, logError } });
     handler.setScheduler(scheduler);
     scheduler.start();
-    if (readyFile) { try { writeFileSync(readyFile, 'ready\\n', { mode: 0o600 }); } catch (error) { logError('Discord readiness signal failed', error, { mention: !isHttp429(error) }); } }
+    if (managed) execFile('systemd-notify', ['--ready'], error => { if (error) logError('Discord readiness signal failed', error, { mention: !isHttp429(error) }); });
   });
   client.on('messageCreate', message => {
     const errorWebhookUrl = getRuntime().settings.discord?.errorWebhookUrl;

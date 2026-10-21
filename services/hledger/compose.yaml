@@ -1,0 +1,12 @@
+# Butler runs hledger with `docker exec butler-hledger hledger ...`; the ledger stays in .data/finance.
+services:
+  hledger:
+    build: .
+    image: butler-hledger:1.52.4
+    container_name: butler-hledger
+    restart: unless-stopped
+    user: "1000:1000"
+    init: true
+    network_mode: none
+    volumes:
+      - ../../.data/finance:/finance

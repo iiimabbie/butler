@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { constants } from 'node:fs';
@@ -18,7 +18,7 @@ const VIDEO_EXTENSIONS = new Set(['.mp4','.mpeg','.mpg','.mov','.avi','.mkv','.w
 const inFlight = new Map<string, Promise<VideoResult>>();
 type Frame = { timeSeconds: number; cacheName: string };
 type VideoResult = { status: 'ready' | 'failed'; transcript?: string; audioStatus: string; frames: Frame[]; error?: string };
-type VideoCache = { schema: number; version: string; sha256: string; status: 'ready' | 'failed'; retryAfter?: number; result: VideoResult };
+type VideoCache = { schema: number; version: string; key: string; status: 'ready' | 'failed'; retryAfter?: number; result: VideoResult };
 export function isVideoAttachment(mime: string, filename: string): boolean {
   return mime.toLowerCase().startsWith('video/') || VIDEO_EXTENSIONS.has(ext(filename));
 }
@@ -40,7 +40,7 @@ async function loadCache(root: string, key: string): Promise<VideoResult | undef
   try {
     const file = join(root, `${key}.json`); const fileStat=await lstat(file); if (!fileStat.isFile() || fileStat.isSymbolicLink() || fileStat.size > 256 * 1024) return; const raw = await readFile(file, 'utf8');
     const item = JSON.parse(raw) as VideoCache;
-    if (item.schema !== CACHE_SCHEMA || item.version !== VIDEO_PROCESSING_VERSION || item.sha256 !== key || !item.result || !['ready','failed'].includes(item.status)) return;
+    if (item.schema !== CACHE_SCHEMA || item.version !== VIDEO_PROCESSING_VERSION || item.key !== key || !item.result || !['ready','failed'].includes(item.status)) return;
     if ((item.status === 'failed' || item.result.audioStatus.startsWith('音軌轉錄失敗：')) && (item.retryAfter ?? 0) <= Date.now()) return;
     if (item.status === 'ready' && item.result.frames.length === 0) return;
     for (const frame of item.result.frames ?? []) {
@@ -52,7 +52,7 @@ async function loadCache(root: string, key: string): Promise<VideoResult | undef
   } catch { return; }
 }
 async function saveCache(root: string, key: string, result: VideoResult): Promise<void> {
-  const item: VideoCache = { schema: CACHE_SCHEMA, version: VIDEO_PROCESSING_VERSION, sha256: key, status: result.status, ...((result.status === 'failed' || result.audioStatus.startsWith('音軌轉錄失敗：')) ? { retryAfter: Date.now() + 5 * 60_000 } : {}), result };
+  const item: VideoCache = { schema: CACHE_SCHEMA, version: VIDEO_PROCESSING_VERSION, key, status: result.status, ...((result.status === 'failed' || result.audioStatus.startsWith('音軌轉錄失敗：')) ? { retryAfter: Date.now() + 5 * 60_000 } : {}), result };
   const temp = join(root, `.${key}.${randomUUID()}.tmp`); await writeFile(temp, JSON.stringify(item), { flag: 'wx', mode: 0o600 }); await rename(temp, join(root, `${key}.json`));
 }
 async function processVideo(sourceBytes: Buffer, filename: string, root: string, key: string, transcription?: AudioTranscriptionConfig, fetcher?: typeof fetch): Promise<VideoResult> {
@@ -87,7 +87,7 @@ async function processVideo(sourceBytes: Buffer, filename: string, root: string,
   } finally { const { rm }=await import('node:fs/promises'); await rm(work,{recursive:true,force:true}).catch(()=>{}); }
 }
 export async function getVideoAttachmentResult(input: { path: string; filename: string; attachmentDir: string; transcription?: AudioTranscriptionConfig; fetcher?: typeof fetch }): Promise<{ result: VideoResult; frames: Array<{timeSeconds:number; bytes:Buffer; cachePath:string}> }> {
-  const bytes=await readSource(input.path); const key=createHash('sha256').update(bytes).digest('hex'); const root=cacheRoot(input.attachmentDir); await mkdir(root,{recursive:true,mode:0o700}); const rootStat=await lstat(root); if(!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('影片快取目錄不安全'); await chmod(root,0o700);
+  const bytes=await readSource(input.path); const key=basename(input.path); const root=cacheRoot(input.attachmentDir); await mkdir(root,{recursive:true,mode:0o700}); const rootStat=await lstat(root); if(!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('影片快取目錄不安全'); await chmod(root,0o700);
   let result=await loadCache(root,key);
   if (!result) { const flightKey=`${root}:${key}`; let pending=inFlight.get(flightKey); if(!pending){pending=processVideo(bytes,input.filename,root,key,input.transcription,input.fetcher).finally(()=>inFlight.delete(flightKey));inFlight.set(flightKey,pending);} result=await pending; }
   const frames=[] as Array<{timeSeconds:number;bytes:Buffer;cachePath:string}>;

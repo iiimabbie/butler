@@ -34,7 +34,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
-      - hindsight_eval_data:/home/hindsight/.pg0
+      - ../../.data/hindsight/pg0:/home/hindsight/.pg0
     healthcheck:
       test:
         - CMD
@@ -45,7 +45,3 @@ services:
       timeout: 5s
       retries: 30
       start_period: 120s
-
-volumes:
-  hindsight_eval_data:
-    name: butler-hindsight-evaluation-data
