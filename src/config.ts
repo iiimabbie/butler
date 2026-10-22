@@ -21,6 +21,7 @@ export type ButlerConfig = {
   transcription?: AudioTranscriptionConfig;
   schedule?: { timezone?: string };
   subagent?: { model: string; maxTurns?: number; timeoutMs?: number; toolsEnabled?: boolean };
+  completionGate?: { baseUrl: string; apiKey: string; model: string; timeoutMs: number };
 };
 
 export function configuredAlertChannelIds(config: ButlerConfig): string[] {
@@ -40,7 +41,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
 function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent', 'completionGate'] as const) {
     if (raw[name] === undefined) continue;
     if (!isRecord(raw[name])) throw new Error(`Butler config ${name} must be an object`);
     const section = raw[name];
@@ -134,6 +135,12 @@ function validateConfig(raw: unknown): ButlerConfig {
       const toolsEnabled = section.toolsEnabled;
       if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
       config.subagent = { model, maxTurns: (maxTurns as number | undefined) ?? 30, timeoutMs: (timeoutMs as number | undefined) ?? 120000, toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
+    } else if (name === 'completionGate') {
+      const baseUrl = string('baseUrl') ?? 'https://api.typesafe.ai';
+      validateHttpUrl(baseUrl, 'completionGate.baseUrl');
+      const timeoutMs = section.timeoutMs;
+      if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 120000)) throw new Error('Butler config completionGate.timeoutMs must be an integer from 1 to 120000');
+      config.completionGate = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: requireSetting(string('apiKey'), 'completionGate.apiKey'), model: string('model') ?? 'jev-latest', timeoutMs: (timeoutMs as number | undefined) ?? 15000 };
     } else {
       const port = section.port;
       if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Butler config ui.port must be an integer from 1 to 65535');

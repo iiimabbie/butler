@@ -88,6 +88,13 @@ subagent:
   # maxTurns: 30
   # timeoutMs: 120000
 
+# Optional independent Jev judgment before the mandatory final model review.
+completionGate:
+  baseUrl: https://api.typesafe.ai
+  apiKey: YOUR_TYPESAFE_API_KEY
+  model: jev-latest
+  timeoutMs: 15000
+
 # Optional default timezone for cron and reminder creation.
 schedule:
   timezone: Asia/Taipei

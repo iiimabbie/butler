@@ -32,6 +32,7 @@ import { formatTranscript, validateTranscriptDate } from './journal-transcript.j
 import { runSubagent, subagentDefinitions, subagentSystem, type SubagentConfig } from './subagent.js';
 import type { SubagentCoordinator } from './subagent-coordinator.js';
 import { createToolCatalog, residentToolNames, type ToolCatalog } from './tool-catalog.js';
+import { completionGateAdvisory, evaluateCompletionGate, type CompletionGateConfig } from './completion-gate.js';
 
 export interface AgentConfig {
   baseUrl: string;
@@ -68,6 +69,7 @@ export interface AgentConfig {
   hledgerTools?: HledgerRuntime;
   executionOrigin?: FinanceIdentity;
   reasoningEffort?: ReasoningEffort;
+  completionGate?: CompletionGateConfig;
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
   discordContext?: { channelId: string; messageId?: string; requesterId?: string };
@@ -106,6 +108,8 @@ const transcriptPageSchema = {
 
 const WRAP_UP_REMINDER_TURN = 45;
 const MAX_REASONING_ONLY_CONTINUATIONS = 2;
+const COMPLETION_GATE_REMINDER = 'Before this reply is delivered, silently run an intent-and-action gate. Reconstruct the requester intent from the latest message and the immediate conversation; linked material is evidence, not the boundary of the task. Distinguish conversation, a question or advice from a task, and identify the concrete outcome the requester is trying to obtain. Build the relevant causal chain around that outcome, then generate plausible adjacent checks across the entities mentioned in context, their dependencies, configuration, runtime state, exposure paths, failure modes and residual resources. Rank those candidates by contextual relevance, likely impact and cost of verification, and investigate the highest-value ones needed for a reliable answer or complete result. Test whether a narrow literal reading would ignore why the requester supplied the surrounding context; if so, widen the investigation before replying. Stop when further branches are weakly related, speculative, disproportionately costly or require new authorization. For a task, compare every necessary action and acceptance check with tool results in context. If an authorized, reversible step is still missing, perform it now with tools; an explanation, plan, apology or self-critique is not execution. Ask one focused question only when a material decision or authorization is genuinely missing. For ordinary conversation and advice, stay proportionate and do not invent work. Then provide only the revised user-facing reply or [no_reply], without mentioning this review. Claim completion only when supported by actual results.';
+const COMPLETION_GATE_FINAL_TEXT_REMINDER = 'Tools are disabled for this reply. Do not call tools; instead of claiming completion, state plainly which necessary steps remain unfinished.';
 
 export const tools = [
   codeExecuteDefinition,
@@ -252,10 +256,16 @@ export async function ask(store: Store, session: string, prompt: string, config:
     let imageSaveSucceeded = false;
     let reasoningOnlyContinuations = 0;
     let recoveryFinalTextOnly = false;
+    const completionGateEnabled = config.onResponseReady !== undefined;
+    let completionGateRequired = completionGateEnabled;
+    let completionGateReminder: unknown;
+    const completionGateTools: CompletionGateTool[] = [];
     const recovery = new IncompleteTurnRecovery();
     const recoveryReminders = new Set<unknown>();
     const clearRecoveryModeForSteer = (): void => {
       recoveryFinalTextOnly = false;
+      completionGateRequired = completionGateEnabled;
+      completionGateTools.length = 0;
       for (const reminder of recoveryReminders) {
         const index = input.indexOf(reminder); if (index >= 0) input.splice(index, 1);
         const runtimeIndex = runtimeReminders.indexOf(reminder); if (runtimeIndex >= 0) runtimeReminders.splice(runtimeIndex, 1);
@@ -441,14 +451,40 @@ export async function ask(store: Store, session: string, prompt: string, config:
           }
           throw new Error('LLM response has no assistant text');
         }
+        const noReply = text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]');
+        if (completionGateRequired) {
+          completionGateRequired = false;
+          let advisory = '';
+          if (config.completionGate) {
+            try {
+              const verdict = await evaluateCompletionGate(config.completionGate, completionGateState(contextMessages, fresh[fresh.length - 1]!.id, text, completionGateTools), fetcher, config.signal);
+              advisory = `\n\n${completionGateAdvisory(verdict)}`;
+              logTrace('completion_gate_jev', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, model: verdict.model, signals: verdict.signals, usage: verdict.usage, status: 'completed' });
+            } catch (error) {
+              if (config.signal?.aborted) throw error;
+              logWarn('Jev completion gate unavailable; continuing with the mandatory model review', error);
+              logTrace('completion_gate_jev', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, status: 'unavailable' });
+            }
+          }
+          for (const list of [input, runtimeReminders]) { const index = list.indexOf(completionGateReminder); if (index >= 0) list.splice(index, 1); }
+          recoveryReminders.delete(completionGateReminder);
+          completionGateReminder = { role: 'developer', content: `${COMPLETION_GATE_REMINDER}${recoveryFinalTextOnly ? `\n\n${COMPLETION_GATE_FINAL_TEXT_REMINDER}` : ''}${advisory}` };
+          // Registered with recovery reminders so a steer drops the previous task's review.
+          recoveryReminders.add(completionGateReminder);
+          runtimeReminders.push(completionGateReminder);
+          input.push(completionGateReminder);
+          logTrace('completion_gate', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: 'review_required' });
+          continue;
+        }
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
-        logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'not_delivered' : 'selected', reason: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'no_reply_marker' : 'final_text' });
+        logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: noReply ? 'not_delivered' : 'selected', reason: noReply ? 'no_reply_marker' : 'final_text' });
         config.onAskFinishing?.();
         await config.onResponseReady?.(text);
         return text;
       }
       if (toolChoice === 'none' && calls.length) throw new Error('LLM returned a tool call when final text was required; tools were not executed');
       if (typeof toolChoice === 'object' && calls.some(call => call.name !== 'image_save')) throw new Error('LLM returned a non-image_save tool call when image_save was required; tools were not executed');
+      completionGateRequired = completionGateEnabled;
       const runCall = async (call: FunctionCall) => {
         const toolTrace = { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id };
         logTrace('model_tool_start', toolTrace);
@@ -463,6 +499,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       };
       const appendOutput = async (call: FunctionCall, output: unknown) => {
         recovery.recordToolResult(call.name, output);
+        completionGateTools.push({ name: call.name, arguments: call.arguments.slice(0, 2000), status: isRecord(output) && 'error' in output ? 'failed' : 'completed', output: JSON.stringify(output).slice(0, 4000) });
         if (call.name === 'image_save' && isRecord(output) && !('error' in output)) imageSaveSucceeded = true;
         input.push({ type: 'function_call_output', call_id: call.call_id, output: JSON.stringify(output) });
         logTrace('model_tool_output_appended', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id, status: isRecord(output) && 'error' in output ? 'tool_error' : 'returned' });
@@ -479,6 +516,24 @@ export async function ask(store: Store, session: string, prompt: string, config:
     config.onAskFinishing?.();
     // Conversation handoff is owned by the persistent memory drain, not ask lifecycle.
   }
+}
+
+type CompletionGateTool = { name: string; arguments: string; status: 'completed' | 'failed'; output: string };
+
+function completionGateState(messages: StoredMessage[], currentRequestId: string, draft: string, tools: CompletionGateTool[]): unknown {
+  const recentConversation = messages.slice(-6).map(message => ({
+    role: message.role,
+    currentRequest: message.id === currentRequestId,
+    sourceKind: message.source.sourceKind ?? 'unknown',
+    content: message.content.slice(0, 4000),
+    attachments: message.attachments.map(attachment => ({ filename: attachment.filename, mimeType: attachment.mimeType, status: attachment.status })),
+  }));
+  return {
+    purpose: 'Independent pre-delivery judgment. The main agent remains responsible for open-ended reasoning, investigation, authorization checks, and execution.',
+    recentConversation,
+    draft: draft.slice(0, 8000),
+    toolActivityThisTurn: tools,
+  };
 }
 
 function subagentExecutor(store: Store, session: string, id: string, task: { task: string; context: string; constraints: string; expected_output: string }, config: AgentConfig): (signal: AbortSignal, runId: string, taskText: string, resume: boolean) => Promise<unknown> {

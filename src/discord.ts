@@ -1,4 +1,4 @@
-import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store } from './store.js';
 import type { ChannelManagement, ChannelSettings, ChannelSettingsPatch } from './channel-settings.js';
@@ -24,7 +24,6 @@ import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { compactSession } from './compaction.js';
-import { formatDiscordUrls } from './discord-url.js';
 import { archiveOutgoingAttachment, AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import { hasAnsiProgress } from './discord-ansi.js';
 import type { SessionOpeningContext } from './store.js';
@@ -206,7 +205,7 @@ export class DiscordHandler {
           this.activeAsk.add(message.channelId);
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
-          progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(formatDiscordUrls(content)); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(content: string): Promise<unknown> }).edit(formatDiscordUrls(updated)); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
+          progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { logInfo('tool_call', { tool: 'discord_fetch_message', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
@@ -237,6 +236,7 @@ export class DiscordHandler {
             scheduleTools: this.scheduleTools(message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
             imageTools: this.imageTools(attachmentFiles, message.channelId, runtime.settings.image, config.attachmentDir),
             reasoningEffort: this.store.effectiveChannelReasoningEffort(message.channelId),
+            completionGate: runtime.settings.completionGate,
             onProgress: event => progress?.event(event),
             workspaceDirectory: DEFAULT_WORKSPACE,
             subagent: runtime.settings.subagent,
@@ -557,6 +557,7 @@ export class DiscordHandler {
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
         reasoningEffort: this.store.effectiveChannelReasoningEffort(request.outputChannelId),
+        completionGate: commandRuntime.settings.completionGate,
         hindsight: commandRuntime.hindsight,
         discordTools: createDiscordToolRuntime({
           token: config.token,
@@ -646,7 +647,7 @@ export class DiscordHandler {
         const attachmentToolCallIds: string[] = [];
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
-          transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
+          transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), completionGate: runtime.settings.completionGate, messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
           hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => this.store.memoryWriteAllowed(origin.channelId)) : undefined,
           memoryWriteAllowed: () => this.store.memoryWriteAllowed(origin.channelId),
@@ -737,8 +738,8 @@ export function splitDiscordText(text: string): string[] {
 
 async function sendText(message: TextMessage, text: string, files?: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void | Promise<void>, trace?: { askId?: string; traceId?: string; sessionId?: string }): Promise<void> {
   const context = { ...trace, channelId: message.channelId, inputMessageId: message.messageId };
-  const chunks = splitDiscordText(formatDiscordUrls(text || (files?.length ? ' ' : DELIVERY_ERROR)));
-  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), formatted: traceTextMetadata(chunks.join('')), chunks: chunks.length });
+  const chunks = splitDiscordText(text || (files?.length ? ' ' : DELIVERY_ERROR));
+  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), chunks: chunks.length });
   for (let index = 0; index < chunks.length; index++) {
     const segment = { ...context, index, total: chunks.length, ...traceTextMetadata(chunks[index]!) };
     let stage = 'send';
@@ -904,19 +905,19 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
     await handler.command({channelId: interaction.channelId ?? '', applicationId: interaction.applicationId, interactionToken: interaction.token, parentChannelId: interaction.channel?.isThread() ? interaction.channel.parentId ?? undefined : undefined, command: interaction.commandName as CommandContext['command'], enabled: interaction.commandName === 'bot_reply' ? interaction.options.getBoolean('enabled') ?? undefined : undefined, model: interaction.options.getString('id') ?? undefined, effort: interaction.commandName === 'model' ? interaction.options.getString('effort') as CommandContext['effort'] ?? undefined : undefined, replyMode: interaction.commandName === 'replymode' ? interaction.options.getString('value') as CommandContext['replyMode'] ?? undefined : undefined, mode: interaction.commandName === 'mode' ? interaction.options.getString('value') as 'queue' | 'steer' | null ?? undefined : undefined, reply: async (content, options) => {
       if (restart && !acknowledged) {
         acknowledged = true;
-        return interaction.reply({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS });
+        return interaction.reply({ content, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       }
       if (!await deferred) throw new Error('Discord interaction acknowledgement failed');
-      if (interaction.deferred || interaction.replied) return interaction.editReply({ content, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
-      return interaction.reply({ content, ephemeral: true, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
+      if (interaction.deferred || interaction.replied) return interaction.editReply({ content, flags: MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
+      return interaction.reply({ content, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
     } });
   } catch (error) {
     logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error, { mention: !isHttp429(error) });
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: DELIVERY_ERROR, allowedMentions: ALLOWED_MENTIONS });
+        await interaction.editReply({ content: DELIVERY_ERROR, flags: MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       } else {
-        await interaction.reply({ content: DELIVERY_ERROR, ephemeral: true, allowedMentions: ALLOWED_MENTIONS });
+        await interaction.reply({ content: DELIVERY_ERROR, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       }
     } catch (error) {
       logError('Discord interaction failure notice delivery failed', error, { mention: !isHttp429(error) });
@@ -1108,6 +1109,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       return {
         send: (content: string, options?: { files?: Array<{ attachment: string; name: string }> }) => target.send({
           content,
+          flags: MessageFlags.SuppressEmbeds,
           ...(options?.files ? { files: options.files } : {}),
           allowedMentions: ALLOWED_MENTIONS,
         }),
@@ -1148,7 +1150,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       void (async () => {
         const channel = await client.channels.fetch(deployNotice.channelId);
         if (!channel?.isTextBased() || !('send' in channel)) throw new Error('deployment notice channel unavailable');
-        await channel.send({ content: deployNotice.text, allowedMentions: ALLOWED_MENTIONS });
+        await channel.send({ content: deployNotice.text, flags: MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       })().catch(error => logError('Deployment notice delivery failed', error, { mention: !isHttp429(error) }));
     }
     const scheduler = new Scheduler({ store, enqueue: request => handler.enqueueScheduled(request), log: { logInfo, logWarn, logError } });
@@ -1167,7 +1169,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       ? [message.content, ...message.embeds.flatMap(embed => [embed.title, embed.description, ...embed.fields.flatMap(field => [field.name, field.value]), embed.footer?.text])].filter(value => Boolean(value?.trim())).join('\n')
       : message.content;
     const attachments = forwardedMessage ? forwardedAttachments : [...message.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size }));
-    const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, forwardedMessage, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content, hasAttachments: attachments.length > 0, attachments, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId && !forwardedMessage ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.system ? message.channel.send({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }) : message.reply({ content: text, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
+    const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, forwardedMessage, channelId: message.channelId, eventTime: message.createdAt.toISOString(), parentChannelId: message.channel.isThread() ? message.channel.parentId ?? undefined : undefined, messageId: message.id, content, hasAttachments: attachments.length > 0, attachments, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId && !forwardedMessage ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.system ? message.channel.send({ content: text, flags: MessageFlags.SuppressEmbeds, allowedMentions: options?.allowedMentions, files: options?.files }) : message.reply({ content: text, flags: MessageFlags.SuppressEmbeds, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
       .catch(error => logError(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error, { mention: !isHttp429(error) }));
     if (isErrorWebhook) void withoutLogMention(handle);
     else void handle();

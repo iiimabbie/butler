@@ -18,7 +18,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 
 export const codeExecuteDefinition = {
   type: 'function', name: 'code_execute', strict: false,
-  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000). Each tool call is recorded in tool history. Use direct tool calls for simple lookups.',
+  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000). Each tool call is recorded in tool history. Prefer this over separate calls whenever a task needs two or more read-only calls or a large result to be filtered; make single lookups and writes directly.',
   parameters: { type: 'object', properties: {
     code: { type: 'string', minLength: 1, description: 'Async function body; use return for the result.' },
     timeout_ms: { type: 'integer', minimum: 1, maximum: 120000 },
