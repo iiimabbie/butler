@@ -2,11 +2,12 @@ import { ToolUsageError } from './tool-errors.js';
 
 export const catalogDefinition = {
   type: 'function', name: 'tools_catalog', strict: false,
-  description: '列出目前可用工具的名稱與用途，或依名稱／關鍵字載入指定工具的完整定義。',
+  description: '依名稱／關鍵字載入工具的完整定義。可用工具清單已在上下文的工具索引中，不需要先列清單；用 names 一次載入這件事需要的所有工具，因為每次載入都會讓下一輪的提示快取失效。',
   parameters: { type: 'object', properties: { query: { type: 'string', maxLength: 200 }, names: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 100 } }, label: { type: 'string', maxLength: 200 } }, required: [], additionalProperties: false },
 } as const;
 
-export const residentToolNames: ReadonlySet<string> = new Set(['memory_recall','people_get','discord_fetch_message','discord_react','web_search','web_fetch','skills_list','skills_read']);
+// The most frequently loaded tools stay resident: loading one mid-ask changes the tool list and invalidates the prompt cache.
+export const residentToolNames: ReadonlySet<string> = new Set(['code_execute','memory_recall','people_get','discord_fetch_message','discord_fetch_channel_messages','discord_react','web_search','web_fetch','skills_list','skills_read','local_read','local_search','local_write','local_edit','local_shell','subagent_run','subagent_send']);
 const shortDescriptions: Record<string, string> = {
   tools_catalog: '列出可用工具並按名稱或關鍵字載入完整定義',
   code_execute: '以隔離 JavaScript 串接唯讀工具並整理結果',

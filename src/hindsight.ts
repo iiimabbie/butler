@@ -61,7 +61,7 @@ export class Hindsight {
     } catch (error) {
       logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error, { mention: !isHttp429(error) });
       store.finishTool(audit, 'failed', { bankId: this.config.bankId, error: safeError(error) });
-      emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed' });
+      emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed', error: safeError(error) });
       logMemoryPhase('bank_setup', started, 'failed');
       throw new MemoryServiceError(safeError(error));
     }
@@ -87,7 +87,7 @@ export class Hindsight {
       const reason = recoverable ? error.safeReason : undefined;
       store.finishTool(audit, 'failed', { error: safeError(error), ...(reason ? { reason } : {}) });
       logMemoryPhase('recall', recallStarted, 'failed');
-      emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'failed' });
+      emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'failed', error: safeError(error) });
       return memoryBlock(null, null, reason ?? 'Recall unavailable; no memories were provided.');
     }
     store.finishTool(audit, 'completed', auditView(result));
@@ -103,7 +103,7 @@ export class Hindsight {
   }
 
   async reflect(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 60_000);
+    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 120_000);
     const record = asRecord(result);
     if (typeof record?.text !== 'string' || !(record.based_on === null || asRecord(record.based_on))) throw new Error('Hindsight reflect response is invalid');
     return result;

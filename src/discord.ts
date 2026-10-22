@@ -236,7 +236,6 @@ export class DiscordHandler {
             scheduleTools: this.scheduleTools(message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
             imageTools: this.imageTools(attachmentFiles, message.channelId, runtime.settings.image, config.attachmentDir),
             reasoningEffort: this.store.effectiveChannelReasoningEffort(message.channelId),
-            completionGate: runtime.settings.completionGate,
             onProgress: event => progress?.event(event),
             workspaceDirectory: DEFAULT_WORKSPACE,
             subagent: runtime.settings.subagent,
@@ -557,7 +556,6 @@ export class DiscordHandler {
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
         reasoningEffort: this.store.effectiveChannelReasoningEffort(request.outputChannelId),
-        completionGate: commandRuntime.settings.completionGate,
         hindsight: commandRuntime.hindsight,
         discordTools: createDiscordToolRuntime({
           token: config.token,
@@ -647,7 +645,7 @@ export class DiscordHandler {
         const attachmentToolCallIds: string[] = [];
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
-          transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), completionGate: runtime.settings.completionGate, messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
+          transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
           hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => this.store.memoryWriteAllowed(origin.channelId)) : undefined,
           memoryWriteAllowed: () => this.store.memoryWriteAllowed(origin.channelId),
