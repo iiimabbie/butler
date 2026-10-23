@@ -109,12 +109,10 @@ function safeDownloadError(error: unknown): string {
   return '附件下載失敗';
 }
 
-// native=false keeps audio transcripts but replaces image, video and file payloads with a fetch hint.
-export async function messageAttachmentContent(message: StoredMessage, attachmentDir: string, transcription?: AudioTranscriptionConfig, native = true): Promise<unknown[]> {
+export async function messageAttachmentContent(message: StoredMessage, attachmentDir: string, transcription?: AudioTranscriptionConfig): Promise<unknown[]> {
   const content: unknown[] = [{ type: 'input_text', text: formatStoredMessageText(message) }];
   for (const attachment of message.attachments ?? []) {
     if (attachment.status !== 'ready') { content.push({ type: 'input_text', text: `[附件未能提供：${attachment.filename}；${attachment.error ?? '下載失敗'}]` }); continue; }
-    if (!native && !isAudioAttachment(attachment.mimeType, attachment.filename)) { content.push({ type: 'input_text', text: `[較早訊息的附件 ${attachment.filename}（${attachment.mimeType}）未隨附原檔；需要查看時用 discord_fetch_message 取得 msg=${message.source.discordMessageId ?? 'unknown'}。]` }); continue; }
     if (isVideoAttachment(attachment.mimeType, attachment.filename)) {
       try {
         const processed = await getVideoAttachmentResult({ path: safeLocalPath(attachment.localPath, attachmentDir), filename: attachment.filename, attachmentDir, transcription });

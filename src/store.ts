@@ -100,6 +100,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS discord_action_claims(custom_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, status TEXT NOT NULL, actor_id TEXT NOT NULL, result TEXT, claimed_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
+      CREATE TABLE IF NOT EXISTS ask_context(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, items_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_requests(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ask_id TEXT, trace_id TEXT, turn INTEGER NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL, body_sha256 TEXT NOT NULL, finished_at TEXT, http_status INTEGER, usage_json TEXT, error_type TEXT);
       CREATE INDEX IF NOT EXISTS model_requests_session_ask ON model_requests(session_id,ask_id,turn);
       CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
@@ -420,6 +421,18 @@ export class Store implements SchedulerStore {
   saveSessionOpeningContext(sessionId: string, context: SessionOpeningContext): void {
     this.db.prepare(`INSERT INTO session_opening_context(session_id,channel_id,message_id,author_id,created_at,content,attachments_json) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET channel_id=excluded.channel_id,message_id=excluded.message_id,author_id=excluded.author_id,created_at=excluded.created_at,content=excluded.content,attachments_json=excluded.attachments_json`).run(sessionId, context.channelId, context.messageId, context.authorId, context.createdAt, context.content, JSON.stringify(context.attachments));
+  }
+
+  // Per-ask context items exactly as first sent after their input message; later asks replay them so the prefix stays cacheable.
+  saveAskContext(messageId: string, items: unknown[]): void {
+    this.db.prepare('INSERT INTO ask_context(message_id,items_json) VALUES(?,?) ON CONFLICT(message_id) DO UPDATE SET items_json=excluded.items_json').run(messageId, JSON.stringify(items));
+  }
+
+  askContexts(messageIds: string[]): Map<string, unknown[]> {
+    const select = this.db.prepare('SELECT items_json FROM ask_context WHERE message_id=?');
+    const contexts = new Map<string, unknown[]>();
+    for (const id of messageIds) { const row = select.get(id) as { items_json: string } | undefined; if (row) contexts.set(id, JSON.parse(row.items_json) as unknown[]); }
+    return contexts;
   }
 
   saveContextUsage(sessionId: string, usage: { model: string; baseUrl: string; inputTokens: number; outputTokens: number; localCount: number; countSource: string; contextLimit: number; limitSource: string; sampledAt: string; attachmentSignature: string; checkpointThroughMessageId?: string }): void {

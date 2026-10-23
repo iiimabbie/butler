@@ -13,7 +13,7 @@ export const CLEAR_TABLES = [
   'discord_outgoing_segments', 'message_preparation', 'memory_batches', 'tool_calls',
   'subagent_inbox', 'subagent_events', 'subagent_runs', 'subagent_windows',
   'session_compact_checkpoints', 'session_opening_context', 'session_context_usage',
-  'discord_action_claims', 'discord_actions', 'attachment_deliveries', 'latest_cpa_request', 'model_requests',
+  'discord_action_claims', 'discord_actions', 'attachment_deliveries', 'latest_cpa_request', 'model_requests', 'ask_context',
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
 export const KEEP_TABLES = [
