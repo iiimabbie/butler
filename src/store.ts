@@ -100,6 +100,8 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS discord_action_claims(custom_id TEXT PRIMARY KEY, action_id TEXT NOT NULL, status TEXT NOT NULL, actor_id TEXT NOT NULL, result TEXT, claimed_at TEXT NOT NULL, finished_at TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
+      CREATE TABLE IF NOT EXISTS model_requests(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ask_id TEXT, trace_id TEXT, turn INTEGER NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL, body_sha256 TEXT NOT NULL, finished_at TEXT, http_status INTEGER, usage_json TEXT, error_type TEXT);
+      CREATE INDEX IF NOT EXISTS model_requests_session_ask ON model_requests(session_id,ask_id,turn);
       CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
@@ -584,6 +586,25 @@ export class Store implements SchedulerStore {
   saveLatestRequest(sessionId: string, bodyJson: string, attemptedAt = new Date().toISOString()): void {
     this.db.prepare('INSERT INTO latest_cpa_request(id,session_id,attempted_at,body_json) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,attempted_at=excluded.attempted_at,body_json=excluded.body_json')
       .run(sessionId, attemptedAt, bodyJson);
+  }
+
+  // Private diagnostic snapshots: retain at most 1,000 requests and 24 hours.
+  // The existing latest-request UI keeps its singleton; history is queried from SQLite.
+  saveModelRequest(record: { requestId: string; sessionId: string; askId?: string; traceId?: string; turn: number; bodyJson: string; bodySha256: string }, attemptedAt = new Date().toISOString()): void {
+    this.db.exec('BEGIN');
+    try {
+      this.saveLatestRequest(record.sessionId, record.bodyJson, attemptedAt);
+      this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
+        .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
+      this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 1000)')
+        .run(new Date(Date.parse(attemptedAt) - 24 * 60 * 60 * 1000).toISOString());
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  finishModelRequest(requestId: string, result: { httpStatus?: number; usage?: unknown; errorType?: string }): void {
+    this.db.prepare('UPDATE model_requests SET finished_at=?,http_status=?,usage_json=?,error_type=? WHERE request_id=?')
+      .run(new Date().toISOString(), result.httpStatus ?? null, result.usage === undefined ? null : JSON.stringify(result.usage), result.errorType ?? null, requestId);
   }
 
   history(sessionId: string, offset = 0, limit = 20): ToolRecord[] {

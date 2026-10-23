@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from 'node:crypto';
 import { codeExecuteDefinition, executeCode, readOnlyTools } from './code-mode.js';
 import { preserveOptionalToolArguments } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
@@ -376,8 +377,17 @@ export async function ask(store: Store, session: string, prompt: string, config:
       // Every channel shares the same prompt start; a per-session key keeps its requests on the machine that holds its cache,
       // and extended retention keeps a channel's history cached between messages minutes apart.
       const requestBody = JSON.stringify({ model: config.model, input, tools: toolsForRequest(), prompt_cache_key: session, prompt_cache_retention: '24h', ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
-      store.saveLatestRequest(session, JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), new Date().toISOString());
-      const { response, raw, requestId } = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher, askId: config.askId, traceId: config.traceId });
+      const requestId = randomUUID();
+      store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
+      let result: Awaited<ReturnType<typeof requestModel>>;
+      try {
+        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher, askId: config.askId, traceId: config.traceId, requestId });
+      } catch (error) {
+        store.finishModelRequest(requestId, { errorType: error instanceof Error ? error.name : 'unknown' });
+        throw error;
+      }
+      const { response, raw } = result;
+      store.finishModelRequest(requestId, { httpStatus: response.status, usage: isRecord(raw) ? raw.usage : undefined, ...(!response.ok ? { errorType: 'http_error' } : raw === null ? { errorType: 'invalid_json' } : {}) });
       if (!response.ok) {
         const serviceError = isRecord(raw) ? raw.error : undefined;
         const details = typeof serviceError === 'string' ? serviceError : isRecord(serviceError) ? ['type', 'code', 'message'].filter(key => typeof serviceError[key] === 'string').map(key => `${key}=${serviceError[key]}`).join(' ') : '';

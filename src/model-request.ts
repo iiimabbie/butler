@@ -16,9 +16,9 @@ export async function requestModel(options: {
   url: string; headers: Record<string, string>; body: string; session: string;
   model: string; turn: number; timeoutMs: number; fetcher: typeof fetch;
   emit?: (event: Record<string, unknown>) => void;
-  askId?: string; traceId?: string;
+  askId?: string; traceId?: string; requestId?: string;
 }): Promise<{ response: Response; raw: unknown; requestId: string }> {
-  const requestId = randomUUID();
+  const requestId = options.requestId ?? randomUUID();
   const started = performance.now();
   const signal = AbortSignal.timeout(options.timeoutMs);
   const emit = options.emit ?? (event => { const { event: name, timestamp: _timestamp, ...fields } = event; if (name === 'failed') logError('Model HTTP request failed', undefined, { notify: false, fields }); else logInfo(`model_http_${String(name)}`, fields); });
