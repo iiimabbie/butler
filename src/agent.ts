@@ -1,3 +1,4 @@
+import { agentReachDefinition, executeAgentReach } from './agent-reach-tools.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { codeExecuteDefinition, executeCode, readOnlyTools } from './code-mode.js';
 import { preserveOptionalToolArguments } from './tool-schema.js';
@@ -192,7 +193,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const catalog = createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
     const toolsForRequest = () => {
       if (!catalog) return fullAvailableTools;
@@ -626,6 +627,9 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     } else if (call.name.startsWith('web_')) {
       if (!config.webTools) throw new ToolUsageError('Web tools are unavailable in this entry point');
       result = await config.webTools.execute(call.name, runtimeArgs, { signal: config.signal });
+    } else if (call.name === 'agent_reach') {
+      if (!config.localTools) throw new ToolUsageError('Agent Reach is unavailable in this entry point');
+      result = await executeAgentReach(runtimeArgs, config.signal);
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
       if (!config.localTools) throw new ToolUsageError('Local tools are unavailable in this entry point');
       result = await config.localTools.execute(call.name, runtimeArgs, { channelId: config.discordContext?.channelId ?? (config.subagentEvent ? config.discordTools?.context.channelId : undefined) });

@@ -8,7 +8,7 @@ export const readOnlyTools: ReadonlySet<string> = new Set([
   'discord_fetch_channel', 'discord_fetch_channel_messages', 'discord_fetch_message',
   'google_gmail_search', 'google_gmail_read', 'google_calendar_list_events',
   'google_tasks_lists', 'google_tasks_list', 'google_drive_search', 'google_drive_read',
-  'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_map', 'web_usage',
+  'agent_reach', 'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_map', 'web_usage',
   'weather_search', 'weather_forecast', 'skills_list', 'skills_read', 'schedule_list',
   'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
 ]);
