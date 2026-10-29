@@ -57,7 +57,7 @@ export class DiscordHandler {
   private readonly ingressTails = new Map<string, Promise<void>>();
   private readonly activeIngestions = new Set<Promise<void>>();
   private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number }>();
-  private readonly activeAsk = new Set<string>();
+  private readonly activeAsk = new Map<string, string>();
   private readonly activeAskIds = new Map<string, string>();
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource; attachments?: import('./store.js').MessageInputAttachment[]; stored: import('./store.js').StoredMessage }>>>();
   private readonly consumedSteerMessageIds = new Map<string, Set<string>>();
@@ -172,7 +172,9 @@ export class DiscordHandler {
         this.memoryCoordinator?.notifyReady();
         return { content: effectiveContent, source: stored.source, attachments: stored.attachments, stored };
       });
-      if (mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
+      // A steer is an update from the current requester, not a way for another
+      // participant to replace their task while delivery still targets the original message.
+      if (mode === 'steer' && this.activeAsk.get(message.channelId) === message.authorId && (this.workCounts.get(message.channelId) ?? 0) === 1) {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
@@ -202,7 +204,7 @@ export class DiscordHandler {
             try { openingContext = await this.readOpeningMessage(message.channelId); if (openingContext) this.store.saveSessionOpeningContext(state.sessionId, openingContext); }
             catch (error) { logWarn('Discord opening message lookup failed', error); }
           }
-          this.activeAsk.add(message.channelId);
+          this.activeAsk.set(message.channelId, message.authorId);
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
@@ -906,8 +908,8 @@ export async function handleInteraction(handler: DiscordHandler, interaction: im
         return interaction.reply({ content, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       }
       if (!await deferred) throw new Error('Discord interaction acknowledgement failed');
-      if (interaction.deferred || interaction.replied) return interaction.editReply({ content, flags: MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
-      return interaction.reply({ content, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
+      if (interaction.deferred || interaction.replied) return interaction.editReply({ content, ...(!options?.embed ? { flags: MessageFlags.SuppressEmbeds } : {}), embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
+      return interaction.reply({ content, flags: options?.embed ? MessageFlags.Ephemeral : MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
     } });
   } catch (error) {
     logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error, { mention: !isHttp429(error) });
