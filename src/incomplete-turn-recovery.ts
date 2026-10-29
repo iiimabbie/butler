@@ -1,19 +1,10 @@
-/** Only explicitly observational tools may participate in unrestricted recovery.
- * Shell, delegation, new tools and tools with mixed read/write modes default to effectful.
+import { readOnlyTools } from './code-mode.js';
+
+/** Only explicitly observational tools may participate in unrestricted recovery: the shared read-only set
+ * plus observational tools kept out of scripts. Shell, delegation, new tools and tools with mixed
+ * read/write modes default to effectful.
  */
-const READ_ONLY_TOOLS = new Set([
-  'tools_catalog', 'history_list', 'history_get', 'history_search', 'journal_transcript_by_date',
-  'memory_tags_list', 'memory_recall', 'memory_reflect', 'people_list', 'people_get',
-  'discord_fetch_message', 'discord_fetch_channel_messages', 'discord_fetch_channel',
-  'google_gmail_search', 'google_gmail_read', 'google_calendar_list_events',
-  'google_tasks_lists', 'google_tasks_list', 'google_drive_search', 'google_drive_read',
-  'local_read', 'local_search', 'local_process_output',
-  'web_search', 'web_fetch', 'web_extract', 'web_map', 'web_usage',
-  'weather_search', 'weather_forecast', 'skills_list', 'skills_read', 'schedule_list',
-  'subagent_list', 'subagent_status',
-  'hledger_accounts', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
-  'hledger_schedules_list',
-]);
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([...readOnlyTools, 'tools_catalog', 'local_process_output', 'subagent_list', 'subagent_status']);
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'waiting', 'stopping', 'pending', 'in_progress', 'requires_action', 'requires_approval', 'awaiting_approval']);
 const UNCERTAIN_STATUSES = new Set(['failed', 'unknown', 'failed_unknown', 'interrupted', 'cancelled', 'canceled', 'handoff']);
 
