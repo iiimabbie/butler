@@ -9,9 +9,10 @@ services:
     env_file:
       - .env
     environment:
-      HINDSIGHT_API_DATABASE_URL: 'pg0://hindsight:5432?listen_addresses=*&hba_file=/home/hindsight/.pg0/host-access.conf'
       HINDSIGHT_API_LOG_LEVEL: info
       HINDSIGHT_API_LOG_FORMAT: json
+      # Multilingual keyword search; indexes managed by the AP on the external DB.
+      HINDSIGHT_API_TEXT_SEARCH_EXTENSION: pgroonga
       # Shared reasoning default; stages inherit unless explicitly overridden.
       HINDSIGHT_API_LLM_REASONING_EFFORT: "high"
       # Single output-language setting for all Hindsight-generated artifacts.
@@ -29,12 +30,9 @@ services:
       HINDSIGHT_API_REQUEST_REFLECT_MAX_TOKENS: "1600"
     ports:
       - "127.0.0.1:18888:8888"
-      - "127.0.0.1:15432:5432"
       - "127.0.0.1:19999:9999"
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    volumes:
-      - ../../.data/hindsight/pg0:/home/hindsight/.pg0
     healthcheck:
       test:
         - CMD
