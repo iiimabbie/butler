@@ -102,8 +102,9 @@ export class Hindsight {
     return result;
   }
 
-  async reflect(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 120_000);
+  async reflect(query: string, signal?: AbortSignal): Promise<unknown> {
+    // Outlasts HINDSIGHT_API_REFLECT_WALL_TIMEOUT (600 s) so the server's own timeout response is received.
+    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 630_000, undefined, signal);
     const record = asRecord(result);
     if (typeof record?.text !== 'string' || !(record.based_on === null || asRecord(record.based_on))) throw new Error('Hindsight reflect response is invalid');
     return result;
@@ -270,12 +271,12 @@ export class Hindsight {
 
   private bankUrl(): string { return `${this.baseUrl()}/v1/default/banks/${encodeURIComponent(this.config.bankId)}`; }
   private baseUrl(): string { return this.config.baseUrl.replace(/\/$/, ''); }
-  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number, writeAllowed?: () => boolean): Promise<{ response: Response; trace: RequestTiming }> {
+  private async request(url: string, init: RequestInit, operation: string, metadata: Partial<Pick<RequestTiming, 'budget' | 'maxTokens' | 'queryChars'>> = {}, timeoutMs?: number, writeAllowed?: () => boolean, signal?: AbortSignal): Promise<{ response: Response; trace: RequestTiming }> {
     const startedAt = Date.now();
     const trace: RequestTiming = { startedAt, requestId: randomUUID(), method: init.method ?? 'GET', operation, timeoutMs: timeoutMs ?? this.config.timeoutMs ?? 8000, ...metadata };
     try {
       if (init.method && init.method.toUpperCase() !== 'GET') assertWriteAllowed(writeAllowed);
-      const response = await this.fetcher(url, { ...init, headers: { ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...init.headers }, signal: AbortSignal.timeout(trace.timeoutMs) });
+      const response = await this.fetcher(url, { ...init, headers: { ...(init.body instanceof FormData ? {} : { 'content-type': 'application/json' }), ...init.headers }, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(trace.timeoutMs)]) : AbortSignal.timeout(trace.timeoutMs) });
       trace.headersWaitMs = Date.now() - startedAt;
       trace.status = response.status;
       return { response, trace };
@@ -333,11 +334,11 @@ export class Hindsight {
     this.finishTrace(trace);
     return body;
   }
-  private async post(url: string, data: unknown, timeoutMs?: number, writeAllowed?: () => boolean): Promise<unknown> {
+  private async post(url: string, data: unknown, timeoutMs?: number, writeAllowed?: () => boolean, signal?: AbortSignal): Promise<unknown> {
     const record = asRecord(data);
     const operation = url.endsWith('/memories/recall') ? 'recall' : url.endsWith('/reflect') ? 'reflect' : url.endsWith('/memories') ? 'memory_retain' : 'post';
     const traceMetadata = { ...(typeof record?.query === 'string' ? { queryChars: record.query.length } : {}), ...(typeof record?.budget === 'string' ? { budget: record.budget } : {}), ...(typeof record?.max_tokens === 'number' ? { maxTokens: record.max_tokens } : {}) };
-    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata, timeoutMs, writeAllowed);
+    const { response, trace } = await this.request(url, { method: 'POST', body: JSON.stringify(data) }, operation, traceMetadata, timeoutMs, writeAllowed, signal);
     const text = await this.readResponse(response, trace);
     if (!response.ok) {
       const recoverable = operation === 'recall' && (response.status === 400 || response.status === 422);

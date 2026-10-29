@@ -616,7 +616,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       const query = requiredString(runtimeArgs.query, 'query');
       result = call.name === 'memory_recall'
         ? await config.hindsight.recall(query)
-        : await config.hindsight.reflect(query);
+        : await config.hindsight.reflect(query, config.signal);
     } else if (call.name.startsWith('hledger_')) {
       if (executionSource !== 'agent' || !config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
       result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!);

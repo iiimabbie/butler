@@ -28,6 +28,8 @@ services:
       HINDSIGHT_API_REQUEST_RECALL_MAX_TOKENS: "1200"
       HINDSIGHT_API_REQUEST_REFLECT_BUDGET: "mid"
       HINDSIGHT_API_REQUEST_REFLECT_MAX_TOKENS: "1600"
+      # Total reflect deadline; Butler waits 30 s longer to receive this timeout response.
+      HINDSIGHT_API_REFLECT_WALL_TIMEOUT: "600"
     ports:
       - "127.0.0.1:18888:8888"
       - "127.0.0.1:19999:9999"

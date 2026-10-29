@@ -13,12 +13,14 @@ export const readOnlyTools: ReadonlySet<string> = new Set([
   'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
 ]);
 
+// memory_reflect's own deadline exceeds the longest script, so scripts cannot call it.
+const scriptTools: ReadonlySet<string> = new Set([...readOnlyTools].filter(name => name !== 'memory_reflect'));
 const MAX_CALLS = 64;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 
 export const codeExecuteDefinition = {
   type: 'function', name: 'code_execute', strict: false,
-  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000). Each tool call is recorded in tool history. Prefer this over separate calls whenever a task needs two or more read-only calls or a large result to be filtered; make single lookups and writes directly.',
+  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000); memory_reflect can run longer than that, so call it directly. Each tool call is recorded in tool history. Prefer this over separate calls whenever a task needs two or more read-only calls or a large result to be filtered; make single lookups and writes directly.',
   parameters: { type: 'object', properties: {
     code: { type: 'string', minLength: 1, description: 'Async function body; use return for the result.' },
     timeout_ms: { type: 'integer', minimum: 1, maximum: 120000 },
@@ -55,7 +57,7 @@ export async function executeCode(args: Record<string, unknown>, options: {
         }
         if (message.type === 'error') { reject(new ToolUsageError(message.error!)); return; }
         try {
-          if (typeof message.name !== 'string' || !readOnlyTools.has(message.name) || !options.available(message.name)) throw new Error(`Tool ${String(message.name)} is not available to scripts`);
+          if (typeof message.name !== 'string' || !scriptTools.has(message.name) || !options.available(message.name)) throw new Error(`Tool ${String(message.name)} is not available to scripts`);
           if (!message.args || typeof message.args !== 'object' || Array.isArray(message.args)) throw new Error('Tool args must be a JSON object');
           if (++calls > MAX_CALLS) throw new Error(`Scripts may make at most ${MAX_CALLS} tool calls`);
           const output = await options.execute(message.name, message.args as Record<string, unknown>, `${options.callId}:${calls}`);
