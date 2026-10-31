@@ -236,6 +236,15 @@ export async function ask(store: Store, session: string, prompt: string, config:
       return { messageId: message.id, items, protected: fresh.some(current => current.id === message.id) || consumedSteerMessageIds.has(message.id) };
     }));
     const initialGroupReferences = new Map(initialGroups.map(group => [group.items, group.messageId]));
+    if (catalog) {
+      // Tools loaded earlier in the session stay loaded, so a new message starts with the tool list the previous one ended with and keeps its cached prefix.
+      const historyItems = initialGroups.flatMap(group => group.items).filter(isRecord);
+      const catalogCallIds = new Set(historyItems.filter(item => item.type === 'function_call' && item.name === 'tools_catalog').map(item => item.call_id));
+      const loadedNames = [...new Set(historyItems.filter(item => item.type === 'function_call_output' && catalogCallIds.has(item.call_id)).flatMap(item => {
+        try { const output: unknown = JSON.parse(String(item.output)); return isRecord(output) && Array.isArray(output.loaded_names) ? output.loaded_names : []; } catch { return []; }
+      }).filter((name): name is string => typeof name === 'string' && catalog.getDefinition(name) !== undefined))];
+      for (let start = 0; start < loadedNames.length; start += 30) catalog.execute({ names: loadedNames.slice(start, start + 30) });
+    }
     const liveSummaryState = { role: 'user', content: '' };
     const input: unknown[] = [...stableInput, liveSummaryState, ...initialGroups.flatMap(group => group.items), ...askContextInput];
     const recentCount = 10;
