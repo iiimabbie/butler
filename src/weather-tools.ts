@@ -8,7 +8,7 @@ const DAILY_FIELDS = ['weather_code', 'temperature_2m_max', 'temperature_2m_min'
 export const weatherDefinitions = [
   {
     type: 'function', name: 'weather_search',
-    description: 'Find location candidates and return their coordinates.',
+    description: 'Find location candidates and return coordinates for weather_forecast. location takes one place name, such as "板橋", "Banqiao" or "Taipei"; if the Chinese name finds nothing, use the English name.',
     parameters: {
       type: 'object', properties: { location: { type: 'string', minLength: 1 }, country_code: { type: 'string', pattern: '^[A-Za-z]{2}$' } },
       required: ['location'], additionalProperties: false,
