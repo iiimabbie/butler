@@ -7,7 +7,7 @@ Butler is the owner's personal assistant, available to people and bots in multi-
 - Node.js 24.21.0 (built-in `node:sqlite` and discord.js 14.27.0).
 - `npm install` then `npm run build`.
 - discord.js v14.27.0 is installed locally in this project; this is a native Node application, not a Docker workload.
-- Static settings live only in the project-root `config.yaml` (file mode 600), ignored by Git. The path is resolved from `import.meta.url`, not the process working directory. The application does not create or migrate this private file. No external-path fallback, static environment fallback, environment bridge, or configuration CLI is provided.
+- Static settings live only in `.data/config.yaml` (file mode 600), ignored by Git with the rest of `.data/`. The path is resolved from `import.meta.url`, not the process working directory. The application does not create or migrate this private file. No external-path fallback, static environment fallback, environment bridge, or configuration CLI is provided.
 - `/model` in Discord lists IDs exposed by `llm.baseUrl`; choose one as the session model.
 
 Configuration schema (optional sections may be omitted; example values are placeholders):
@@ -122,7 +122,7 @@ The 17 Discord tools include the original eight message tools, six thread/forum 
 
 可將錯誤通知送到一般文字頻道，或論壇中的既有 errlog 貼文。建立 webhook 時，若目的地是論壇，請選論壇父頻道；再用 `errorWebhookThreadId` 指定既有貼文，不要設定 `thread_name`，以免建立新貼文。
 
-以下是合併到 `config.yaml` 既有 `discord:` 區塊的示意設定，不要覆蓋原有欄位或 `channelIds`；placeholder 不能直接用來啟動。一般文字頻道省略 `errorWebhookThreadId`；論壇父頻道放入 `channelIds` 即涵蓋其 direct child 貼文。
+以下是合併到 `.data/config.yaml` 既有 `discord:` 區塊的示意設定，不要覆蓋原有欄位或 `channelIds`；placeholder 不能直接用來啟動。一般文字頻道省略 `errorWebhookThreadId`；論壇父頻道放入 `channelIds` 即涵蓋其 direct child 貼文。
 
 ```yaml
 discord:
@@ -135,11 +135,11 @@ discord:
     - "FORUM_OR_TEXT_CHANNEL_ID"
 ```
 
-只接收錯誤通知時，設定 `errorWebhook*` 即可；這些欄位不會建立 Alert Channel 政策。若要讓 Butler 在指定頻道處理告警訊息，另在私人 `config.yaml` 的 `discord.alertChannelIds` 填入專用 root channel ID（可為論壇父頻道），不需加入一般 `channelIds`。此設定熱更新且預設空清單；root 與其既有父層機制辨識的子討論串固定追蹤、Bot Reply 啟用、寫入 Hindsight、僅 @ 提及時回應，並固定 Steer。這些有效值優先於舊 per-channel 設定，UI 會標示固定政策；移除 ID 後舊覆寫仍保留並恢復生效。需確保 Bot 在該頻道／討論串有檢視、讀取歷史及發訊息權限。
+只接收錯誤通知時，設定 `errorWebhook*` 即可；這些欄位不會建立 Alert Channel 政策。若要讓 Butler 在指定頻道處理告警訊息，另在私人 `.data/config.yaml` 的 `discord.alertChannelIds` 填入專用 root channel ID（可為論壇父頻道），不需加入一般 `channelIds`。此設定熱更新且預設空清單；root 與其既有父層機制辨識的子討論串固定追蹤、Bot Reply 啟用、寫入 Hindsight、僅 @ 提及時回應，並固定 Steer。這些有效值優先於舊 per-channel 設定，UI 會標示固定政策；移除 ID 後舊覆寫仍保留並恢復生效。需確保 Bot 在該頻道／討論串有檢視、讀取歷史及發訊息權限。
 
 `/status` 的 Reply mode、Bot Reply、Tracked、Hindsight write 與 Msg mode 會顯示 alert 的有效固定值。告警 webhook 自己的訊息若送入 alert channel，也只有明確 @ 提及 Butler 才會觸發 ask；錯誤通知 webhook 的目的地本身仍不等同 alert channel。收到 API policy 拒絕時會記錄診斷；收到告警不代表 Butler 一定能修復或會自動修復。
 
-`channelIds`、webhook URL、thread ID、mention ID 都存於私人 `config.yaml`；reply mode、mode 與全域 Bot Reply 狀態存於 SQLite。Bot 自身使用者 ID 取自 Discord 登入 identity。上述三個 `errorWebhook` 欄位支援熱更新，不需改 source 或重新 build；程式不硬編此部署的論壇、貼文或使用者 ID。
+`channelIds`、webhook URL、thread ID、mention ID 都存於私人 `.data/config.yaml`；reply mode、mode 與全域 Bot Reply 狀態存於 SQLite。Bot 自身使用者 ID 取自 Discord 登入 identity。上述三個 `errorWebhook` 欄位支援熱更新，不需改 source 或重新 build；程式不硬編此部署的論壇、貼文或使用者 ID。
 
 ## Host tools (Discord only; deployed, user acceptance pending)
 

@@ -1005,7 +1005,7 @@ function createChannelManagement(client: Client, store: Store, getRuntime: () =>
   const isAuthorized = async (id: string): Promise<boolean> => store.isTrackedChannel(id) || store.isAlertChannel(id);
   const stop = async (id: string): Promise<ChannelSettings> => {
     if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
-    if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 config.yaml 的 webhook 設定管理'), { status: 400 });
+    if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 .data/config.yaml 的 webhook 設定管理'), { status: 400 });
     if (!canStopChannel(id)) throw Object.assign(new Error('頻道忙碌中；停止追蹤未套用'), { status: 409 });
     store.deleteTrackedChannel(id);
     return build(id);
@@ -1054,7 +1054,7 @@ function createChannelManagement(client: Client, store: Store, getRuntime: () =>
     },
     updateChannel: async (id, patch: ChannelSettingsPatch) => {
       if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
-      if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 config.yaml 的 webhook 設定管理'), { status: 400 });
+      if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 .data/config.yaml 的 webhook 設定管理'), { status: 400 });
       if (!store.isTrackedChannel(id)) throw Object.assign(new Error('頻道尚未追蹤，請先明確新增追蹤'), { status: 400 });
       const settingsPatch: Record<string, unknown> = {};
       for (const key of ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel'] as const) if (key in patch) settingsPatch[key] = patch[key] ?? null;

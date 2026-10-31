@@ -28,7 +28,7 @@ export function configuredAlertChannelIds(config: ButlerConfig): string[] {
   return discord?.errorWebhookUrl && discord.errorWebhookThreadId ? [discord.errorWebhookThreadId] : [];
 }
 
-const CONFIG_PATH = fileURLToPath(new URL('../config.yaml', import.meta.url));
+const CONFIG_PATH = fileURLToPath(new URL('../.data/config.yaml', import.meta.url));
 
 export function readConfig(path = CONFIG_PATH): ButlerConfig {
   let raw: unknown;

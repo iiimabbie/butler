@@ -38,7 +38,7 @@ cd /home/iiimabbie/workspace/butler
 node scripts/clear-hindsight-memory.mjs
 ```
 
-預設從 config.yaml 讀取 memory.bankId 與 memory.baseUrl，只查詢目標與資料數量，不建立備份、不修改服務。
+預設從 .data/config.yaml 讀取 memory.bankId 與 memory.baseUrl，只查詢目標與資料數量，不建立備份、不修改服務。
 
 ### 正式清空 butler-discord
 
@@ -84,7 +84,7 @@ backups/hindsight/<UTC 時間>/<bank-id>-before-reset.json
 node scripts/clear-memory-and-chats.mjs
 ```
 
-預設讀取 config.yaml 的 `memory.bankId`、`memory.baseUrl` 與絕對路徑 `paths.database`，檢查目標並列出本地清除表筆數、Hindsight 範圍及保留資料；不建立備份或修改 SQLite/Hindsight。可以用 `--bank-id`、`--base-url`、`--database <絕對路徑>` 指定目標。
+預設讀取 .data/config.yaml 的 `memory.bankId`、`memory.baseUrl` 與絕對路徑 `paths.database`，檢查目標並列出本地清除表筆數、Hindsight 範圍及保留資料；不建立備份或修改 SQLite/Hindsight。可以用 `--bank-id`、`--base-url`、`--database <絕對路徑>` 指定目標。
 
 ### 執行清除
 

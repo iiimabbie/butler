@@ -400,7 +400,7 @@ function renderChannels() {
   const meta = element('dl', undefined, 'channel-meta');
   for (const [label, value] of [['頻道 ID', channel.channelId], ['父頻道', channel.parentChannelId || '無（僅 Discord 資訊）'], ['追蹤狀態', state.textContent]]) { meta.append(element('dt', label), element('dd', value)); }
   panel.append(meta);
-  if (channel.alert) panel.append(element('p', 'Alert 頻道固定政策：追蹤、Bot 回覆、Hindsight 寫入、僅 @ 觸發、Steer；個別設定不會覆蓋。請由 config.yaml 的 webhook 設定管理。', 'muted'));
+  if (channel.alert) panel.append(element('p', 'Alert 頻道固定政策：追蹤、Bot 回覆、Hindsight 寫入、僅 @ 觸發、Steer；個別設定不會覆蓋。請由 .data/config.yaml 的 webhook 設定管理。', 'muted'));
   if (!channel.authorized) { panel.append(element('p', '此頻道已不再授權，僅保留歷史資料供檢視。', 'empty-state')); return; }
   const fieldset = (title, className='') => { const section=element('section',undefined,`channel-group ${className}`); section.append(element('h4',title)); const grid=element('div',undefined,'channel-fields'); section.append(grid); panel.append(section); return grid; };
   const reply = fieldset('回應','reply-group');

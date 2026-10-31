@@ -25,7 +25,7 @@ const HELP = `用法：node scripts/clear-memory-and-chats.mjs [--help] [--bank-
 預設為唯讀 preview，不建立備份、不修改聊天或記憶。
 --bank-id <id>                  精確 Hindsight bank ID
 --base-url <url>                Hindsight base URL
---database <absolute-path>      覆寫 config.yaml paths.database
+--database <absolute-path>      覆寫 .data/config.yaml paths.database
 --execute                      清除 Hindsight 記憶與 SQLite 聊天資料
 --confirm-bank <id>             必須與 bank ID 完全相同
 --confirm-database <path>       必須與解析後絕對 SQLite 路徑完全相同
@@ -214,7 +214,7 @@ async function saveBackup(db, bankId, snapshot) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(HELP); return; }
-  const config = YAML.parse(await fs.readFile(path.join(ROOT, 'config.yaml'), 'utf8'));
+  const config = YAML.parse(await fs.readFile(path.join(ROOT, '.data/config.yaml'), 'utf8'));
   const bankId = string(options.bankId ?? config?.memory?.bankId, 'memory.bankId');
   const base = string(options.baseUrl ?? config?.memory?.baseUrl, 'memory.baseUrl').replace(/\/$/, '');
   const url = new URL(base);
