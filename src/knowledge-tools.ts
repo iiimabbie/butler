@@ -3,15 +3,14 @@ import { ToolUsageError } from './tool-errors.js';
 import type { Hindsight } from './hindsight.js';
 
 const string = { type: 'string', minLength: 1 };
-const refreshDescription = 'Refresh options: consolidation is the default; cron requires a valid five-field UTC expression (convert requested local time to UTC); manual does not refresh automatically. Minimum interval defaults to 7200 seconds; 0 disables it.';
 export const refreshProperties = {
-  refresh_mode: { type: 'string', enum: ['consolidation', 'cron', 'manual'], description: refreshDescription },
-  refresh_cron: { type: 'string', minLength: 1, description: refreshDescription },
-  min_refresh_interval_seconds: { type: 'integer', minimum: 0, description: refreshDescription },
+  refresh_mode: { type: 'string', enum: ['consolidation', 'cron', 'manual'], description: 'consolidation (default) refreshes after memory consolidation; cron refreshes on refresh_cron; manual never refreshes automatically.' },
+  refresh_cron: { type: 'string', minLength: 1, description: 'Five-field UTC cron expression (convert local times to UTC); only with refresh_mode=cron.' },
+  min_refresh_interval_seconds: { type: 'integer', minimum: 0, description: 'Minimum seconds between refreshes; default 7200, 0 disables the limit.' },
 };
 export const knowledgePageCreateDefinition = {
   type: 'function', name: 'knowledge_page_create',
-  description: `Create a knowledge page from shared memory. Provide a concise name, source_query describing what to organize, max_tokens (256–8192), optional existing memory tags (verify with memory_tags_list and relevant memories; do not invent tags), and optional root folder name. Do not provide page content or fixed trigger settings. Creation is queued, not completed content. ${refreshDescription}`,
+  description: `Create a knowledge page from shared memory: a concise name, source_query describing what to organize, max_tokens (256–8192), optional existing memory tags, and an optional root folder name. Page content and fixed trigger settings are not accepted. Creation is queued, not completed content.`,
   parameters: { type: 'object', properties: {
     name: { type: 'string', minLength: 1, maxLength: 100 }, source_query: string,
     max_tokens: { type: 'integer', minimum: 256, maximum: 8192 },

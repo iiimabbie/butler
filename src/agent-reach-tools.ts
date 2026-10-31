@@ -17,7 +17,7 @@ type Action = { name: string; help: string; params: Param[] };
 type Channel = { name: string; description: string; level: string; actions: Action[] };
 export const agentReachDefinition = {
   type: 'function', name: 'agent_reach', strict: false,
-  description: 'Search/read social platforms and videos: Xiaohongshu, Bilibili, YouTube, V2EX, GitHub and more. Prefer this for platform posts, comments and subtitles; use web_search/web_fetch for ordinary web pages. Call action=capabilities first for supported platform actions and exact params. Read-only: no publishing, comments, likes, login/config changes or paid transcription. Platform support does not imply installed/logged-in/working. Loaded comments may be incomplete; report upstream failures honestly. Preserve returned link domains and required xsec_token; a domain does not establish account region.',
+  description: 'Search/read social platforms and videos: Xiaohongshu, Bilibili, YouTube, V2EX, GitHub and more. Call action=capabilities first for supported platform actions and exact params. Read-only: no publishing, comments, likes, login/config changes or paid transcription. Platform support does not imply installed/logged-in/working. Loaded comments may be incomplete. Preserve returned link domains and required xsec_token; a domain does not establish account region.',
   parameters: { type: 'object', properties: {
     action: { type: 'string', description: 'capabilities, or a platform action returned by capabilities.' },
     platform: { type: 'string', enum: Object.keys(actions), description: 'Required except for capabilities; optionally filter capabilities.' },
