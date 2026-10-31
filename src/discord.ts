@@ -18,7 +18,6 @@ import { ProgressRenderer } from './progress.js';
 import { Scheduler, type ScheduledTaskRequest } from './scheduler.js';
 import { createScheduleToolRuntime } from './schedule-tools.js';
 import { financeInteractiveOrigin, financeNonInteractiveOrigin } from './finance-origin.js';
-import { createPeopleToolRuntime } from './people-tools.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
@@ -231,7 +230,6 @@ export class DiscordHandler {
             hledgerTools: runtime.hledgerTools,
             executionOrigin: financeInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
             weatherTools: this.weatherTools,
-            peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => this.store.memoryWriteAllowed(message.channelId)) : undefined,
             memoryWriteAllowed: () => this.store.memoryWriteAllowed(message.channelId),
             skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
             scheduleTools: this.scheduleTools(message.authorId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
@@ -570,7 +568,6 @@ export class DiscordHandler {
         hledgerTools: commandRuntime.hledgerTools,
         executionOrigin: financeNonInteractiveOrigin('scheduler'),
         weatherTools: this.weatherTools,
-        peopleTools: commandRuntime.hindsight ? createPeopleToolRuntime(commandRuntime.hindsight, () => this.store.memoryWriteAllowed(request.outputChannelId)) : undefined,
         memoryWriteAllowed: () => this.store.memoryWriteAllowed(request.outputChannelId),
         skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
         scheduleTools: this.scheduleTools(request.job.creatorId, commandRuntime.settings.schedule?.timezone ?? 'Asia/Taipei'),
@@ -648,7 +645,7 @@ export class DiscordHandler {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
           hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
-          googleTools: this.googleTools, peopleTools: runtime.hindsight ? createPeopleToolRuntime(runtime.hindsight, () => this.store.memoryWriteAllowed(origin.channelId)) : undefined,
+          googleTools: this.googleTools,
           memoryWriteAllowed: () => this.store.memoryWriteAllowed(origin.channelId),
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
           imageTools: this.imageTools(attachmentFiles, origin.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,

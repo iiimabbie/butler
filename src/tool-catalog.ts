@@ -7,13 +7,12 @@ export const catalogDefinition = {
 } as const;
 
 // The most frequently loaded tools stay resident: loading one mid-ask changes the tool list and invalidates the prompt cache.
-export const residentToolNames: ReadonlySet<string> = new Set(['code_execute','memory_recall','people_get','discord_fetch_message','discord_fetch_channel_messages','discord_react','web_search','web_fetch','skills_list','skills_read','local_read','local_search','local_write','local_edit','local_shell','subagent_run','subagent_send']);
+export const residentToolNames: ReadonlySet<string> = new Set(['code_execute','memory_recall','discord_fetch_message','discord_fetch_channel_messages','discord_react','web_search','web_fetch','skills_list','skills_read','local_read','local_search','local_write','local_edit','local_shell','subagent_run','subagent_send']);
 const shortDescriptions: Record<string, string> = {
   tools_catalog: '列出可用工具並按名稱或關鍵字載入完整定義',
   agent_reach: '搜尋、閱讀小紅書、Bilibili、YouTube、V2EX 等平台內容與查詢唯讀能力',
   code_execute: '以隔離 JavaScript 串接唯讀工具並整理結果',
   memory_recall: '搜尋跨對話長期記憶', memory_reflect: '綜合長期記憶回答問題', memory_tags_list: '列出記憶標籤', knowledge_page_create: '建立知識頁',
-  people_list: '列出人物資料', people_get: '查詢人物資料', people_upsert: '新增或更新人物資料',
   history_list: '列出工具操作紀錄', history_get: '讀取指定工具操作紀錄', history_search: '搜尋工具操作紀錄', journal_transcript_by_date: '按日期讀取已捕捉的 Discord 對話',
   subagent_run: '派遣子代理執行獨立任務', subagent_send: '向子代理傳送訊息', subagent_list: '列出子代理工作', subagent_status: '查詢子代理狀態', subagent_stop: '停止子代理',
   discord_fetch_message: '讀取 Discord 訊息', discord_react: '對 Discord 訊息加表情', discord_fetch_channel_messages: '讀取頻道訊息', discord_fetch_channel: '查閱 Discord 頻道', discord_send_message: '在 Discord 傳送訊息', discord_attach_to_reply: '將附件加入 Discord 回覆', discord_send_buttons: '傳送 Discord 按鈕', discord_edit_message: '編輯 Discord 訊息', discord_delete_message: '刪除 Discord 訊息', discord_pin: '置頂 Discord 訊息', discord_unpin: '取消置頂 Discord 訊息', discord_create_forum_post: '建立論壇文章', discord_archive_thread: '封存討論串', discord_delete_thread: '刪除討論串', discord_rename_post: '重新命名文章', discord_rename_forum: '重新命名論壇',

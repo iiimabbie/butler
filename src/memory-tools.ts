@@ -3,7 +3,7 @@ import type { Hindsight } from './hindsight.js';
 
 export const memoryTagsDefinition = {
   type: 'function', name: 'memory_tags_list',
-  description: 'Query existing tags in the shared memory bank for any topic, including people and projects. Supports wildcard q, such as person:* or project:*, and offset/limit pagination (default 50, maximum 100). Before people_upsert, confirm tag-to-person mapping using relevant memories; tag existence and counts do not prove identity. Do not invent tags.',
+  description: 'Query existing tags in the shared memory bank for any topic, including people and projects. Supports wildcard q, such as person:* or project:*, and offset/limit pagination (default 50, maximum 100). Do not invent tags.',
   parameters: { type: 'object', properties: { q: { type: 'string', minLength: 1 }, limit: { type: 'integer', minimum: 1, maximum: 100 }, offset: { type: 'integer', minimum: 0 } }, required: [], additionalProperties: false },
 };
 

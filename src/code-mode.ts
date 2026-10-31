@@ -3,7 +3,7 @@ import { ToolUsageError } from './tool-errors.js';
 
 // Explicit list: a newly added tool is not available to scripts (or run concurrently) until it is known to be read-only.
 export const readOnlyTools: ReadonlySet<string> = new Set([
-  'memory_recall', 'memory_reflect', 'memory_tags_list', 'people_list', 'people_get',
+  'memory_recall', 'memory_reflect', 'memory_tags_list',
   'history_list', 'history_get', 'history_search', 'journal_transcript_by_date',
   'discord_fetch_channel', 'discord_fetch_channel_messages', 'discord_fetch_message',
   'google_gmail_search', 'google_gmail_read', 'google_calendar_list_events',

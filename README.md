@@ -156,7 +156,7 @@ A single local-process runtime belongs to the Discord service and survives `/new
 
 ## Knowledge pages
 
-With Hindsight configured, `knowledge_page_create` creates general knowledge pages using fixed operator-owned settings; `people_upsert` creates or refreshes person pages, with optional refresh settings applying only to new pages. Both queue generation rather than returning completed content.
+With Hindsight configured, `knowledge_page_create` creates knowledge pages using fixed operator-owned settings and queues generation rather than returning completed content.
 
 ## Web tools (Discord only; pool and unified provider configuration deployed)
 

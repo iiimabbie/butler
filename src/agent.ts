@@ -17,7 +17,6 @@ import type { GoogleToolRuntime } from './google-tools.js';
 import type { LocalToolRuntime } from './local-tools.js';
 import type { WebToolRuntime } from './web-tools.js';
 import type { WeatherToolRuntime } from './weather-tools.js';
-import type { PeopleToolRuntime } from './people-tools.js';
 import type { SkillsToolRuntime } from './skills.js';
 import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
@@ -65,7 +64,6 @@ export interface AgentConfig {
   localTools?: LocalToolRuntime;
   webTools?: WebToolRuntime;
   weatherTools?: WeatherToolRuntime;
-  peopleTools?: PeopleToolRuntime;
   skillsTools?: SkillsToolRuntime;
   scheduleTools?: ScheduleToolRuntime;
   imageTools?: ImageToolRuntime;
@@ -194,7 +192,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.peopleTools?.definitions.filter(tool => tool.name !== 'people_upsert' || !config.memoryWriteAllowed || config.memoryWriteAllowed()) ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const catalog = createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
     const toolsForRequest = () => {
       if (!catalog) return fullAvailableTools;
@@ -639,10 +637,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     } else if (call.name.startsWith('google_')) {
       if (!googleRuntime) throw new ToolUsageError('Google tools are unavailable until Google is connected');
       result = await googleRuntime.execute(call.name, runtimeArgs);
-    } else if (call.name.startsWith('people_')) {
-      if (!config.peopleTools) throw new ToolUsageError('People tools are unavailable in this entry point');
-      if (call.name === 'people_upsert') assertMemoryWriteAllowed(config.memoryWriteAllowed);
-      result = await config.peopleTools.execute(call.name, runtimeArgs, config.memoryWriteAllowed);
     } else if (call.name.startsWith('skills_')) {
       if (!config.skillsTools) throw new ToolUsageError('Skills tools are unavailable in this entry point');
       result = await config.skillsTools.execute(call.name, runtimeArgs);
