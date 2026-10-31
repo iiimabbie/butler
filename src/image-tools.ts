@@ -35,7 +35,7 @@ const WORKSPACE_ROOT = resolve(PROJECT_ROOT, 'workspace');
 const generationDefinition = {
   type: 'function',
   name: 'image_generate',
-  description: 'Generate an image from a text prompt and save it to the attachment archive. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then call image_save with the returned exact path and destination, and reply with text and the queued attachment. For an image of yourself, use image_generate_self.',
+  description: 'Generate an image from a text prompt into a temporary file and return its path. Deliver it by saving it with image_save. For an image of yourself, use image_generate_self.',
   parameters: {
     type: 'object',
     properties: { prompt: { type: 'string', minLength: 1, maxLength: 10_000 } },
@@ -46,7 +46,7 @@ const generationDefinition = {
 const selfDefinition = {
   type: 'function',
   name: 'image_generate_self',
-  description: 'Generate a new image of yourself. Write a detailed prompt describing the scene, action, and clothing; the tool automatically attaches your fixed reference photo, so do not look up or provide its path. The result must be a newly generated image, never the original photo. Before saving, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a suitable existing workspace directory and semantic filename, preferring an appropriate subdirectory under workspace/picture/ and using its root only when no category fits; this is a recommendation, not a restriction. Then save with image_save using its exact path and destination before replying with text and the queued attachment.',
+  description: 'Generate a new image of yourself from a detailed prompt (scene, action, clothing). Your fixed reference photo is attached automatically; the result is always newly generated, never the original photo. Deliver it by saving it with image_save.',
   parameters: {
     type: 'object',
     properties: { prompt: { type: 'string', minLength: 1, maxLength: 10_000 } },
@@ -56,7 +56,7 @@ const selfDefinition = {
 };
 const saveDefinition = {
   type: 'function', name: 'image_save',
-  description: 'Save a newly generated temporary image to the model-chosen workspace destination. Before calling, use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Prefer a suitable existing category subdirectory under workspace/picture/; use the picture root only when no category fits. Choose a semantic filename and workspace destination; workspace/picture/ is recommended, not the only allowed location. After saving, reply with text and the queued attachment.',
+  description: 'Save a generated temporary image (exact path returned by image_generate or image_generate_self) to destination, a new file path inside the workspace whose parent directory exists, and queue it as an attachment for the final reply. Existing files are never overwritten. workspace/picture/ holds existing categorized images.',
   parameters: { type: 'object', properties: { path: { type: 'string', minLength: 1 }, destination: { type: 'string', minLength: 1 } }, required: ['path', 'destination'], additionalProperties: false },
 };
 
@@ -158,7 +158,7 @@ export function createImageToolRuntime(options: {
         throw new Error('Generated image could not be saved as an attachment; generation outcome is unknown and must not be retried automatically');
       }
       pending.set(path, { filename, mime: image.mime, archivePath });
-      return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'First use local_shell to run ls workspace/picture/ and inspect existing photos and categories. Choose a workspace destination and semantic filename, preferring a suitable existing picture category subdirectory; use workspace/picture/ root only when no category fits. This is a recommendation, not a restriction. Then call image_save with this exact path and destination, and reply with text and the queued attachment.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
+      return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'Save it with image_save using this exact path before delivery.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
     },
   };
 }
