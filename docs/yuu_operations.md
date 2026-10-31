@@ -24,7 +24,7 @@ nvm use 24.21.0
 
 ## 直接編輯排程與頻道設定
 
-服務首次啟動時會把既有 cron、reminder 與頻道行為設定搬到 `.data/config/`；搬移前會在 `.data/` 建立含已提交 WAL 的一致 SQLite 備份，服務 log 會記錄實際備份路徑。搬移完成後，設定檔是唯一編輯來源，舊設定資料表會移除；SQLite 保留執行時點、執行紀錄與政策 revision。
+`.data/config/` 還沒有任何設定檔時，服務啟動會建立空的 `crons.yaml`、`reminders.yaml` 與 `channels.yaml`；設定檔是唯一編輯來源，SQLite 只保留排程的執行時點與執行紀錄（`schedule_runtime`、`schedule_runs`）。
 
 - `.data/config/crons.yaml` 與 `reminders.yaml` 是兩格縮排 YAML 清單，`content: |` 底下可以直接換行；`|-` 同樣保留段落換行，但不在文字末尾多加換行。Discord ID 與時間請用引號包住。每筆需有唯一的 `id`、建立者 Discord ID `creatorId`、目的頻道 ID `outputChannelId`、任務內容 `content`、建立時間 `createdAt`；cron 項目另需 `cron` 表達式，reminder 項目另需帶時區的 ISO `runAt`。`timezone` 可省略（沿用根設定的時區，預設 `Asia/Taipei`），`enabled` 可省略（預設 `true`），`notify` 可省略（預設 `always`）或設為 `on_event`。`nextRun` 等執行狀態不放在檔案裡。
 - `.data/config/channels.yaml` 使用 `channels:` map；每個 entry 的存在就代表追蹤，空設定 `{}` 也有效。只支援 `botReply`、`hindsightWrite`、`replyMode`、`mode`、`model`、`effort`、`imageModel`；省略或 `null` 使用全域預設，不繼承父頻道。一般頻道預設 `hindsightWrite: false`、`mode: steer`；明確填寫的設定優先。固定錯誤通知頻道由 `config.yaml` 的 `discord.errorWebhookThreadId`（且設定 `errorWebhookUrl`）推導，不可列入或覆寫。
