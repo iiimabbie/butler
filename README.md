@@ -213,7 +213,6 @@ Completed: CPA `/models` listing and `/responses` loop, time and history tools, 
 
 ## Project documents
 
-- [歷史日記匯入操作說明](docs/done/journal-import.md)
 - [維運小抄：啟停、部署與看 log](docs/yuu_operations.md)
 
 - [Requirements and acceptance](docs/done/requirements.md)
