@@ -80,13 +80,9 @@ image:
   # Optional path (relative to the project root); when set, image_generate_self always includes this reference.
   identityReferencePath: workspace/renee/appearance-reference.png
 
-# Optional background subagent tool; uses llm.baseUrl/apiKey and this model.
+# Optional background subagent (Codex CLI). Butler picks the model per task from the LLM endpoint's model list.
 subagent:
-  model: YOUR_SUBAGENT_MODEL
-  # toolsEnabled: true  # hot-reloadable; false hides and rejects parent management tools (default true)
-  # Existing workers continue; internal handoff retains send/stop only while disabled.
-  # maxTurns: 30
-  # timeoutMs: 120000
+  # toolsEnabled: true  # hot-reloadable; false hides and rejects parent management tools
 
 # Optional default timezone for cron and reminder creation.
 schedule:
