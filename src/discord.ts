@@ -13,7 +13,6 @@ import { GoogleAuth } from './google-auth.js';
 import { GoogleClient } from './google-client.js';
 import { createGoogleToolRuntime, type GoogleToolRuntime } from './google-tools.js';
 import { LocalToolRuntime } from './local-tools.js';
-import { Hindsight } from './hindsight.js';
 import { ProgressRenderer } from './progress.js';
 import { Scheduler, type ScheduledTaskRequest } from './scheduler.js';
 import { createScheduleToolRuntime } from './schedule-tools.js';
@@ -36,7 +35,7 @@ export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
 export type DiscordConfig = { token: string; ownerId: string; alertChannelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
-export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsight?: Hindsight };
+export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsightFor?: (channelId: string | undefined) => import('./hindsight.js').Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 export type CommandContext = {channelId: string; parentChannelId?: string; applicationId?: string; interactionToken?: string; command: 'status' | 'model' | 'img_model' | 'new' | 'mode' | 'replymode' | 'compact' | 'restart' | 'bot_reply'; model?: string; effort?: 'default' | import('./store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed }): Promise<unknown> };
@@ -222,7 +221,7 @@ export class DiscordHandler {
             initialAttachments: prepared.attachments,
             attachmentDir: config.attachmentDir,
             transcription: runtime.settings.transcription,
-            hindsight: runtime.hindsight,
+            hindsight: runtime.hindsightFor?.(message.channelId),
             discordTools: toolRuntime,
             googleTools: this.googleTools,
             localTools: this.localTools,
@@ -555,7 +554,7 @@ export class DiscordHandler {
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
         reasoningEffort: this.store.effectiveChannelReasoningEffort(request.outputChannelId),
-        hindsight: commandRuntime.hindsight,
+        hindsight: commandRuntime.hindsightFor?.(request.outputChannelId),
         discordTools: createDiscordToolRuntime({
           token: config.token,
           attachmentDir: config.attachmentDir,
@@ -644,7 +643,7 @@ export class DiscordHandler {
         await this.runAsk(this.store, event.parentSession, content, {
           baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
           transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
-          hindsight: runtime.hindsight, localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
+          hindsight: runtime.hindsightFor?.(origin.channelId), localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
           googleTools: this.googleTools,
           memoryWriteAllowed: () => this.store.memoryWriteAllowed(origin.channelId),
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),

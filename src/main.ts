@@ -20,12 +20,12 @@ try {
     if (process.argv.length > 2) throw new Error('Butler service accepts no product commands');
     const store = new Store(databasePath, { alertChannelIds: configuredAlertChannelIds(config), timezone: config.schedule?.timezone ?? 'Asia/Taipei' });
     let current: RuntimeBundle;
-    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime({ ...candidate.web, reserveRequest: (provider, limit) => store.reserveWebRequest(provider, limit) }), hledgerTools: createHledgerToolRuntime({ enabled: candidate.hledger?.enabled ?? false, journalPath, schedules: { load: () => store.hledgerSchedules(), save: schedules => store.saveHledgerSchedules(schedules) } }), hindsight: candidate.memory ? new Hindsight(candidate.memory) : undefined });
+    const buildBundle = (candidate: ButlerConfig): RuntimeBundle => ({ settings: candidate, discord: readDiscordConfig(candidate), webTools: createWebToolRuntime({ ...candidate.web, reserveRequest: (provider, limit) => store.reserveWebRequest(provider, limit) }), hledgerTools: createHledgerToolRuntime({ enabled: candidate.hledger?.enabled ?? false, journalPath, schedules: { load: () => store.hledgerSchedules(), save: schedules => store.saveHledgerSchedules(schedules) } }), hindsightFor: candidate.memory ? (channelId: string | undefined) => { const bankId = channelId ? store.channelMemoryBank(channelId) : undefined; return new Hindsight(bankId ? { ...candidate.memory!, bankId } : candidate.memory!); } : undefined });
     current = buildBundle(config);
     store.setAlertChannelIds(configuredAlertChannelIds(config));
     const closeSettingsWatch = store.watchFileSettings((error, file) => logWarn('File-backed settings reload rejected; retaining last valid snapshot', error, { file }));
     const getRuntime = () => current;
-    const memoryCoordinator = current.hindsight ? new MemoryCoordinator(store, () => { const wrapper = current.hindsight; if (!wrapper) throw new Error('Memory is disabled in the current runtime'); return wrapper; }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
+    const memoryCoordinator = current.hindsightFor ? new MemoryCoordinator(store, channelId => { const resolve = current.hindsightFor; if (!resolve) throw new Error('Memory is disabled in the current runtime'); return resolve(channelId); }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
     const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setAlertChannelIds(configuredAlertChannelIds(candidate)); current = next; configureLogging(candidate); }; } });
     try {
       await memoryCoordinator?.start();

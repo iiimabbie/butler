@@ -788,6 +788,7 @@ export class Store implements SchedulerStore {
   channelReasoningEffort(channelId:string):ReasoningEffort|undefined { return (this.settings.current().channels[channelId]?.effort as ReasoningEffort|null|undefined)??undefined; }
   setChannelReasoningEffort(channelId:string,effort:ReasoningEffort|undefined):void { this.settings.patchChannel(channelId,{effort}); }
   channelImageModel(channelId:string):string|undefined { return (this.settings.current().channels[channelId]?.imageModel as string|null|undefined)??undefined; }
+  channelMemoryBank(channelId:string):string|undefined { return (this.settings.current().channels[channelId]?.memoryBank as string|null|undefined)??undefined; }
   setChannelImageModel(channelId:string,model:string|undefined):void { this.settings.patchChannel(channelId,{imageModel:model}); }
 
   createSchedule(job:ScheduleJob):ScheduleJob { this.settings.refresh();if(this.getSchedule(job.id))throw new SettingsConflictError(`Schedule ${job.id} already exists`);this.settings.upsertSchedule(job);this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(job.nextRun,job.id);return this.getSchedule(job.id)!; }
