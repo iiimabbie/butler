@@ -99,7 +99,7 @@ export async function runSubagent(options: SubagentRunConfig, task: { task: stri
       '-c', `model_providers.butler.base_url=${JSON.stringify(options.baseUrl)}`,
       '-c', 'model_providers.butler.env_key=BUTLER_SUBAGENT_API_KEY', '-c', 'model_providers.butler.wire_api=responses',
       '-c', 'model_reasoning_effort=high', '-c', `model_catalog_json=${JSON.stringify(catalogPath)}`, '-c', 'agents.max_depth=0',
-      '-m', model, 'exec', '--ignore-user-config', '--disable', 'memories', '--disable', 'apps',
+      '-m', model, '--search', 'exec', '--ignore-user-config', '--disable', 'memories', '--disable', 'apps',
       '--skip-git-repo-check', '--sandbox', 'danger-full-access', '-C', window.cwd,
       ...(window.thread_id ? ['resume', '--json', window.thread_id, '-'] : ['--json', '-']),
     ];
