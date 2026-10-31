@@ -246,7 +246,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
     };
     const evidenceStart = input.length;
     await appendDiscordInput();
-    store.saveAskContext(fresh[0]!.id, [...askContextInput, ...input.slice(evidenceStart)]);
+    const initialAskContext = [...askContextInput, ...input.slice(evidenceStart)];
+    store.saveAskContext(fresh[0]!.id, initialAskContext);
+    // Tool calls and outputs are replayed after the message that triggered them, so later asks keep what this ask read and did.
+    const toolWork = new Map<string, unknown[]>([[fresh[0]!.id, initialAskContext]]);
+    let toolOwnerId = fresh[0]!.id;
     input.push(contextState);
     let liveCompactionCandidate = '';
     const fetcher = config.fetcher ?? fetch;
@@ -284,6 +288,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         input.push(steerInput);
         liveGroups.push([steerInput]); liveGroupProtected.push(true);
         config.onSteerPersisted?.(storedSteer.id);
+        toolOwnerId = storedSteer.id;
       }
       const toolChoice: 'none' | { type: 'function'; name: string } | undefined = forceImageSave ? { type: 'function', name: 'image_save' } : recoveryFinalTextOnly ? 'none' : undefined;
       if (forceImageSave) imageSaveRequiredAttempted = true;
@@ -441,6 +446,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
           input.push(steerInput);
           liveGroups.push([steerInput]); liveGroupProtected.push(true);
           config.onSteerPersisted?.(savedLateSteer.id);
+          toolOwnerId = savedLateSteer.id;
           continue;
         }
         const pendingImages = config.imageTools?.pendingImages() ?? [];
@@ -482,6 +488,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const noReply = text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]');
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
         logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: noReply ? 'not_delivered' : 'selected', reason: noReply ? 'no_reply_marker' : 'final_text' });
+        for (const [messageId, items] of toolWork) if (messageId !== fresh[0]!.id || items !== initialAskContext) store.saveAskContext(messageId, items);
         config.onAskFinishing?.();
         await config.onResponseReady?.(text);
         return text;
@@ -514,7 +521,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const outputs = await Promise.all(calls.map(runCall));
         for (const [index, call] of calls.entries()) await appendOutput(call, outputs[index]);
       } else for (const call of calls) await appendOutput(call, await runCall(call));
-      liveGroups.push(input.slice(responseInputStart)); liveGroupProtected.push(false);
+      const toolGroup = input.slice(responseInputStart);
+      liveGroups.push(toolGroup); liveGroupProtected.push(false);
+      toolWork.set(toolOwnerId, [...toolWork.get(toolOwnerId) ?? [], ...toolGroup]);
     }
   } finally {
     config.onAskFinishing?.();
