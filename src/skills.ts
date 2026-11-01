@@ -55,6 +55,8 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
         await mkdir(skillsDirectory, { recursive: true });
         await cp(candidateReal, destination, { recursive: true, errorOnExist: true, force: false, dereference: false });
+        // The staged clone is only needed until one of its candidates is installed.
+        await rm(resolve(stagingReal, relative(stagingReal, candidateReal).split(sep)[0]!), { recursive: true, force: true });
         return { installed: skillName, path: relative(workspace, destination) };
       }
       if (name === 'skills_remove') {

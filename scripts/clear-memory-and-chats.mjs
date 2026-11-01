@@ -13,7 +13,7 @@ export const CLEAR_TABLES = [
   'discord_outgoing_segments', 'message_preparation', 'memory_batches', 'tool_calls',
   'subagent_inbox', 'subagent_events', 'subagent_runs', 'subagent_windows',
   'session_compact_checkpoints', 'session_opening_context', 'session_context_usage',
-  'discord_action_claims', 'discord_actions', 'attachment_deliveries', 'latest_cpa_request', 'model_requests', 'ask_context',
+  'attachment_deliveries', 'latest_cpa_request', 'model_requests', 'ask_context',
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
 export const KEEP_TABLES = [
@@ -25,7 +25,7 @@ const HELP = `用法：node scripts/clear-memory-and-chats.mjs [--help] [--bank-
 預設為唯讀 preview，不建立備份、不修改聊天或記憶。
 --bank-id <id>                  精確 Hindsight bank ID
 --base-url <url>                Hindsight base URL
---database <absolute-path>      覆寫 config.yaml paths.database
+--database <absolute-path>      覆寫 .data/config.yaml paths.database
 --execute                      清除 Hindsight 記憶與 SQLite 聊天資料
 --confirm-bank <id>             必須與 bank ID 完全相同
 --confirm-database <path>       必須與解析後絕對 SQLite 路徑完全相同
@@ -173,22 +173,16 @@ export function checkSchema(db) {
   }
   if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('SQLite 原有外鍵違規，停止');
 }
-export function legacyBotChannelRows(db) {
-  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bot_channel_state'").get();
-  return table ? rows(db, 'bot_channel_state') : undefined;
-}
-
-export function resetChats(db, channels, bots = legacyBotChannelRows(db), sources = []) {
+export function resetChats(db, channels, sources = []) {
   for (const table of CLEAR_TABLES) db.exec(`DELETE FROM "${table}"`);
   const mapping = new Map();
-  for (const row of [...channels, ...(bots ?? [])]) {
+  for (const row of channels) {
     if (mapping.has(row.session_id)) continue;
     const id = randomUUID();
     mapping.set(row.session_id, id);
     db.prepare('INSERT INTO sessions(id,created_at) VALUES(?,?)').run(id, new Date().toISOString());
   }
   for (const row of channels) db.prepare('UPDATE channel_state SET session_id=? WHERE channel_id=?').run(mapping.get(row.session_id), row.channel_id);
-  for (const row of bots ?? []) db.prepare('UPDATE bot_channel_state SET session_id=? WHERE channel_id=? AND bot_id=?').run(mapping.get(row.session_id), row.channel_id, row.bot_id);
   for (const source of sources) {
     if (!mapping.has(source.session_id)) continue;
     db.prepare('INSERT INTO session_sources(session_id,channel_id,source_type,owner_id,bot_id) VALUES(?,?,?,?,?)').run(mapping.get(source.session_id), source.channel_id, source.source_type, source.owner_id, source.bot_id);
@@ -197,7 +191,6 @@ export function resetChats(db, channels, bots = legacyBotChannelRows(db), source
     if (table !== 'sessions' && table !== 'session_sources' && countsFor(db, table) !== 0) throw new Error(`清除表仍有資料：${table}`);
   }
   if (!same(rows(db, 'channel_state'), sorted(channels.map(row => ({ ...row, session_id: mapping.get(row.session_id) }))))) throw new Error('頻道設定核對失敗');
-  if (bots !== undefined && !same(rows(db, 'bot_channel_state'), sorted(bots.map(row => ({ ...row, session_id: mapping.get(row.session_id) }))))) throw new Error('bot 頻道設定核對失敗');
   if (countsFor(db, 'sessions') !== mapping.size || db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('新會話或外鍵核對失敗');
 }
 function countsFor(db, table) { return Number(db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n); }
@@ -221,7 +214,7 @@ async function saveBackup(db, bankId, snapshot) {
 async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(HELP); return; }
-  const config = YAML.parse(await fs.readFile(path.join(ROOT, 'config.yaml'), 'utf8'));
+  const config = YAML.parse(await fs.readFile(path.join(ROOT, '.data/config.yaml'), 'utf8'));
   const bankId = string(options.bankId ?? config?.memory?.bankId, 'memory.bankId');
   const base = string(options.baseUrl ?? config?.memory?.baseUrl, 'memory.baseUrl').replace(/\/$/, '');
   const url = new URL(base);
@@ -239,7 +232,6 @@ async function main() {
     const kept = preservedSqlite(db);
     const channels = rows(db, 'channel_state');
     const sources = rows(db, 'session_sources');
-    const bots = legacyBotChannelRows(db);
     const bank = `${base}/v1/default/banks/${encodeURIComponent(bankId)}`;
     const banks = await list(`${base}/v1/default/banks`, 'banks');
     const profile = banks.find(row => row.bank_id === bankId);
@@ -258,8 +250,8 @@ async function main() {
     try {
       db.exec('PRAGMA foreign_keys=ON; BEGIN IMMEDIATE');
       transaction = true;
-      if (!same(counts(db), beforeCounts) || !same(preservedSqlite(db), kept) || !same(rows(db, 'channel_state'), channels) || !same(rows(db, 'session_sources'), sources) || (bots !== undefined && !same(rows(db, 'bot_channel_state'), bots))) throw new Error('備份後 SQLite 資料改變，停止');
-      resetChats(db, channels, bots, sources);
+      if (!same(counts(db), beforeCounts) || !same(preservedSqlite(db), kept) || !same(rows(db, 'channel_state'), channels) || !same(rows(db, 'session_sources'), sources)) throw new Error('備份後 SQLite 資料改變，停止');
+      resetChats(db, channels, sources);
       if (!same(preservedSqlite(db), kept)) throw new Error('SQLite 保留資料改變');
       await assertStopped();
       assertIdle(await getStats(bank));

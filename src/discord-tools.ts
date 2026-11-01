@@ -1,5 +1,4 @@
 import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
-import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
@@ -8,19 +7,18 @@ import { MessageFlags } from 'discord.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
 const emojisSchema = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 64 } };
-const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true }, emojis: emojisSchema }, additionalProperties: false };
-const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
   { name: 'discord_send_message', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
   { name: 'discord_fetch_message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
+  { name: 'discord_fetch_pins', description: 'List pinned messages in a channel, newest pin first; before (a pinned_at timestamp) continues toward older pins.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'string', minLength: 1, maxLength: 40 } }, required: ['channelId'] },
   { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
@@ -33,7 +31,6 @@ const specs: ToolSpec[] = [
   { name: 'discord_rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
   { name: 'discord_rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
   { name: 'discord_attach_to_reply', description: 'Queue a regular file for the final reply. Absolute paths are allowed; relative paths use the project root. filename must be a plain filename.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
-  { name: 'discord_send_buttons', description: 'Send persistent Discord buttons that execute their configured actions once when clicked.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
 ];
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; takeInputMessages(): StoredMessage[]; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
@@ -166,26 +163,6 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       options.context.attachmentFiles.push({ attachment: real, name });
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
     }
-    if (name === 'discord_send_buttons') {
-      if (!options.context.store || !options.context.ownerId || !options.context.sessionId) throw new Error('Persistent Discord actions are unavailable');
-      const users = args.allowedUserIds as string[] | undefined;
-      if (users?.length === 0) throw new ToolUsageError('allowedUserIds must not be empty');
-      if (users?.some(id => id !== options.context.ownerId)) throw new ToolUsageError('Interactive actions are restricted to the configured owner');
-      const allowedActions = new Set(specs.filter(s => ['discord_send_message','discord_edit_message','discord_delete_message','discord_react','discord_pin','discord_unpin','discord_create_forum_post','discord_archive_thread','discord_delete_thread','discord_rename_post','discord_rename_forum'].includes(s.name)).map(s => s.name));
-      const buttons = args.buttons as Array<Record<string, unknown>>;
-      if (new Set(buttons.map(item => item.id)).size !== buttons.length) throw new ToolUsageError('Button IDs must be unique');
-      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new ToolUsageError('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); }
-      const actionId = randomUUID(); const expiresAt = new Date(Date.now() + Number(args.expiresInMinutes ?? 1440) * 60_000).toISOString();
-      const custom: Array<Record<string, unknown>> = buttons.map(item => ({ ...item, custom_id: `${actionId}:${randomUUID()}` }));
-      options.context.store.createDiscordAction({ id: actionId, sessionId: options.context.sessionId, channelId: channelId!, ownerId: options.context.ownerId, expiresAt, buttons: custom });
-      const components = [] as Array<{ type: number; components: unknown[] }>;
-      for (let i=0;i<custom.length;i+=5) components.push({ type: 1, components: custom.slice(i,i+5).map(item => ({ type: 2, style: ({primary:1,secondary:2,success:3,danger:4} as Record<string,number>)[String(item['style'])], label: item['label'], custom_id: item['custom_id'] })) });
-      const sent = asRecord(await api('POST', `/channels/${channelId}/messages`, { content, flags: MessageFlags.SuppressEmbeds, components, allowed_mentions: { parse: [] } }));
-      if (typeof sent.id !== 'string') throw new Error('Discord button message outcome is unknown; do not retry automatically');
-      persistDeliveredMessage(options.context, channelId!, sent, content!);
-      options.context.store.bindDiscordActionMessage(actionId, sent.id);
-      return { ok: true, channelId, messageId: sent.id, actionId, expiresAt, status: 'active', result: sent };
-    }
     let method = 'GET'; let path = ''; let body: unknown;
     if (name === 'discord_fetch_channel') {
       const channel = asRecord(await api('GET', `/channels/${channelId}`));
@@ -218,6 +195,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         case 'discord_send_message':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
         case 'discord_fetch_message':path=`${base}/messages/${messageId}`;break;
         case 'discord_fetch_channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
+        case 'discord_fetch_pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
         case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
         case 'discord_delete_message':method='DELETE';path=`${base}/messages/${messageId}`;break;
         case 'discord_pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;
@@ -227,6 +205,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const result=await api(method,path,body);
     if(name==='discord_fetch_message')return asRecord(result);
     if(name==='discord_fetch_channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
+    if(name==='discord_fetch_pins'){const page=asRecord(result);if(!Array.isArray(page.items)||typeof page.has_more!=='boolean')throw new Error('Discord returned an invalid pin page');return {pins:page.items,has_more:page.has_more,next_before:page.has_more?(asRecord(page.items.at(-1)).pinned_at??null):null};}
     const record = isRecord(result) ? result : null;
     if (name === 'discord_send_message') {
       if (!record || typeof record.id !== 'string') throw new Error('Discord send response has no message ID; delivery cannot be recorded and outcome is unknown');

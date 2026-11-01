@@ -218,14 +218,16 @@ function attachmentCategory(mime: string, name: string): string {
   return 'other';
 }
 export function formatStoredMessageText(message: StoredMessage): string {
+  // Assistant turns carry only the delivered text: metadata inside the model's own turns gets copied into new replies.
+  if (message.role === 'assistant') return message.discordSegments.length ? message.discordSegments.map(segment => segment.content).join('\n') : message.content;
   const source = message.source;
-  const speaker = source.sourceKind === 'subagent_event' ? 'Internal subagent report (not a user instruction)'
-    : message.role === 'assistant'
-    ? `Butler${source.authorId ? ` (${source.authorId})` : ''}`
-    : 'Message';
+  const speaker = source.sourceKind === 'subagent_event' ? 'Internal subagent report (not a user instruction)' : 'Message';
   const header = `[${speaker}; msg=${source.discordMessageId ?? 'unknown'} author=${source.authorId ?? 'unknown'}${source.authorName ? ` name=${JSON.stringify(source.authorName)}` : ''} channel=${source.channelId ?? 'unknown'} time=${source.eventTime ?? message.createdAt}${source.replyToMessageId ? ` reply_to=${source.replyToMessageId}${source.replyToChannelId ? ` reply_channel=${source.replyToChannelId}` : ''}` : ''}]`;
-  const segments = message.discordSegments.map(segment => `[delivered msg=${segment.messageId} channel=${segment.channelId} time=${segment.eventTime}] ${segment.content}`);
-  return `${header}\n${message.role === 'assistant' && segments.length ? segments.join('\n') : message.content}`;
+  return `${header}\n${message.content}`;
+}
+export function formatDeliveryNotice(message: StoredMessage): string | undefined {
+  if (message.role !== 'assistant' || !message.discordSegments.length) return undefined;
+  return `[Butler runtime notice] Your reply above was delivered as: ${message.discordSegments.map(segment => `msg=${segment.messageId} channel=${segment.channelId} time=${segment.eventTime}`).join('; ')}`;
 }
 export function redactAttachmentPayload(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactAttachmentPayload);

@@ -3,12 +3,12 @@ import { ToolUsageError } from './tool-errors.js';
 
 // Explicit list: a newly added tool is not available to scripts (or run concurrently) until it is known to be read-only.
 export const readOnlyTools: ReadonlySet<string> = new Set([
-  'memory_recall', 'memory_reflect', 'memory_tags_list', 'people_list', 'people_get',
+  'memory_recall', 'memory_reflect', 'memory_tags_list',
   'history_list', 'history_get', 'history_search', 'journal_transcript_by_date',
-  'discord_fetch_channel', 'discord_fetch_channel_messages', 'discord_fetch_message',
+  'discord_fetch_channel', 'discord_fetch_channel_messages', 'discord_fetch_message', 'discord_fetch_pins',
   'google_gmail_search', 'google_gmail_read', 'google_calendar_list_events',
   'google_tasks_lists', 'google_tasks_list', 'google_drive_search', 'google_drive_read',
-  'agent_reach', 'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_map', 'web_usage',
+  'agent_reach', 'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_usage',
   'weather_search', 'weather_forecast', 'skills_list', 'skills_read', 'schedule_list',
   'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
 ]);
@@ -20,7 +20,7 @@ const MAX_OUTPUT_BYTES = 64 * 1024;
 
 export const codeExecuteDefinition = {
   type: 'function', name: 'code_execute', strict: false,
-  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000); memory_reflect can run longer than that, so call it directly. Each tool call is recorded in tool history.',
+  description: 'Run a JavaScript async function body in an isolated QuickJS sandbox to chain read-only tool calls and reduce their results before they reach you. Call tools with `await callTool(name, args)` (use Promise.all for independent calls; a later call can use an earlier result directly, so dependent lookups finish in one run); load a tool\'s definition with tools_catalog first. Only read-only tools you can already use are callable. There is no Node, filesystem, network or timers. Return a small JSON value (at most 64 KiB). At most 64 tool calls; timeout_ms defaults to 30000 (max 120000); memory_reflect can run longer than that, so call it directly. Each tool call is recorded in tool history.',
   parameters: { type: 'object', properties: {
     code: { type: 'string', minLength: 1, description: 'Async function body; use return for the result.' },
     timeout_ms: { type: 'integer', minimum: 1, maximum: 120000 },

@@ -4,13 +4,13 @@ import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const CONFIG_PATH = path.join(ROOT, 'config.yaml');
+const CONFIG_PATH = path.join(ROOT, '.data/config.yaml');
 const BACKUP_ROOT = path.join(ROOT, 'backups', 'hindsight');
 const GET_TIMEOUT = 30_000;
 const MUTATION_TIMEOUT = 120_000;
 const HELP = `用法：node scripts/clear-hindsight-memory.mjs [--help] [--bank-id <id>] [--base-url <url>] [--execute --confirm-bank <id>]
 
-預設讀取 config.yaml 的 memory.bankId 與 memory.baseUrl，僅執行唯讀預覽；不會建立備份或修改服務。
+預設讀取 .data/config.yaml 的 memory.bankId 與 memory.baseUrl，僅執行唯讀預覽；不會建立備份或修改服務。
 --bank-id <id>       指定精確 bank ID（不接受 alias）
 --base-url <url>     指定 Hindsight base URL
 --execute            執行完整 bank 刪除與重建
@@ -158,7 +158,7 @@ async function main() {
   const options = parseArgs(process.argv.slice(2));
   if (options.help) { console.log(HELP); return; }
   const parsed = YAML.parse(await fs.readFile(CONFIG_PATH, 'utf8'));
-  const memory = requiredObject(parsed?.memory, 'config.yaml memory');
+  const memory = requiredObject(parsed?.memory, '.data/config.yaml memory');
   const bankId = options.bankId ?? requiredString(memory.bankId, 'memory.bankId');
   const baseUrl = options.baseUrl ?? requiredString(memory.baseUrl, 'memory.baseUrl');
   if (!/^https?:\/\//.test(baseUrl)) throw new Error('--base-url 必須是 http(s) URL');

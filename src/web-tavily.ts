@@ -20,7 +20,6 @@ export const webDefinitions: { type: 'function'; name: string; description: stri
   }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'web_fetch', description: 'Extract content from one public HTTP(S) URL using basic extraction; truncated indicates incomplete content.', parameters: { type: 'object', properties: { url: string }, required: ['url'], additionalProperties: false } },
   { type: 'function', name: 'web_extract', description: 'Extract content from 1–20 public HTTP(S) URLs in one request. Use query for a specific question and relevant chunks; omit query to read the full content. chunks_per_source requires query. Returns successes and per-URL failures; advanced extraction may cost more. Content may be truncated.', parameters: { type: 'object', properties: { urls: stringArray(20), extract_depth: { type: 'string', enum: EXTRACT_DEPTH, default: 'basic' }, format: { type: 'string', enum: FORMATS, default: 'markdown' }, query: string, chunks_per_source: { type: 'integer', minimum: 1, maximum: 5 } }, required: ['urls'], additionalProperties: false } },
-  { type: 'function', name: 'web_map', description: 'Map a website to discover URLs only; this does not crawl or extract page contents. Mapping costs credits per successful pages; instructions raise the rate from 1 to 2 credits per 10 successful pages. Conservative defaults: depth 1, breadth 5, limit 10, external domains excluded.', parameters: { type: 'object', properties: { url: string, instructions: { type: 'string', minLength: 1, maxLength: 1000 }, max_depth: { type: 'integer', minimum: 1, maximum: 5, default: 1 }, max_breadth: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, limit: { type: 'integer', minimum: 1, maximum: 20, default: 10 }, select_paths: optionalArray(20), exclude_paths: optionalArray(20) }, required: ['url'], additionalProperties: false } },
   { type: 'function', name: 'web_usage', description: 'Read-only Tavily API key and account usage for the current billing cycle.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } },
 ];
 
@@ -88,13 +87,6 @@ export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: str
         const result = { result_count: results.length, failed_count: safeFailed.length, results, failed_results: safeFailed, truncated: false, ...(query !== undefined ? { content_scope: 'query_relevant_chunks' as const, content_scope_description: 'Content contains query-relevant chunks, not the full source content.' } : {}) };
         return boundedOutput(result, results);
       }
-      if (name === 'web_map') {
-        const mapBody = prepared.body!;
-        const response = await request('map', mapBody, apiKey, fetcher, baseUrl, config.signal);
-        if (typeof response.base_url !== 'string' || !Array.isArray(response.results) || response.results.some(item => typeof item !== 'string')) throw new Error('Tavily map: invalid response');
-        const mapped = response.results.map(item => redact(item as string));
-        return boundedOutput({ base_url: redact(response.base_url), result_count: mapped.length, results: mapped, truncated: false }, []);
-      }
       const response = await request('usage', undefined, apiKey, fetcher, baseUrl, config.signal);
       if (!isRecord(response.key) || !isRecord(response.account)) throw new Error('Tavily usage: invalid response');
       return boundedUsageOutput(redactDeep(response, apiKey));
@@ -102,8 +94,8 @@ export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: str
   };
 }
 
-async function request(endpoint: 'search' | 'extract' | 'map' | 'usage', body: Record<string, unknown> | undefined, apiKey: string, fetcher: typeof fetch, baseUrl: string, externalSignal?: AbortSignal): Promise<Record<string, unknown>> {
-  const timeout = AbortSignal.timeout(endpoint === 'map' ? 35_000 : 30_000);
+async function request(endpoint: 'search' | 'extract' | 'usage', body: Record<string, unknown> | undefined, apiKey: string, fetcher: typeof fetch, baseUrl: string, externalSignal?: AbortSignal): Promise<Record<string, unknown>> {
+  const timeout = AbortSignal.timeout(30_000);
   const signal = externalSignal ? AbortSignal.any([timeout, externalSignal]) : timeout;
   let response: Response;
   try {
@@ -174,11 +166,6 @@ function requiredString(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new ToolUsageError(`${name} must be a non-empty string`);
   return value.trim();
 }
-function boundedString(value: unknown, name: string, max: number): string {
-  const result = requiredString(value, name);
-  if (result.length > max) throw new ToolUsageError(`${name} must be at most ${max} characters`);
-  return result;
-}
 function integer(value: unknown, fallback: number, min: number, max: number, name: string): number {
   const result = value ?? fallback;
   if (!Number.isSafeInteger(result) || (result as number) < min || (result as number) > max) throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`);
@@ -226,11 +213,11 @@ function redactDeep(value: unknown, apiKey: string): unknown {
   return value;
 }
 
-export function prepareWebRequest(name: string, args: Record<string, unknown>): { endpoint: "search" | "extract" | "map" | "usage"; body?: Record<string, unknown> } {
+export function prepareWebRequest(name: string, args: Record<string, unknown>): { endpoint: "search" | "extract" | "usage"; body?: Record<string, unknown> } {
       const allowedByName: Record<string, string[]> = {
         web_search: ['query','max_results','search_depth','topic','include_domains','exclude_domains','include_domains_mode','time_range','start_date','end_date','country'],
         web_fetch: ['url'], web_extract: ['urls','extract_depth','format','query','chunks_per_source'],
-        web_map: ['url','instructions','max_depth','max_breadth','limit','select_paths','exclude_paths'], web_usage: [],
+        web_usage: [],
       };
       const allowed = allowedByName[name];
       if (!allowed) throw new ToolUsageError('Unknown web tool');
@@ -269,14 +256,6 @@ export function prepareWebRequest(name: string, args: Record<string, unknown>): 
         if (chunksPerSource !== undefined && query === undefined) throw new ToolUsageError('chunks_per_source requires query');
         const body: Record<string, unknown> = { urls, extract_depth: depth, timeout: 20, ...(format ? { format } : {}), ...(query !== undefined ? { query } : {}), ...(chunksPerSource !== undefined ? { chunks_per_source: chunksPerSource } : {}) };
     return { endpoint: 'extract', body };
-  }
-  if (name === 'web_map') {
-        const url = validUrl(args.url);
-        const mapBody: Record<string, unknown> = { url, max_depth: integer(args.max_depth, 1, 1, 5, 'max_depth'), max_breadth: integer(args.max_breadth, 5, 1, 20, 'max_breadth'), limit: integer(args.limit, 10, 1, 20, 'limit'), allow_external: false, timeout: 30 };
-        if (args.instructions !== undefined) mapBody.instructions = boundedString(args.instructions, 'instructions', 1000);
-        if (args.select_paths !== undefined) mapBody.select_paths = stringList(args.select_paths, 20, 'select_paths');
-        if (args.exclude_paths !== undefined) mapBody.exclude_paths = stringList(args.exclude_paths, 20, 'exclude_paths');
-    return { endpoint: 'map', body: mapBody };
   }
   return { endpoint: 'usage' };
 }
