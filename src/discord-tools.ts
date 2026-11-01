@@ -18,6 +18,7 @@ const specs: ToolSpec[] = [
   { name: 'discord_send_message', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
   { name: 'discord_fetch_message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
+  { name: 'discord_fetch_pins', description: 'List pinned messages in a channel, newest pin first; before (a pinned_at timestamp) continues toward older pins.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'string', minLength: 1, maxLength: 40 } }, required: ['channelId'] },
   { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
@@ -194,6 +195,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         case 'discord_send_message':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
         case 'discord_fetch_message':path=`${base}/messages/${messageId}`;break;
         case 'discord_fetch_channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
+        case 'discord_fetch_pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
         case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
         case 'discord_delete_message':method='DELETE';path=`${base}/messages/${messageId}`;break;
         case 'discord_pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;
@@ -203,6 +205,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const result=await api(method,path,body);
     if(name==='discord_fetch_message')return asRecord(result);
     if(name==='discord_fetch_channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
+    if(name==='discord_fetch_pins'){const page=asRecord(result);if(!Array.isArray(page.items)||typeof page.has_more!=='boolean')throw new Error('Discord returned an invalid pin page');return {pins:page.items,has_more:page.has_more,next_before:page.has_more?(asRecord(page.items.at(-1)).pinned_at??null):null};}
     const record = isRecord(result) ? result : null;
     if (name === 'discord_send_message') {
       if (!record || typeof record.id !== 'string') throw new Error('Discord send response has no message ID; delivery cannot be recorded and outcome is unknown');
