@@ -7,7 +7,7 @@ export const catalogDefinition = {
 } as const;
 
 // The most frequently loaded tools stay resident: loading one mid-ask changes the tool list and invalidates the prompt cache.
-export const residentToolNames: ReadonlySet<string> = new Set(['code_execute','memory_recall','discord_fetch_message','discord_fetch_channel_messages','discord_react','web_search','web_fetch','skills_list','skills_read','local_read','local_search','local_write','local_edit','local_shell','subagent_run','subagent_send']);
+export const residentToolNames: ReadonlySet<string> = new Set(['code_execute','memory_recall','discord_fetch_message','discord_fetch_channel_messages','discord_react','web_search','web_fetch','skills_list','skills_read','local_read','local_search','local_write','local_edit','local_shell','subagent_run','subagent_send','google_calendar_list_events','google_calendar_create_event','google_calendar_update_event','google_gmail_search','google_gmail_read','discord_edit_message','discord_send_message','weather_search','weather_forecast','history_search','journal_transcript_by_date','agent_reach','local_process_output','hledger_accounts','hledger_account_manage','hledger_schedules_list','hledger_schedule_manage','hledger_post','hledger_reconcile','hledger_reconciliation_reopen','hledger_forecast','hledger_budget','hledger_backup_list','hledger_backup_restore']);
 const shortDescriptions: Record<string, string> = {
   tools_catalog: '列出可用工具並按名稱或關鍵字載入完整定義',
   agent_reach: '搜尋、閱讀小紅書、Bilibili、YouTube、V2EX 等平台內容與查詢唯讀能力',

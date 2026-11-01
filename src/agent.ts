@@ -20,7 +20,7 @@ import type { WeatherToolRuntime } from './weather-tools.js';
 import type { SkillsToolRuntime } from './skills.js';
 import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
-import { isAuthorizedFinanceOrigin, type FinanceIdentity } from './finance-origin.js';
+import type { FinanceIdentity } from './finance-origin.js';
 import type { HledgerRuntime } from './hledger-tools.js';
 import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
@@ -199,7 +199,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       ...(workspace.background.length ? [{ role: 'user', content: `Shared workspace background (OWNER.md and MEMORY.md):\n\n${workspace.background.join('\n\n')}` }] : []),
     ];
     const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
-    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(isAuthorizedFinanceOrigin(config.executionOrigin) && config.hledgerTools ? config.hledgerTools.definitions : [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
+    const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(config.hledgerTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> }));
     const catalog = createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
     const toolsForRequest = () => {
       if (!catalog) return fullAvailableTools;
