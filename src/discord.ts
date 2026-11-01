@@ -27,7 +27,7 @@ import { hasAnsiProgress } from './discord-ansi.js';
 import type { SessionOpeningContext } from './store.js';
 import type { MemoryCoordinator } from './memory-coordinator.js';
 import { logError, logInfo, logWarn, withoutLogMention } from './log.js';
-import { isHttp429, ToolUsageError } from './tool-errors.js';
+import { isHttp429 } from './tool-errors.js';
 import { SubagentCoordinator, type SubagentEvent } from './subagent-coordinator.js';
 import { logTrace, traceTextMetadata } from './model-request.js';
 
@@ -205,7 +205,7 @@ export class DiscordHandler {
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
-          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
+          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { logInfo('tool_call', { tool: 'discord_fetch_message', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
             catch (error) { logWarn('Discord referenced message could not be retrieved', error); }
@@ -308,43 +308,6 @@ export class DiscordHandler {
       releaseIngress();
       try { await queued; } finally { stopTyping?.(); }
     } finally { releaseIngress(); }
-  }
-
-  async button(interaction: import('discord.js').ButtonInteraction): Promise<void> {
-    const customId = interaction.customId;
-    const split = customId.indexOf(':');
-    if (split < 1) return;
-    const actionId = customId.slice(0, split);
-    const action = this.store.discordAction(actionId);
-    const respond = async (content: string) => { try { await interaction.followUp({ content, ephemeral: true, allowedMentions: ALLOWED_MENTIONS }); } catch (error) { logError('Discord button result delivery failed', error, { mention: !isHttp429(error) }); } };
-    if (!action || action.status !== 'pending' || this.stopping || interaction.channelId !== action.channel_id || interaction.message.id !== action.message_id) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕無效或不屬於目前允許的操作。'); return; }
-    if (Date.now() >= Date.parse(action.expires_at)) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕已過期。'); return; }
-    let buttons: Array<Record<string, unknown>>;
-    try { buttons = JSON.parse(action.buttons) as Array<Record<string, unknown>>; } catch { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕設定無效。'); return; }
-    const button = buttons.find(item => item.custom_id === customId);
-    if (!button || !this.store.claimDiscordAction(customId, actionId, interaction.user.id)) { await interaction.deferUpdate().catch(() => undefined); await respond('此按鈕已執行或正在處理，不會重複執行。'); return; }
-    const acknowledged = interaction.deferUpdate().then(() => true, () => false);
-    await this.enqueue(action.channel_id, async () => {
-      const config = this.getRuntime().discord;
-      if (!await acknowledged) {
-        this.store.finishDiscordAction(customId, 'failed', { actorId: interaction.user.id, error: 'ack_failed; action_not_executed' });
-        return;
-      }
-      let toolId: string | undefined;
-      let result: unknown;
-      let actionFailed = false;
-      try {
-        if (this.stopping || Date.now() >= Date.parse(action.expires_at)) throw new Error('expired_or_stopping');
-        const runtime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, context: { channelId: action.channel_id, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: action.session_id, store: this.store, attachmentFiles: [], onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
-        const actionArgs = button.actionArgs as Record<string, unknown>;
-        logInfo('tool_call', { tool: String(button.actionTool), source: 'discord_button', sessionId: action.session_id, callId: customId });
-        toolId = this.store.beginTool(action.session_id, String(button.actionTool), actionArgs);
-        result = await runtime.execute(String(button.actionTool), actionArgs);
-      } catch (error) { actionFailed = true; if (!(error instanceof ToolUsageError)) logError(`Discord button action failed action=${actionId} channel=${action.channel_id}`, error, { mention: !isHttp429(error) }); result = { error: 'failed_or_unknown; not retried' }; }
-      if (toolId) this.store.finishTool(toolId, actionFailed ? 'failed' : 'completed', result);
-      this.store.finishDiscordAction(customId, actionFailed ? 'failed' : 'completed', { actorId: interaction.user.id, result });
-      await respond(actionFailed ? '操作失敗或結果不明；為避免重複副作用，不會自動重試。' : '操作已完成。');
-    });
   }
 
   async command(context: CommandContext): Promise<void> {
@@ -559,7 +522,7 @@ export class DiscordHandler {
           token: config.token,
           attachmentDir: config.attachmentDir,
           transcription: commandRuntime.settings.transcription,
-          context: { channelId: request.outputChannelId, ownerId: commandRuntime.discord.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, memoryOriginChannelId: request.outputChannelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } },
+          context: { channelId: request.outputChannelId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, memoryOriginChannelId: request.outputChannelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } },
         }),
         googleTools: this.googleTools,
         localTools: this.localTools,
@@ -649,7 +612,7 @@ export class DiscordHandler {
           skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
           imageTools: this.imageTools(attachmentFiles, origin.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
           subagentCoordinator: this.subagentCoordinator, subagentOrigin: origin, subagentEvent: true,
-          discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: origin.outputChannelId, ownerId: config.ownerId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, memoryOriginChannelId: origin.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
+          discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: origin.outputChannelId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, memoryOriginChannelId: origin.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
           onResponseReady: async text => {
             if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
               if (text) logInfo('no_reply', { text, replyTo: { channelId: origin.outputChannelId, inputId: storedInput.id } });
@@ -1171,7 +1134,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   });
   client.on('interactionCreate', interaction => {
     if (interaction.isAutocomplete?.()) { const runtime = getRuntime(); void handleAutocomplete(runtime.discord, interaction, fetch, runtime.settings.image).catch(error => logWarn('Discord autocomplete handler failed', error)); }
-    else if (interaction.isButton?.()) void handler.button(interaction).catch(error => logError('Discord button handler failed', error, { mention: !isHttp429(error) }));
     else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(error => logError('Discord interaction handler failed', error, { mention: !isHttp429(error) }));
   });
   client.on('error', error => logError('Discord client error', error, { mention: !isHttp429(error) }));

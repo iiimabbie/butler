@@ -1,5 +1,4 @@
 import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
-import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
@@ -8,15 +7,13 @@ import { MessageFlags } from 'discord.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; ownerId?: string; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
 const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
 const emojisSchema = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 64 } };
-const actionArgsSchema = { type: 'object', properties: { channelId: snowflake, messageId: snowflake, threadId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, name: { type: 'string', minLength: 1, maxLength: 100 }, title: { type: 'string', minLength: 1, maxLength: 100 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true }, emojis: emojisSchema }, additionalProperties: false };
-const button = { type: 'object', properties: { id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,32}$' }, label: { type: 'string', minLength: 1, maxLength: 80 }, style: { type: 'string', enum: ['primary', 'secondary', 'success', 'danger'] }, actionTool: { type: 'string', minLength: 1, maxLength: 64 }, actionArgs: actionArgsSchema }, required: ['id', 'label', 'style', 'actionTool', 'actionArgs'], additionalProperties: false };
 const specs: ToolSpec[] = [
   { name: 'discord_send_message', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
   { name: 'discord_fetch_message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
@@ -33,7 +30,6 @@ const specs: ToolSpec[] = [
   { name: 'discord_rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
   { name: 'discord_rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
   { name: 'discord_attach_to_reply', description: 'Queue a regular file for the final reply. Absolute paths are allowed; relative paths use the project root. filename must be a plain filename.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
-  { name: 'discord_send_buttons', description: 'Send persistent Discord buttons that execute their configured actions once when clicked.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 }, allowedUserIds: { type: 'array', items: snowflake, maxItems: 100, uniqueItems: true }, expiresInMinutes: { type: 'integer', minimum: 1, maximum: 10080 }, buttons: { type: 'array', minItems: 1, maxItems: 25, items: button } }, required: ['channelId', 'content', 'buttons'] },
 ];
 export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; takeInputMessages(): StoredMessage[]; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
@@ -165,26 +161,6 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new ToolUsageError('filename must be a plain filename');
       options.context.attachmentFiles.push({ attachment: real, name });
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
-    }
-    if (name === 'discord_send_buttons') {
-      if (!options.context.store || !options.context.ownerId || !options.context.sessionId) throw new Error('Persistent Discord actions are unavailable');
-      const users = args.allowedUserIds as string[] | undefined;
-      if (users?.length === 0) throw new ToolUsageError('allowedUserIds must not be empty');
-      if (users?.some(id => id !== options.context.ownerId)) throw new ToolUsageError('Interactive actions are restricted to the configured owner');
-      const allowedActions = new Set(specs.filter(s => ['discord_send_message','discord_edit_message','discord_delete_message','discord_react','discord_pin','discord_unpin','discord_create_forum_post','discord_archive_thread','discord_delete_thread','discord_rename_post','discord_rename_forum'].includes(s.name)).map(s => s.name));
-      const buttons = args.buttons as Array<Record<string, unknown>>;
-      if (new Set(buttons.map(item => item.id)).size !== buttons.length) throw new ToolUsageError('Button IDs must be unique');
-      for (const item of buttons) { const actionTool = stringArg(item.actionTool, 'actionTool'); if (!allowedActions.has(actionTool)) throw new ToolUsageError('Button action is not executable'); validateArgs(specs.find(s => s.name === actionTool)!, item.actionArgs as Record<string, unknown>); }
-      const actionId = randomUUID(); const expiresAt = new Date(Date.now() + Number(args.expiresInMinutes ?? 1440) * 60_000).toISOString();
-      const custom: Array<Record<string, unknown>> = buttons.map(item => ({ ...item, custom_id: `${actionId}:${randomUUID()}` }));
-      options.context.store.createDiscordAction({ id: actionId, sessionId: options.context.sessionId, channelId: channelId!, ownerId: options.context.ownerId, expiresAt, buttons: custom });
-      const components = [] as Array<{ type: number; components: unknown[] }>;
-      for (let i=0;i<custom.length;i+=5) components.push({ type: 1, components: custom.slice(i,i+5).map(item => ({ type: 2, style: ({primary:1,secondary:2,success:3,danger:4} as Record<string,number>)[String(item['style'])], label: item['label'], custom_id: item['custom_id'] })) });
-      const sent = asRecord(await api('POST', `/channels/${channelId}/messages`, { content, flags: MessageFlags.SuppressEmbeds, components, allowed_mentions: { parse: [] } }));
-      if (typeof sent.id !== 'string') throw new Error('Discord button message outcome is unknown; do not retry automatically');
-      persistDeliveredMessage(options.context, channelId!, sent, content!);
-      options.context.store.bindDiscordActionMessage(actionId, sent.id);
-      return { ok: true, channelId, messageId: sent.id, actionId, expiresAt, status: 'active', result: sent };
     }
     let method = 'GET'; let path = ''; let body: unknown;
     if (name === 'discord_fetch_channel') {

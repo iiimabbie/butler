@@ -56,14 +56,14 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
       const started = Date.now();
       const total = AbortSignal.timeout(pooled ? totalMs : 35_000);
       const signal = options.signal ? AbortSignal.any([options.signal, total]) : total;
-      const urls = prepared.endpoint === 'extract' ? prepared.body!.urls as string[] : prepared.endpoint === 'map' ? [prepared.body!.url as string] : [];
+      const urls = prepared.endpoint === 'extract' ? prepared.body!.urls as string[] : [];
       for (const url of urls) {
         try { await assertPublicWebUrl(url, signal); }
         catch (error) { if (error instanceof ToolUsageError) throw error; throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'URL validation failed or timed out', false); }
       }
       if (!pooled) {
         if (!tavilyKey) throw new ToolUsageError('This web operation requires enabled Tavily configuration');
-        // Batch extraction, query chunks, advanced/text extraction, map and usage retain their Tavily contract.
+        // Batch extraction, query chunks, advanced/text extraction and usage retain their Tavily contract.
         signal.throwIfAborted();
         if (name !== 'web_usage') {
           if (healthFor('tavily', 'fetch').disabled) throw new WebPoolError('Tavily is disabled after a credential/account failure', false);
