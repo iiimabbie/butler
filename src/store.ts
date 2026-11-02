@@ -1,4 +1,5 @@
 import { logError } from './log.js';
+import type { FixedChannel } from './config.js';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
@@ -69,12 +70,12 @@ export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
   private externalStopHooks?: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void };
-  private alertChannelIds = new Set<string>();
-  private alertModel?: string;
+  // Channel ID -> model override (undefined follows the default model).
+  private fixedChannels = new Map<string, string | undefined>();
   private readonly ownedSettingsDirectory?: string;
   private closed = false;
 
-  constructor(path: string, options: { settingsDirectory?: string; timezone?: string; alertChannelIds?: string[] } = {}) {
+  constructor(path: string, options: { settingsDirectory?: string; timezone?: string; fixedChannels?: FixedChannel[] } = {}) {
     if (path !== ':memory:') {
       const directory = dirname(path);
       if (!existsSync(directory)) { mkdirSync(directory, { recursive: true, mode: 0o700 }); chmodSync(directory, 0o700); }
@@ -83,7 +84,7 @@ export class Store implements SchedulerStore {
     try { this.db = new DatabaseSync(path); }
     finally { process.umask(previousUmask); }
     if (path !== ':memory:') chmodSync(path, 0o600);
-    if (options.alertChannelIds) this.alertChannelIds = new Set(options.alertChannelIds);
+    if (options.fixedChannels) this.fixedChannels = new Map(options.fixedChannels.map(channel => [channel.id, channel.model]));
     const settingsDirectory = options.settingsDirectory ?? (path === ':memory:' ? (this.ownedSettingsDirectory = mkdtempSync(join(tmpdir(), 'butler-settings-'))) : join(dirname(path), 'config'));
     this.settings = new FileBackedSettings(settingsDirectory, options.timezone);
     this.db.exec(`
@@ -144,12 +145,12 @@ export class Store implements SchedulerStore {
   }
 
   private snapshotTracked(id: string, channels: SettingsSnapshot['channels']): boolean {
-    return this.alertChannelIds.has(id) || Object.hasOwn(channels, id);
+    return this.fixedChannels.has(id) || Object.hasOwn(channels, id);
   }
 
   private validateFileSettings(next: SettingsSnapshot, previous: SettingsSnapshot): void {
-    const overlap = Object.keys(next.channels).filter(id => this.alertChannelIds.has(id));
-    if (overlap.length) throw new SettingsConflictError(`Alert channels cannot have general channel settings: ${overlap.join(', ')}`);
+    const overlap = Object.keys(next.channels).filter(id => this.fixedChannels.has(id));
+    if (overlap.length) throw new SettingsConflictError(`Fixed channels cannot have general channel settings: ${overlap.join(', ')}`);
     if (!this.externalStopHooks) return;
     const channels = new Set([...Object.keys(previous.channels), ...Object.keys(next.channels), ...this.knownChannelIds()]);
     const affected = [...channels].filter(id => this.snapshotTracked(id, previous.channels) && !this.snapshotTracked(id, next.channels));
@@ -663,7 +664,7 @@ export class Store implements SchedulerStore {
     return [...new Set([...Object.keys(this.settings.current().channels), ...(this.db.prepare('SELECT channel_id FROM channel_state').all() as Array<{channel_id:string}>).map(row => row.channel_id)])];
   }
 
-  isTrackedChannel(channelId: string): boolean { return this.alertChannelIds.has(channelId) || Object.hasOwn(this.settings.current().channels, channelId); }
+  isTrackedChannel(channelId: string): boolean { return this.fixedChannels.has(channelId) || Object.hasOwn(this.settings.current().channels, channelId); }
 
   channelPolicy(channelId: string): ChannelPolicy | undefined {
     const config=this.settings.current().channels[channelId];
@@ -671,33 +672,31 @@ export class Store implements SchedulerStore {
     return {channelId,botReply:(config.botReply as boolean|null|undefined)??null,hindsightWrite:(config.hindsightWrite as boolean|null|undefined)??null};
   }
 
-  setAlertChannelIds(ids: string[], model?: string): void {
-    this.alertModel = model;
-    const next = new Set(ids);
+  setFixedChannels(fixed: FixedChannel[]): void {
+    const next = new Map(fixed.map(channel => [channel.id, channel.model]));
     const channels = this.settings.current().channels;
-    const overlap = [...next].filter(id => Object.hasOwn(channels, id));
-    if (overlap.length) throw new SettingsConflictError(`Alert channels cannot have general channel settings: ${overlap.join(', ')}`);
-    const previous = this.alertChannelIds;
-    const changed = [...new Set([...previous, ...next])].filter(id => previous.has(id) !== next.has(id));
-    if (!changed.length) return;
-    const stopped = [...previous].filter(id => !next.has(id) && !Object.hasOwn(channels, id));
+    const overlap = [...next.keys()].filter(id => Object.hasOwn(channels, id));
+    if (overlap.length) throw new SettingsConflictError(`Fixed channels cannot have general channel settings: ${overlap.join(', ')}`);
+    const previous = this.fixedChannels;
+    const stopped = [...previous.keys()].filter(id => !next.has(id) && !Object.hasOwn(channels, id));
+    if (!stopped.length) { this.fixedChannels = next; return; }
     const blocked = stopped.filter(id => this.externalStopHooks && !this.externalStopHooks.canStop(id));
     if (blocked.length) throw new SettingsConflictError(`Cannot stop tracking while channel work is active: ${blocked.join(', ')}`);
     this.db.exec('BEGIN IMMEDIATE');
-    this.alertChannelIds = next;
+    this.fixedChannels = next;
     try {
       for (const id of stopped) this.archiveChannelSession(id);
       this.db.exec('COMMIT');
     } catch (error) {
-      this.alertChannelIds = previous;
+      this.fixedChannels = previous;
       this.db.exec('ROLLBACK');
       throw error;
     }
   }
-  isAlertChannel(channelId: string, _parentChannelId?: string): boolean { return this.alertChannelIds.has(channelId); }
+  isFixedChannel(channelId: string, _parentChannelId?: string): boolean { return this.fixedChannels.has(channelId); }
 
   effectiveChannelPolicy(channelId:string,_parentChannelId?:string):EffectiveChannelPolicy {
-    if (this.alertChannelIds.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'all', mode:'steer' };
+    if (this.fixedChannels.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'all', mode:'steer' };
     const config = this.settings.current().channels[channelId];
     const tracked = Object.hasOwn(this.settings.current().channels, channelId);
     const bool = (key: 'botReply'|'hindsightWrite', fallback: boolean) => typeof config?.[key] === 'boolean' ? config[key] as boolean : fallback;
@@ -729,11 +728,11 @@ export class Store implements SchedulerStore {
     return { ...(row?{sessionId:row.session_id}:{}), model: this.effectiveChannelModel(channelId, defaultModel) };
   }
 
-  effectiveChannelModel(channelId: string, defaultModel: string): string { return this.isAlertChannel(channelId) ? this.alertModel ?? defaultModel : this.channelModelOverride(channelId) ?? defaultModel; }
+  effectiveChannelModel(channelId: string, defaultModel: string): string { return this.isFixedChannel(channelId) ? this.fixedChannels.get(channelId) ?? defaultModel : this.channelModelOverride(channelId) ?? defaultModel; }
 
-  effectiveChannelReasoningEffort(channelId: string): ReasoningEffort | undefined { return this.isAlertChannel(channelId) ? undefined : this.channelReasoningEffort(channelId); }
+  effectiveChannelReasoningEffort(channelId: string): ReasoningEffort | undefined { return this.isFixedChannel(channelId) ? undefined : this.channelReasoningEffort(channelId); }
 
-  effectiveChannelImageModel(channelId: string): string | undefined { return this.isAlertChannel(channelId) ? undefined : this.channelImageModel(channelId); }
+  effectiveChannelImageModel(channelId: string): string | undefined { return this.isFixedChannel(channelId) ? undefined : this.channelImageModel(channelId); }
 
   channelState(channelId: string, defaultModel: string, ownerId = 'unknown'): { sessionId: string; model: string } {
     const row = this.db.prepare('SELECT session_id FROM channel_state WHERE channel_id=?').get(channelId) as { session_id: string } | undefined;

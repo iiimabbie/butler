@@ -4,7 +4,7 @@ import type { Store, StoredMessage } from './store.js';
 import { ask } from './agent.js';
 import { startNotificationListener } from './notifications.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
-import { configuredAlertChannelIds, requireSetting, type ButlerConfig } from './config.js';
+import { requireSetting, type ButlerConfig } from './config.js';
 import { attachmentsPath } from './paths.js';
 import type { WebToolRuntime } from './web-tools.js';
 import { createWeatherToolRuntime, type WeatherToolRuntime } from './weather-tools.js';
@@ -34,7 +34,7 @@ import { logTrace, traceTextMetadata } from './model-request.js';
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; alertChannelIds: string[]; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
+export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsightFor?: (channelId: string | undefined) => import('./hindsight.js').Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
@@ -322,8 +322,8 @@ export class DiscordHandler {
     if (context.command !== 'status' && context.command !== 'restart' && !this.store.isTrackedChannel(context.channelId)) {
       await context.reply('此頻道尚未追蹤，請先在 `.data/config/channels.yaml` 明確新增頻道 entry。'); return;
     }
-    if (['model','img_model','mode','replymode','bot_reply'].includes(context.command) && this.store.isAlertChannel(context.channelId)) {
-      await context.reply('Alert 頻道設定固定，無法由頻道指令修改。'); return;
+    if (['model','img_model','mode','replymode','bot_reply'].includes(context.command) && this.store.isFixedChannel(context.channelId)) {
+      await context.reply('此頻道設定固定，無法由頻道指令修改。'); return;
     }
     const state = this.store.channelSettings(context.channelId, config.defaultModel);
     if (context.command === 'status') {
@@ -356,7 +356,7 @@ export class DiscordHandler {
       return;
     }
     if (context.command === 'bot_reply') {
-      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道的 Bot Reply 固定啟用。'); return; }
+      if (this.store.isFixedChannel(context.channelId, context.parentChannelId)) { await context.reply('此頻道的 Bot Reply 固定啟用。'); return; }
       if (context.enabled === undefined) { await context.reply('必須指定 enabled。'); return; }
       await this.enqueue(context.channelId, async () => {
         this.store.setChannelPolicy(context.channelId, { botReply: context.enabled! });
@@ -365,13 +365,13 @@ export class DiscordHandler {
       return;
     }
     if (context.command === 'replymode') {
-      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道固定為 mention 回覆模式。'); return; }
+      if (this.store.isFixedChannel(context.channelId, context.parentChannelId)) { await context.reply('此頻道固定回覆所有人類訊息。'); return; }
       if (!context.replyMode) { await context.reply('必須指定 value。'); return; }
       await this.enqueue(context.channelId, async () => { this.store.setChannelReplyMode(context.channelId, context.replyMode === 'inherit' ? undefined : context.replyMode); await context.reply(`頻道回覆模式已設定：${context.replyMode}`); });
       return;
     }
     if (context.command === 'mode') {
-      if (this.store.isAlertChannel(context.channelId, context.parentChannelId)) { await context.reply('此 Alert 頻道固定為 Steer 模式。'); return; }
+      if (this.store.isFixedChannel(context.channelId, context.parentChannelId)) { await context.reply('此頻道固定為 Steer 模式。'); return; }
       if (!context.mode) { await context.reply('必須指定 value。'); return; }
       await this.enqueue(context.channelId, async () => {
         this.store.setChannelMode(context.channelId, context.mode!);
@@ -801,7 +801,6 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
   return {
     token: requireSetting(config.discord?.token, 'discord.token'),
     ownerId: requireSetting(config.discord?.ownerId, 'discord.ownerId'),
-    alertChannelIds: configuredAlertChannelIds(config),
     defaultModel: requireSetting(config.llm?.model, 'llm.model'),
     baseUrl: requireSetting(config.llm?.baseUrl, 'llm.baseUrl'),
     apiKey: config.llm?.apiKey,

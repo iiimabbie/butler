@@ -25,9 +25,15 @@ export type ButlerConfig = {
   subagent?: { toolsEnabled: boolean };
 };
 
-export function configuredAlertChannelIds(config: ButlerConfig): string[] {
+export type FixedChannel = { id: string; model?: string };
+
+// Channels whose policy comes from config.yaml rather than channels.yaml: the error webhook thread and the phone notification channel.
+export function configuredFixedChannels(config: ButlerConfig): FixedChannel[] {
   const discord = config.discord;
-  return discord?.errorWebhookUrl && discord.errorWebhookThreadId ? [discord.errorWebhookThreadId] : [];
+  return [
+    ...(discord?.errorWebhookUrl && discord.errorWebhookThreadId ? [{ id: discord.errorWebhookThreadId, model: discord.errorWebhookModel }] : []),
+    ...(discord?.notificationChannelId ? [{ id: discord.notificationChannelId }] : []),
+  ];
 }
 
 const CONFIG_PATH = fileURLToPath(new URL('../.data/config.yaml', import.meta.url));
