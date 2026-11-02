@@ -48,7 +48,9 @@ const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 // The notification channel uses one fixed tool set for every run so its session prefix stays cacheable.
 const NOTIFICATION_CHANNEL_DENIED_ACTIONS: Readonly<Record<string, readonly string[]>> = { google_gmail_manage: ['send'], google_calendar_manage: ['delete'], google_tasks_manage: ['delete'] };
-const notificationChannelTool = (name: string, action?: string): boolean => name.startsWith('hledger_') || (name.startsWith('google_') && (!action || !NOTIFICATION_CHANNEL_DENIED_ACTIONS[name]?.includes(action)));
+// Ledger and Google for bookkeeping; reading the channel, reactions, memory lookup and read-only query chaining for conversation.
+const NOTIFICATION_CHANNEL_EXTRA_TOOLS: ReadonlySet<string> = new Set(['code_execute', 'discord_read', 'discord_react', 'memory_recall', 'memory_reflect']);
+const notificationChannelTool = (name: string, action?: string): boolean => name.startsWith('hledger_') || NOTIFICATION_CHANNEL_EXTRA_TOOLS.has(name) || (name.startsWith('google_') && (!action || !NOTIFICATION_CHANNEL_DENIED_ACTIONS[name]?.includes(action)));
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
