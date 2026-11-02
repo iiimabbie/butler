@@ -12,7 +12,7 @@ import { buildEmptyAssistantTextDiagnostic } from './empty-assistant-text-diagno
 import { IncompleteTurnRecovery, unfinishedDelegateStatus } from './incomplete-turn-recovery.js';
 import type { Store, ToolRecord } from './store.js';
 import type { DiscordToolRuntime } from './discord-tools.js';
-import { loadWorkspaceContext } from './context.js';
+import { loadWorkspaceContext, type WorkspaceContext } from './context.js';
 import type { GoogleToolRuntime } from './google-tools.js';
 import type { LocalToolRuntime } from './local-tools.js';
 import type { WebToolRuntime } from './web-tools.js';
@@ -156,8 +156,7 @@ function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Reco
 }
 
 /** The prompt prefix built from code, workspace files and available tools, before any session history. */
-export async function promptPrefix(config: AgentConfig): Promise<{ input: unknown[]; tools: Array<Record<string, unknown>>; googleRuntime?: GoogleToolRuntime }> {
-  const workspace = await loadWorkspaceContext(config.workspaceDirectory);
+export async function promptPrefix(config: AgentConfig, workspace: WorkspaceContext): Promise<{ input: unknown[]; tools: Array<Record<string, unknown>>; googleRuntime?: GoogleToolRuntime }> {
   const runtimeInput: unknown[] = [
     { role: 'developer', content: `Current model: ${config.model}.` },
     // Instructions stay in this fixed prefix: a developer item later in the conversation is hoisted to the front by Claude translation and changes the cached prefix every message.
@@ -208,7 +207,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
     }
     if (opening) sessionMessages = sessionMessages.filter(message => message.source.discordMessageId !== opening.messageId || fresh.some(current => current.id === message.id));
     const contextMessages = [...sessionMessages];
-    const { input: prefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config);
+    let workspace = store.workspaceSnapshot(session);
+    if (!workspace) { workspace = await loadWorkspaceContext(config.workspaceDirectory); store.saveWorkspaceSnapshot(session, workspace); }
+    const { input: prefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config, workspace);
     const availableToolNames: ReadonlySet<string> = new Set(fullAvailableTools.map(tool => String(tool.name)));
     const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
     let stableInput: unknown[] = [...prefixInput, ...openingInput, ...compactInput];

@@ -12,7 +12,7 @@ export const CLEAR_TABLES = [
   'memory_batch_sources', 'message_input_attachments', 'message_sources', 'hindsight_pending',
   'discord_outgoing_segments', 'message_preparation', 'memory_batches', 'tool_calls',
   'subagent_inbox', 'subagent_events', 'subagent_runs', 'subagent_windows',
-  'session_compact_checkpoints', 'session_opening_context', 'session_context_usage',
+  'session_compact_checkpoints', 'session_workspace', 'session_opening_context', 'session_context_usage',
   'attachment_deliveries', 'latest_cpa_request', 'model_requests', 'ask_context',
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
