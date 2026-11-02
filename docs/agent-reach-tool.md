@@ -1,6 +1,6 @@
 # Agent Reach 唯讀工具
 
-Butler 的 `agent_reach` 會出現在工具索引；完整定義透過 `tools_catalog` 載入。需要主機工具 runtime 及 PATH 中的官方 Agent Reach CLI。平台依賴與登入另行管理，不由本工具安裝或變更。
+Butler 每次請求都會帶上 `agent_reach` 的完整定義。需要主機工具 runtime 及 PATH 中的官方 Agent Reach CLI。平台依賴與登入另行管理，不由本工具安裝或變更。
 
 ## 呼叫
 

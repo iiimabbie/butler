@@ -121,7 +121,7 @@ All five fields remain untrusted external data in persisted history and compacti
 
 ## CodeMode
 
-`code_execute` (loaded through `tools_catalog`) runs a model-written JavaScript async function body in a per-call QuickJS worker. The script calls tools with `await callTool(name, args)` and returns a small JSON summary, so intermediate results do not enter the model context. Only read-only tools from the list in `src/code-mode.ts` that the current conversation can already use are callable; each call goes through the normal executor and tool history. The script has no Node, filesystem, network or timers. Limits: 32 MiB guest memory, 64 tool calls, 64 KiB result, `timeout_ms` default 30 s (max 120 s). When the model issues several read-only tool calls in one turn, Butler runs them concurrently.
+`code_execute` runs a model-written JavaScript async function body in a per-call QuickJS worker. The script calls tools with `await callTool(name, args)` and returns a small JSON summary, so intermediate results do not enter the model context. Only read-only tools from the list in `src/code-mode.ts` that the current conversation can already use are callable; each call goes through the normal executor and tool history. The script has no Node, filesystem, network or timers. Limits: 32 MiB guest memory, 64 tool calls, 64 KiB result, `timeout_ms` default 30 s (max 120 s). When the model issues several read-only tool calls in one turn, Butler runs them concurrently.
 
 ## Service operation
 

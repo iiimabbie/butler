@@ -34,7 +34,6 @@ import { DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
 import { runSubagent, subagentDefinitions, validateSubagentModel } from './subagent.js';
 import type { SubagentCoordinator } from './subagent-coordinator.js';
-import { createToolCatalog, residentToolNames, type ToolCatalog } from './tool-catalog.js';
 
 export interface AgentConfig {
   baseUrl: string;
@@ -157,7 +156,7 @@ function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Reco
 }
 
 /** The prompt prefix built from code, workspace files and available tools, before any session history. */
-export async function promptPrefix(config: AgentConfig): Promise<{ input: unknown[]; tools: Array<Record<string, unknown>>; catalog?: ToolCatalog; googleRuntime?: GoogleToolRuntime }> {
+export async function promptPrefix(config: AgentConfig): Promise<{ input: unknown[]; tools: Array<Record<string, unknown>>; googleRuntime?: GoogleToolRuntime }> {
   const workspace = await loadWorkspaceContext(config.workspaceDirectory);
   const runtimeInput: unknown[] = [
     { role: 'developer', content: `Current model: ${config.model}.` },
@@ -178,11 +177,9 @@ export async function promptPrefix(config: AgentConfig): Promise<{ input: unknow
   ];
   const googleRuntime = await config.googleTools?.available() ? config.googleTools : undefined;
   const fullAvailableTools = [...tools.filter(tool => (!String(tool.name).startsWith('memory_') && tool.name !== 'knowledge_page_create') || config.hindsight).filter(tool => tool.name !== 'knowledge_page_create' || !config.memoryWriteAllowed || config.memoryWriteAllowed()), ...subagentToolsForContext(config), ...(config.discordTools?.definitions ?? []), ...(googleRuntime?.definitions ?? []), ...(config.localTools?.definitions ?? []), ...(config.localTools ? [agentReachDefinition] : []), ...(config.webTools?.definitions ?? []), ...(config.weatherTools?.definitions ?? []), ...(config.skillsTools?.definitions ?? []), ...(config.scheduleTools?.definitions ?? []), ...(config.imageTools?.definitions ?? []), ...(config.hledgerTools?.definitions ?? [])].map(tool => addProgressLabelSchema(tool as { parameters: Record<string, unknown> })).filter(tool => !config.toolFilter || config.toolFilter(String(tool.name)));
-  const catalog = config.toolFilter ? undefined : createToolCatalog(fullAvailableTools as Array<Record<string, unknown>>);
-  const toolIndexInput: unknown[] = catalog ? [{ role: 'developer', content: `Available tools (name — short purpose; full definitions load by exact name via tools_catalog):\n${catalog.index().map(item => `${item.name} — ${item.description}`).join('\n')}` }] : [];
   const skillsCatalog = config.skillsTools ? await config.skillsTools.catalog() : '';
   const skillsInput: unknown[] = skillsCatalog ? [{ role: 'developer', content: `Installed skills catalog (metadata; full content via skills_read):\n${skillsCatalog}` }] : [];
-  return { input: [...workspaceInput, ...runtimeInput, ...toolIndexInput, ...skillsInput], tools: fullAvailableTools, catalog, googleRuntime };
+  return { input: [...workspaceInput, ...runtimeInput, ...skillsInput], tools: fullAvailableTools, googleRuntime };
 }
 
 export async function ask(store: Store, session: string, prompt: string, config: AgentConfig): Promise<string> {
@@ -211,12 +208,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
     }
     if (opening) sessionMessages = sessionMessages.filter(message => message.source.discordMessageId !== opening.messageId || fresh.some(current => current.id === message.id));
     const contextMessages = [...sessionMessages];
-    const { input: prefixInput, tools: fullAvailableTools, catalog, googleRuntime } = await promptPrefix(config);
-    const toolsForRequest = () => {
-      if (!catalog) return fullAvailableTools;
-      const loaded = catalog.loadedDefinitions();
-      return [...fullAvailableTools.filter(tool => residentToolNames.has(String(tool.name)) || loaded.some(item => item.name === tool.name)), ...catalog.definitions];
-    };
+    const { input: prefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config);
+    const availableToolNames: ReadonlySet<string> = new Set(fullAvailableTools.map(tool => String(tool.name)));
     const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
     let stableInput: unknown[] = [...prefixInput, ...openingInput, ...compactInput];
     // Per-message context follows the history so the prefix above stays cacheable across messages.
@@ -244,15 +237,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
       return { messageId: message.id, items, protected: fresh.some(current => current.id === message.id) || consumedSteerMessageIds.has(message.id) };
     }));
     const initialGroupReferences = new Map(initialGroups.map(group => [group.items, group.messageId]));
-    if (catalog) {
-      // Tools loaded earlier in the session stay loaded, so a new message starts with the tool list the previous one ended with and keeps its cached prefix.
-      const historyItems = initialGroups.flatMap(group => group.items).filter(isRecord);
-      const catalogCallIds = new Set(historyItems.filter(item => item.type === 'function_call' && item.name === 'tools_catalog').map(item => item.call_id));
-      const loadedNames = [...new Set(historyItems.filter(item => item.type === 'function_call_output' && catalogCallIds.has(item.call_id)).flatMap(item => {
-        try { const output: unknown = JSON.parse(String(item.output)); return isRecord(output) && Array.isArray(output.loaded_names) ? output.loaded_names : []; } catch { return []; }
-      }).filter((name): name is string => typeof name === 'string' && catalog.getDefinition(name) !== undefined))];
-      for (let start = 0; start < loadedNames.length; start += 30) catalog.execute({ names: loadedNames.slice(start, start + 30) });
-    }
     const liveSummaryState = { role: 'user', content: '' };
     const input: unknown[] = [...stableInput, liveSummaryState, ...initialGroups.flatMap(group => group.items), ...askContextInput];
     const recentCount = 10;
@@ -320,7 +304,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       let priorUsage = store.contextUsage(session);
       const limit = config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000;
       const countAndCalibrate = async () => {
-        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: toolsForRequest(), fetcher });
+        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: fullAvailableTools, fetcher });
         localCountEstimate = local.inputTokens;
         localCountSource = local.source;
         const attachmentSignature = nativeAttachmentSignature(input);
@@ -393,7 +377,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${config.modelContextTokens?.[config.model] ? 'model limit' : 'configured budget'}; stopping before request.`);
       // Every channel shares the same prompt start; a per-session key keeps its requests on the machine that holds its cache,
       // and extended retention keeps a channel's history cached between messages minutes apart.
-      const requestBody = JSON.stringify({ model: config.model, input, tools: toolsForRequest(), prompt_cache_key: session, prompt_cache_retention: '24h', ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
+      const requestBody = JSON.stringify({ model: config.model, input, tools: fullAvailableTools, prompt_cache_key: session, prompt_cache_retention: '24h', ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       const requestId = randomUUID();
       store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
       let result: Awaited<ReturnType<typeof requestModel>>;
@@ -510,7 +494,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         logTrace('model_tool_start', toolTrace);
         let returned = false;
         try {
-          const output = await executeCall(store, session, call, config, googleRuntime, catalog);
+          const output = await executeCall(store, session, call, config, googleRuntime, availableToolNames);
           returned = true;
           return output;
         } finally {
@@ -554,7 +538,7 @@ function subagentExecutor(store: Store, session: string, id: string, task: { tas
   };
 }
 
-export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, catalog?: ToolCatalog): Promise<unknown> {
+export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, availableToolNames?: ReadonlySet<string>): Promise<unknown> {
   logInfo('tool_call', { tool: call.name, source: 'agent', sessionId: session, callId: call.call_id });
   let args: Record<string, unknown>;
   try {
@@ -584,14 +568,11 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   try {
     if (config.toolFilter && !config.toolFilter(call.name)) throw new ToolUsageError('Tool is not available in this channel');
     if (call.name === 'code_execute') {
-      if (!catalog) throw new ToolUsageError('CodeMode is unavailable in this execution');
+      if (!availableToolNames) throw new ToolUsageError('CodeMode is unavailable in this execution');
       result = await executeCode(runtimeArgs, {
-        available: name => catalog.getDefinition(name) !== undefined, callId: call.call_id, signal: config.signal,
-        execute: (name, args, callId) => executeCall(store, session, { type: 'function_call', name, call_id: callId, arguments: JSON.stringify(args) }, config, googleRuntime, catalog),
+        available: name => availableToolNames.has(name), callId: call.call_id, signal: config.signal,
+        execute: (name, args, callId) => executeCall(store, session, { type: 'function_call', name, call_id: callId, arguments: JSON.stringify(args) }, config, googleRuntime, availableToolNames),
       });
-    } else if (call.name === 'tools_catalog') {
-      if (!catalog) throw new ToolUsageError('Tool catalog is unavailable in this execution');
-      result = catalog.execute(runtimeArgs);
     } else if (call.name === 'subagent_run') {
       if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       const required = ['task', 'context', 'constraints', 'expected_output'];
