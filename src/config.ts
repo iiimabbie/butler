@@ -12,7 +12,7 @@ export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type NotificationConfig = { host: string; port: number; bearerToken: string };
 export type ButlerConfig = {
   notifications?: NotificationConfig;
-  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; notificationChannelId?: string };
+  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; errorWebhookModel?: string; notificationChannelId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: WebConfig;
   hledger?: { enabled: boolean };
@@ -61,7 +61,7 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
       const notificationChannelId = string('notificationChannelId');
       if (notificationChannelId !== undefined && !/^\d{17,20}$/.test(notificationChannelId)) throw new Error('Butler config discord.notificationChannelId must be a Discord channel ID');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId, notificationChannelId };
+      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId, errorWebhookModel: string('errorWebhookModel'), notificationChannelId };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
