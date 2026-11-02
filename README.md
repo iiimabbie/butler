@@ -24,7 +24,7 @@ discord:
   # errorWebhookModel: MODEL_ID  # Alert 頻道專用模型；省略則跟隨 llm.model
   channelIds:
     - SUBSCRIBED_CHANNEL_ID
-  # Optional alert roots; their effective policy is fixed (tracked, bot reply, Hindsight write, mention-only, steer).
+  # Optional alert roots; their effective policy is fixed (tracked, bot reply, Hindsight write, human messages without mention, bot messages only when mentioned, steer).
   alertChannelIds: []
 llm:
   baseUrl: http://127.0.0.1:8317/v1
@@ -165,7 +165,7 @@ discord:
     - "FORUM_OR_TEXT_CHANNEL_ID"
 ```
 
-只接收錯誤通知時，設定 `errorWebhook*` 即可；這些欄位不會建立 Alert Channel 政策。若要讓 Butler 在指定頻道處理告警訊息，另在私人 `.data/config.yaml` 的 `discord.alertChannelIds` 填入專用 root channel ID（可為論壇父頻道），不需加入一般 `channelIds`。此設定熱更新且預設空清單；root 與其既有父層機制辨識的子討論串固定追蹤、Bot Reply 啟用、寫入 Hindsight、僅 @ 提及時回應，並固定 Steer。這些有效值優先於舊 per-channel 設定；移除 ID 後舊覆寫仍保留並恢復生效。需確保 Bot 在該頻道／討論串有檢視、讀取歷史及發訊息權限。
+只接收錯誤通知時，設定 `errorWebhook*` 即可；這些欄位不會建立 Alert Channel 政策。若要讓 Butler 在指定頻道處理告警訊息，另在私人 `.data/config.yaml` 的 `discord.alertChannelIds` 填入專用 root channel ID（可為論壇父頻道），不需加入一般 `channelIds`。此設定熱更新且預設空清單；root 與其既有父層機制辨識的子討論串固定追蹤、Bot Reply 啟用、寫入 Hindsight、人類訊息不需 @ 即回應、bot／webhook 訊息仍須 @ 提及，並固定 Steer。這些有效值優先於舊 per-channel 設定；移除 ID 後舊覆寫仍保留並恢復生效。需確保 Bot 在該頻道／討論串有檢視、讀取歷史及發訊息權限。
 
 `/status` 的 Reply mode、Bot Reply、Tracked、Hindsight write 與 Msg mode 會顯示 alert 的有效固定值。告警 webhook 自己的訊息若送入 alert channel，也只有明確 @ 提及 Butler 才會觸發 ask；錯誤通知 webhook 的目的地本身仍不等同 alert channel。收到 API policy 拒絕時會記錄診斷；收到告警不代表 Butler 一定能修復或會自動修復。
 
