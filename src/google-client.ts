@@ -1,4 +1,5 @@
-import type { GoogleAuth } from './google-auth.js';
+import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
+import { ToolUsageError } from './tool-errors.js';
 import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 
 export const GOOGLE_FILE_LIMIT = 10 * 1024 * 1024;
@@ -6,7 +7,15 @@ export class GoogleClient {
   constructor(private readonly auth: GoogleAuth, private readonly fetcher: typeof fetch = fetch) {}
   async available(): Promise<boolean> { return await this.auth.status() === 'connected'; }
 
+  async accounts() { return this.auth.accounts(); }
+  async account(value?: string) {
+    try { return await this.auth.resolveAccount(value); }
+    catch (error) { if (error instanceof GoogleAuthError) throw new ToolUsageError(error.message); throw error; }
+  }
+  async requireModify(account: string) { return this.auth.requireModify(account); }
+
   async request(path: string, options: {
+    account?: string;
     method?: string;
     query?: Record<string, string | number | boolean | undefined>;
     body?: unknown;
@@ -15,9 +24,10 @@ export class GoogleClient {
   } = {}): Promise<any> {
     if (!/^\/(gmail\/v1\/|calendar\/v3\/|tasks\/v1\/|drive\/v3\/|upload\/drive\/v3\/)/.test(path) || path.includes('..') || path.includes('\\') || path.includes('?') || path.includes('#')) throw new Error('Invalid Google API path');
     if (!await this.available()) throw new Error('Google tools are unavailable until Google is connected');
+    const account = await this.account(options.account);
     const url = new URL(path, 'https://www.googleapis.com');
     for (const [k, v] of Object.entries(options.query ?? {})) if (v !== undefined) url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { authorization: `Bearer ${await this.auth.accessToken()}` };
+    const headers: Record<string, string> = { authorization: `Bearer ${await this.auth.accessToken(account)}` };
     let body: BodyInit | undefined;
     if (options.upload) { headers['content-type'] = options.upload.contentType; body = new Uint8Array(options.upload.bytes); }
     else if (options.body !== undefined) { headers['content-type'] = 'application/json'; body = JSON.stringify(options.body); }
@@ -26,7 +36,7 @@ export class GoogleClient {
     catch { throw new Error('Google API connection failed; outcome is unknown and was not retried'); }
     if (!response.ok) {
       if (response.status === 401) {
-        await this.auth.markReauthorizationRequired();
+        await this.auth.markReauthorizationRequired(account);
         throw new Error('Google token rejected; reconnect Google. The request was not retried.');
       }
       throw new Error(`Google API request failed (HTTP ${response.status}); request was not retried`);

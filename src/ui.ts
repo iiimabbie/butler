@@ -31,7 +31,8 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
     try {
       if (pathname === '/api/google/status' && req.method === 'GET') {
         const status = options.googleAuth ? await options.googleAuth.status() : 'not_configured';
-        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ status })); return;
+        const accounts = options.googleAuth ? await options.googleAuth.accounts().catch(() => []) : [];
+        res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ status, accounts })); return;
       }
       if (pathname === '/api/channels' || pathname === '/api/models' || /^\/api\/channels\/[^/]+(?:\/tracking)?$/.test(pathname)) {
         const management = options.channelManagement;
@@ -90,7 +91,7 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
         }
         respond(405, { error: '方法不允許' }); return;
       }
-      if (['/api/google/start', '/api/google/complete'].includes(pathname) && req.method === 'POST') {
+      if (['/api/google/start', '/api/google/complete', '/api/google/default', '/api/google/remove'].includes(pathname) && req.method === 'POST') {
         if (!options.googleAuth || req.headers.origin !== publicOrigin) { res.writeHead(403, headers).end(); return; }
         if (req.headers['content-type']?.split(';')[0]?.trim().toLowerCase() !== 'application/json') { res.writeHead(415, headers).end(); return; }
         const secure = originUrl.protocol === 'https:' ? '; Secure' : '';
@@ -101,16 +102,20 @@ export function startUi(dbPath: string, port: number, options: { googleAuth?: Go
             const browser = previous && /^[A-Za-z0-9_-]{32}$/.test(previous) ? previous : randomBytes(24).toString('base64url');
             const auth = await options.googleAuth.begin(browser);
             res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Set-Cookie': `butler_google_browser=${browser}; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=300${secure}` }).end(JSON.stringify(auth));
-          } else {
+          } else if (pathname === '/api/google/complete') {
             const browser = parseCookies(req.headers.cookie ?? '').butler_google_browser;
             const csrf = req.headers['x-csrf-token'];
             if (!browser || typeof csrf !== 'string') { res.writeHead(403, headers).end(); return; }
             if (typeof payload.url !== 'string') throw new URIError('invalid payload');
             await options.googleAuth.complete(payload.url, csrf, browser);
             res.writeHead(200, { ...headers, 'Content-Type': 'application/json', 'Set-Cookie': `butler_google_browser=; Path=${cookiePath}; HttpOnly; SameSite=Lax; Max-Age=0${secure}` }).end(JSON.stringify({ status: 'connected' }));
+          } else {
+            if (typeof payload.account !== 'string' || !payload.account) throw new URIError('invalid payload');
+            const result = pathname === '/api/google/default' ? (await options.googleAuth.setDefault(payload.account), {}) : await options.googleAuth.removeAccount(payload.account);
+            res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify(result));
           }
         } catch (error) {
-          res.writeHead(400, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof GoogleAuthError ? error.message : '授權失敗，請重新開始' }));
+          res.writeHead(400, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof GoogleAuthError ? error.message : '操作失敗，請重新開始' }));
         }
         return;
       }

@@ -606,11 +606,33 @@ function clearGoogleTransaction() {
 }
 async function loadGoogleStatus() {
   try {
-    const { status } = await getJson('api/google/status');
+    const { status, accounts } = await getJson('api/google/status');
+    const list = $('#google-accounts');
+    list.replaceChildren();
+    for (const account of accounts) {
+      const row = element('div');
+      row.append(element('span', `${account.email} — ${account.status === 'connected' ? '已連線' : '需要重新授權'}${account.default ? '（預設）' : ''}；gmail.modify：${account.gmail_modify ? '已授權' : '未授權'} `));
+      if (!account.default) { const button = element('button', '設為預設'); button.type = 'button'; button.onclick = () => void manageGoogleAccount('default', account.email); row.append(button); }
+      const remove = element('button', '移除帳號'); remove.type = 'button'; remove.onclick = () => void manageGoogleAccount('remove', account.email); row.append(remove);
+      list.append(row);
+    }
     const labels = { not_configured: '尚未設定 client', not_connected: '尚未連線', connected: '已連線', reauthorization_required: '需要重新授權' };
     $('#google-status').textContent = labels[status] ?? '連線狀態未知';
     $('#google-start').disabled = googleBusy || status === 'not_configured';
   } catch { $('#google-status').textContent = '無法讀取 Google 連線狀態'; }
+}
+async function manageGoogleAccount(action, account) {
+  if (googleBusy) return;
+  if (action === 'remove' && !confirm(`移除 ${account} 的本機授權？`)) return;
+  googleBusy = true;
+  try {
+    const response = await fetch(`api/google/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ account }), cache: 'no-store', credentials: 'same-origin' });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error ?? '操作失敗');
+    await loadGoogleStatus();
+    if (action === 'remove' && !data.revoked) $('#google-status').textContent = '已移除本機憑證，但 Google 撤銷授權失敗。';
+  } catch (error) { $('#google-status').textContent = error.message; }
+  finally { googleBusy = false; $('#google-start').disabled = false; }
 }
 $('#google-start').onclick = async () => {
   if (googleBusy) return;
@@ -644,7 +666,7 @@ $('#google-submit').onclick = async () => {
     googleCsrf = null;
     const data = await response.json();
     if (!response.ok) throw new Error(data.error ?? '授權失敗，請重新開始');
-    $('#google-complete').hidden = true; $('#google-status').textContent = '已連線';
+    $('#google-complete').hidden = true; await loadGoogleStatus();
   } catch (error) { $('#google-status').textContent = error.message; }
   finally { googleBusy = false; clearGoogleTransaction(); $('#google-start').disabled = false; $('#google-submit').disabled = false; }
 };
