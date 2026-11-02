@@ -166,6 +166,9 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
         else if (inputMimeType.startsWith('image/')) {
           content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；未辨識到支援的 PNG/JPEG/GIF/WebP 圖片簽章，原檔已保留，未上傳。]` });
           continue;
+        } else if (inputMimeType === 'application/octet-stream') {
+          content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；無法辨識檔案格式（application/octet-stream），不支援作為模型檔案輸入，原檔已保留，未上傳；不能據此聲稱已讀取內容。]` });
+          continue;
         }
         data = raw.toString('base64');
       } finally { closeSync(fd); }
