@@ -1,7 +1,6 @@
 import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from './store.js';
-import type { ChannelManagement, ChannelSettings, ChannelSettingsPatch } from './channel-settings.js';
 import { ask } from './agent.js';
 import { startNotificationListener } from './notifications.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
@@ -1009,71 +1008,6 @@ export async function imageModelChoices(config: NonNullable<ButlerConfig['image'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function createChannelManagement(client: Client, store: Store, getRuntime: () => RuntimeBundle, canStopChannel: (id: string) => boolean): ChannelManagement {
-  const isAuthorized = async (id: string): Promise<boolean> => store.isTrackedChannel(id) || store.isAlertChannel(id);
-  const stop = async (id: string): Promise<ChannelSettings> => {
-    if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
-    if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 .data/config.yaml 的 webhook 設定管理'), { status: 400 });
-    if (!canStopChannel(id)) throw Object.assign(new Error('頻道忙碌中；停止追蹤未套用'), { status: 409 });
-    store.deleteTrackedChannel(id);
-    return build(id);
-  };
-  const build = async (id: string, authorized?: boolean): Promise<ChannelSettings> => {
-    const runtime = getRuntime();
-    const policy = store.channelPolicy(id);
-    let name: string | undefined;
-    let kind: ChannelSettings['kind'];
-    let parentChannelId: string | undefined;
-    try {
-      const channel = await client.channels.fetch(id);
-      if (channel && 'name' in channel && typeof channel.name === 'string') name = channel.name;
-      if (channel) kind = channel.type === ChannelType.GuildForum ? 'forum' : channel.isThread() ? 'post' : 'channel';
-      if (channel?.isThread()) {
-        parentChannelId = channel.parentId ?? parentChannelId;
-      }
-    } catch { /* inaccessible Discord channel remains manageable by stored ID */ }
-    const effective = store.effectiveChannelPolicy(id, parentChannelId);
-    const state = store.channelSettings(id, runtime.discord.defaultModel);
-    const effort = store.effectiveChannelReasoningEffort(id) ?? 'auto';
-    const overrideSource = (read: (channelId: string) => unknown): string => read(id) != null ? id : 'default';
-    const alert = store.isAlertChannel(id, parentChannelId);
-    const policySource = (source: string): string => alert ? `alert:${source}` : source;
-    return { channelId: id, ...(name ? { name } : {}), ...(kind ? { kind } : {}), ...(parentChannelId ? { parentChannelId } : {}), authorized: authorized ?? await isAuthorized(id), tracked: effective.tracked, alert: store.isAlertChannel(id, parentChannelId),
-      raw: { botReply: policy?.botReply ?? null, hindsightWrite: policy?.hindsightWrite ?? null, replyMode: store.channelReplyMode(id) ?? null, mode: store.channelModeOverride(id) ?? null, model: store.channelModelOverride(id) ?? null, effort: store.channelReasoningEffort(id) ?? null, imageModel: store.channelImageModel(id) ?? null },
-      sources: { botReply: policySource(effective.botReplySource), hindsightWrite: policySource(effective.hindsightWriteSource), replyMode: policySource(effective.replyModeSource), mode: alert ? `alert:${id}` : overrideSource(channelId => store.channelModeOverride(channelId)), model: alert ? `alert:${id}` : overrideSource(channelId => store.channelModelOverride(channelId)), effort: alert ? `alert:${id}` : overrideSource(channelId => store.channelReasoningEffort(channelId)), imageModel: alert ? `alert:${id}` : overrideSource(channelId => store.channelImageModel(channelId)) },
-      effective: { botReply: effective.botReply, hindsightWrite: effective.hindsightWrite, replyMode: effective.replyMode, mode: store.channelMode(id), model: state.model, effort, imageModel: store.effectiveChannelImageModel(id) ?? runtime.settings.image?.model ?? null } };
-  };
-  return {
-    listChannels: async () => {
-      const ids = [...new Set([...store.knownChannelIds(), ...getRuntime().discord.alertChannelIds])];
-      return Promise.all(ids.map(id => build(id)));
-    },
-    addChannel: async id => {
-      if (!/^\d{17,20}$/.test(id)) throw Object.assign(new Error('頻道 ID 格式錯誤'), { status: 400 });
-      let channel;
-      try { channel = await client.channels.fetch(id); } catch { channel = null; }
-      if (!channel || !(channel.isThreadOnly() || (channel.isTextBased() && 'send' in channel && typeof channel.send === 'function')) || !('permissionsFor' in channel) || typeof channel.permissionsFor !== 'function' || !client.user) throw Object.assign(new Error('無法存取文字頻道或討論串父頻道'), { status: 400 });
-      const permissions = channel.permissionsFor(client.user);
-      const sendPerm = channel.isThread() || channel.isThreadOnly() ? PermissionFlagsBits.SendMessagesInThreads : PermissionFlagsBits.SendMessages;
-      if (!permissions?.has(PermissionFlagsBits.ViewChannel) || !permissions.has(PermissionFlagsBits.ReadMessageHistory) || !permissions.has(sendPerm)) throw Object.assign(new Error('Bot 缺少頻道檢視、讀取歷史或傳訊權限'), { status: 400 });
-      if (store.isAlertChannel(id)) throw Object.assign(new Error('此為固定 Alert 頻道'), { status: 400 });
-      store.addTrackedChannel(id);
-      return build(id, true);
-    },
-    updateChannel: async (id, patch: ChannelSettingsPatch) => {
-      if (!await isAuthorized(id)) throw Object.assign(new Error('頻道未授權管理'), { status: 400 });
-      if (store.isAlertChannel(id)) throw Object.assign(new Error('固定錯誤通知頻道，請由 .data/config.yaml 的 webhook 設定管理'), { status: 400 });
-      if (!store.isTrackedChannel(id)) throw Object.assign(new Error('頻道尚未追蹤，請先明確新增追蹤'), { status: 400 });
-      const settingsPatch: Record<string, unknown> = {};
-      for (const key of ['botReply','hindsightWrite','replyMode','mode','model','effort','imageModel'] as const) if (key in patch) settingsPatch[key] = patch[key] ?? null;
-      if (Object.keys(settingsPatch).length) store.setChannelOverrides(id, settingsPatch);
-      return build(id, true);
-    },
-    stopTracking: async id => stop(id),
-    models: async () => { const runtime = getRuntime(); const image = runtime.settings.image; return { models: (await modelChoices(runtime.discord, '', fetch, Number.POSITIVE_INFINITY)).map(item => item.value), imageModels: image ? (await imageModelChoices(image, '', fetch, Number.POSITIVE_INFINITY)).map(item => item.value) : [] }; },
-  };
-}
-
 export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store, dbPath: string, clientOverride?: Client, memoryCoordinator?: MemoryCoordinator, closeConfigWatch?: () => void): Promise<void> {
   const startup = getRuntime();
   const config = startup.discord;
@@ -1228,16 +1162,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     if (settings.ui) {
       const { port, publicOrigin, cookiePath } = settings.ui;
       try {
-        const ui = await startUi(dbPath, port, {
-          googleAuth,
-          publicOrigin,
-          cookiePath,
-          channelManagement: createChannelManagement(client, store, getRuntime, id => handler.canStopChannel(id)),
-          channelName: async channelId => {
-            const channel = await client.channels.fetch(channelId);
-            return channel && 'name' in channel && typeof channel.name === 'string' ? channel.name : undefined;
-          },
-        });
+        const ui = await startUi(port, { googleAuth, publicOrigin, cookiePath });
         if (closed) {
           await ui.close();
           return;
