@@ -48,7 +48,7 @@ const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 // The notification channel uses one fixed tool set for every run so its session prefix stays cacheable.
-const NOTIFICATION_CHANNEL_DENIED_TOOLS = new Set(['google_gmail_send', 'google_calendar_delete_event', 'google_tasks_delete']);
+const NOTIFICATION_CHANNEL_DENIED_TOOLS = new Set(['google_gmail_send', 'google_gmail_trash', 'google_calendar_delete_event', 'google_tasks_delete']);
 const notificationChannelTool = (name: string): boolean => name.startsWith('hledger_') || (name.startsWith('google_') && !NOTIFICATION_CHANNEL_DENIED_TOOLS.has(name));
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 

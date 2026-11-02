@@ -7,11 +7,16 @@ import { GoogleClient, GOOGLE_FILE_LIMIT } from './google-client.js';
 
 const str = { type: 'string' };
 const count = (max: number, fallback: number) => ({ type: 'integer', minimum: 1, maximum: max, default: fallback });
+const account = { type: 'string', description: 'Account email; omit to use the default account. Use google_accounts_list to list accounts.' };
+const messageIds = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true };
 const schemas: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
-  google_gmail_search: { description: 'Search Gmail and return message metadata.', properties: { query: str, max_results: count(100, 10), page_token: str }, required: ['query'] },
-  google_gmail_read: { description: 'Read plain text when available, otherwise raw HTML, plus attachment metadata; attachments are not downloaded.', properties: { message_id: str }, required: ['message_id'] },
-  google_gmail_send: { description: 'Send a plain-text email to one recipient.', properties: { to: str, subject: str, body: str }, required: ['to', 'subject', 'body'] },
-  google_gmail_create_draft: { description: 'Create an unsent plain-text email draft for one recipient.', properties: { to: str, subject: str, body: str }, required: ['to', 'subject', 'body'] },
+  google_accounts_list: { description: 'List Google accounts, default status, connection status and gmail.modify permission.', properties: {}, required: [] },
+  google_gmail_trash: { description: 'Move messages to Trash, not permanent deletion. Gmail automatically permanently deletes them after 30 days. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
+  google_gmail_untrash: { description: 'Restore messages from Trash. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
+  google_gmail_search: { description: 'Search Gmail and return message metadata. Omit account to use the default; use google_accounts_list to list accounts.', properties: { query: str, max_results: count(100, 10), page_token: str, account }, required: ['query'] },
+  google_gmail_read: { description: 'Read plain text when available, otherwise raw HTML, plus attachment metadata; attachments are not downloaded. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_id: str, account }, required: ['message_id'] },
+  google_gmail_send: { description: 'Send a plain-text email to one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
+  google_gmail_create_draft: { description: 'Create an unsent plain-text email draft for one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
   google_calendar_list_events: { description: 'List calendar events; defaults to the primary calendar, start=now, and end=start+7 days. Timed values need timezone offsets.', properties: { calendar_id: str, start: str, end: str, max_results: count(250, 20), page_token: str }, required: [] },
   google_calendar_create_event: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str }, required: ['summary', 'start', 'end'] },
   google_calendar_update_event: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
@@ -38,23 +43,35 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   const number = (k: string, fallback: number): number => a[k] === undefined ? fallback : a[k] as number;
   const calendar = `/calendar/v3/calendars/${encodeURIComponent(s('calendar_id', 'primary'))}/events`;
   const tasks = `/tasks/v1/lists/${encodeURIComponent(s('task_list_id', '@default'))}/tasks`;
+  if (n === 'google_accounts_list') return { accounts: await c.accounts() };
+  const gmailAccount = n.startsWith('google_gmail_') ? await c.account(a.account as string | undefined) : undefined;
+  if (n === 'google_gmail_trash' || n === 'google_gmail_untrash') {
+    await c.requireModify(gmailAccount!);
+    const action = n === 'google_gmail_trash' ? 'trash' : 'untrash';
+    const results: { id: string; ok: boolean; error?: string }[] = [];
+    for (const id of a.message_ids as string[]) {
+      try { await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(id)}/${action}`, { account: gmailAccount, method: 'POST' }); results.push({ id, ok: true }); }
+      catch (error) { results.push({ id, ok: false, error: error instanceof Error ? error.message : 'Google API request failed' }); }
+    }
+    return { results };
+  }
   if (n === 'google_gmail_search') {
-    const r = await c.request('/gmail/v1/users/me/messages', { query: { q: s('query'), maxResults: number('max_results', 10), pageToken: s('page_token') || undefined } });
+    const r = await c.request('/gmail/v1/users/me/messages', { account: gmailAccount, query: { q: s('query'), maxResults: number('max_results', 10), pageToken: s('page_token') || undefined } });
     const messages = [];
     for (const m of r.messages ?? []) {
-      const meta = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}`, { query: { format: 'metadata' } });
+      const meta = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(m.id)}`, { account: gmailAccount, query: { format: 'metadata' } });
       messages.push({ id: meta.id, thread_id: meta.threadId, snippet: meta.snippet, internal_date: meta.internalDate, labels: meta.labelIds, headers: headers(meta.payload?.headers) });
     }
     return { messages, next_page_token: r.nextPageToken ?? null, result_size_estimate: r.resultSizeEstimate };
   }
   if (n === 'google_gmail_read') {
-    const r = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(s('message_id'))}`, { query: { format: 'full' } });
+    const r = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(s('message_id'))}`, { account: gmailAccount, query: { format: 'full' } });
     return { id: r.id, thread_id: r.threadId, internal_date: r.internalDate, headers: headers(r.payload?.headers), body: decodeMessage(r.payload), attachments: attachmentMetadata(r.payload) };
   }
   if (n === 'google_gmail_send' || n === 'google_gmail_create_draft') {
     const raw = Buffer.from(makeMime(s('to'), s('subject'), s('body')), 'utf8').toString('base64url');
     const draft = n === 'google_gmail_create_draft';
-    return c.request(draft ? '/gmail/v1/users/me/drafts' : '/gmail/v1/users/me/messages/send', { method: 'POST', body: draft ? { message: { raw } } : { raw } });
+    return c.request(draft ? '/gmail/v1/users/me/drafts' : '/gmail/v1/users/me/messages/send', { account: gmailAccount, method: 'POST', body: draft ? { message: { raw } } : { raw } });
   }
   if (n === 'google_calendar_list_events') {
     const start = s('start', new Date().toISOString());
@@ -146,12 +163,13 @@ function validate(name: string, args: Record<string, unknown>): void {
   if (!schema) throw new ToolUsageError('Unknown Google tool');
   for (const key of schema.required) if (args[key] === undefined) throw new ToolUsageError(`${key} is required`);
   for (const [key, value] of Object.entries(args)) {
-    const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number } | undefined;
+    const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number; minItems?: number; maxItems?: number } | undefined;
     if (!rule) throw new ToolUsageError('Unknown Google tool argument');
     if (rule.type === 'string') {
       const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key);
       if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new ToolUsageError(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
-    } else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} must be boolean`);
+    } else if (rule.type === 'array' && (!Array.isArray(value) || value.length < rule.minItems! || value.length > rule.maxItems! || value.some(item => typeof item !== 'string' || !item.trim()) || new Set(value).size !== value.length)) throw new ToolUsageError(`${key} must contain 1–100 unique non-empty strings`);
+    else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} must be boolean`);
     else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new ToolUsageError(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
   }
 }
