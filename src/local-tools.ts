@@ -88,7 +88,7 @@ export class LocalToolRuntime {
     if (name === 'butler_deploy') {
       if (!deploy?.channelId) throw new ToolUsageError('Deployment needs a Discord channel to report to');
       if (!this.pendingDeploy && !this.deployRunning) this.pendingDeploy = { channelId: deploy.channelId };
-      return { accepted: true, message: '部署已排隊：這輪回覆與排隊工作完成後建置並重啟，結果會回報在此頻道。' };
+      return { accepted: true, status: 'queued', starts_after: 'this reply and other queued work finish', steps: 'build, then restart', result_reported_in: 'this channel' };
     }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');
