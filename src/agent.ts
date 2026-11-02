@@ -24,7 +24,7 @@ import type { FinanceIdentity } from './finance-origin.js';
 import type { HledgerRuntime } from './hledger-tools.js';
 import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
-import { Hindsight } from './hindsight.js';
+import { formatRecall, Hindsight } from './hindsight.js';
 import type { MessageInputAttachment } from './store.js';
 import { logError, logInfo, logWarn } from './log.js';
 import { AttachmentInputError, formatDeliveryNotice, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from './input-attachments.js';
@@ -633,7 +633,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       const query = requiredString(runtimeArgs.query, 'query');
       result = call.name === 'memory_recall'
-        ? await config.hindsight.recall(query)
+        ? formatRecall(await config.hindsight.recall(query))
         : await config.hindsight.reflect(query, config.signal);
     } else if (call.name.startsWith('hledger_')) {
       if (!config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
