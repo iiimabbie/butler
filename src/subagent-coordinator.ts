@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped';
 export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: 'completed' | 'failed' | 'interrupted' | 'stopped'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
-export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled'; requesterId?: string; triggerInputId?: string }; result?: unknown; error?: string; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
+export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled' | 'notification'; requesterId?: string; triggerInputId?: string }; result?: unknown; error?: string; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
 type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<unknown>;
 type Entry = { snapshot: SubagentSnapshot; abort: AbortController };
 type Options = {

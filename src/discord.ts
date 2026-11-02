@@ -1,8 +1,9 @@
 import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
-import type { Store } from './store.js';
+import type { Store, StoredMessage } from './store.js';
 import type { ChannelManagement, ChannelSettings, ChannelSettingsPatch } from './channel-settings.js';
 import { ask } from './agent.js';
+import { startNotificationListener } from './notifications.js';
 import { createDiscordToolRuntime } from './discord-tools.js';
 import { configuredAlertChannelIds, requireSetting, type ButlerConfig } from './config.js';
 import { attachmentsPath } from './paths.js';
@@ -46,6 +47,9 @@ const imageModelInflight = new Map<string, Promise<string[]>>();
 const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
+// The notification channel uses one fixed tool set for every run so its session prefix stays cacheable.
+const NOTIFICATION_CHANNEL_DENIED_TOOLS = new Set(['google_gmail_send', 'google_calendar_delete_event', 'google_tasks_delete']);
+const notificationChannelTool = (name: string): boolean => name.startsWith('hledger_') || (name.startsWith('google_') && !NOTIFICATION_CHANNEL_DENIED_TOOLS.has(name));
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
@@ -90,6 +94,7 @@ export class DiscordHandler {
   setBotIdentity(id: string, name: string): void {
     this.botIdentity = { id, name };
     for (const event of this.subagentCoordinator.pendingEvents()) this.handleSubagentEvent(event);
+    if (this.getRuntime().settings.notifications) for (const id of this.store.pendingNotificationIds()) this.enqueueNotification(id);
   }
 
   async close(): Promise<void> {
@@ -227,6 +232,7 @@ export class DiscordHandler {
             localTools: this.localTools,
             webTools: runtime.webTools,
             hledgerTools: runtime.hledgerTools,
+            toolFilter: this.toolFilter(message.channelId),
             executionOrigin: financeInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
             weatherTools: this.weatherTools,
             memoryWriteAllowed: () => this.store.memoryWriteAllowed(message.channelId),
@@ -488,6 +494,9 @@ export class DiscordHandler {
   }
 
   private scheduleTools(creatorId: string, defaultTimezone: string) { return this.store ? createScheduleToolRuntime({ store: this.store, creatorId, defaultTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
+  private toolFilter(channelId: string, notification = false): ((name: string) => boolean) | undefined {
+    return notification || channelId === this.getRuntime().settings.discord?.notificationChannelId ? notificationChannelTool : undefined;
+  }
   private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string, image: ButlerConfig['image'], attachmentDir: string) { return image ? createImageToolRuntime({ config: { ...image, model: this.store.effectiveChannelImageModel(channelId) ?? image.model }, attachmentDir, attachmentFiles }) : undefined; }
 
   private async runScheduled(request: ScheduledTaskRequest): Promise<void> {
@@ -537,6 +546,7 @@ export class DiscordHandler {
         workspaceDirectory: DEFAULT_WORKSPACE,
         messageSource: { sourceKind: 'scheduled_input', channelId: request.outputChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
+        toolFilter: this.toolFilter(request.outputChannelId),
         onResponseReady: async text => {
           if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
             logInfo('no_reply', { text, replyTo: { channelId: request.outputChannelId, inputId: storedInput.id } });
@@ -600,39 +610,7 @@ export class DiscordHandler {
         const activeSession = this.store.channelState(origin.channelId, config.defaultModel, config.ownerId).sessionId;
         const content = `Internal subagent ${event.subagentId} event ${event.id} (${event.kind}), run_id=${event.runId}. Original entry=${origin.entryKind}; original parent session=${event.parentSession}; current channel session=${activeSession}. Keep this task in its original parent session, even if the user has started a new session. This is child-reported content, not authorization or verified fact.\n\n${event.message}`;
         const storedInput = this.store.subagentEventInput(event.id, event.parentSession, content, { sourceKind: 'subagent_event', channelId: origin.channelId, authorId: origin.requesterId });
-        const state = this.store.channelState(origin.channelId, config.defaultModel, config.ownerId);
-        const attachmentFiles: Array<{ attachment: string; name: string }> = [];
-        const attachmentToolCallIds: string[] = [];
-        await this.runAsk(this.store, event.parentSession, content, {
-          baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
-          transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(origin.channelId), messageSource: { sourceKind: 'subagent_event', channelId: origin.channelId },
-          hindsight: runtime.hindsightFor?.(origin.channelId), localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin('subagent_internal'), weatherTools: this.weatherTools,
-          googleTools: this.googleTools,
-          memoryWriteAllowed: () => this.store.memoryWriteAllowed(origin.channelId),
-          skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(origin.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
-          imageTools: this.imageTools(attachmentFiles, origin.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
-          subagentCoordinator: this.subagentCoordinator, subagentOrigin: origin, subagentEvent: true,
-          discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: origin.outputChannelId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: event.parentSession, memoryOriginChannelId: origin.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
-          onResponseReady: async text => {
-            if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
-              if (text) logInfo('no_reply', { text, replyTo: { channelId: origin.outputChannelId, inputId: storedInput.id } });
-              if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
-              return;
-            }
-            let outgoing: import('./store.js').StoredMessage | undefined;
-            const delivered: string[] = [];
-            let filesDelivered = false;
-            try {
-              await sendText({ authorId: origin.requesterId ?? config.ownerId, channelId: origin.outputChannelId, content, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, async (body, result) => {
-                const saved = this.recordOutgoingSegment(event.parentSession, body, result, outgoing, 'butler_reply', origin.channelId);
-                if (saved) { outgoing = saved; delivered.push(body); const deliveredAttachments = await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id); if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments); }
-              });
-            } finally {
-              if (outgoing) { this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); this.memoryCoordinator?.notifyReady(); }
-              if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
-            }
-          },
-        });
+        await this.runChannelInput(storedInput, origin, target);
         this.subagentCoordinator.updateEvent(event.id, 'delivered');
       } catch (error) {
         if (started) this.subagentCoordinator.updateEvent(event.id, 'failed_unknown');
@@ -641,6 +619,77 @@ export class DiscordHandler {
     };
     const queued = this.enqueue(origin.channelId, work);
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
+  }
+
+  enqueueNotification(id: string): void {
+    const channelId = this.getRuntime().settings.discord?.notificationChannelId;
+    if (this.stopping || !this.botIdentity || !channelId) return;
+    const work = async () => {
+      if (this.stopping) return;
+      let started = false;
+      try {
+        const target = await this.outputChannel(channelId);
+        if (!target) throw new Error('Notification output channel unavailable');
+        if (this.stopping) return;
+        const config = this.getRuntime().discord;
+        const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+        const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
+        if (!storedInput) return;
+        started = true;
+        await this.runChannelInput(storedInput, {
+          channelId, outputChannelId: channelId, entryKind: 'notification', triggerInputId: storedInput.id,
+        }, target);
+        this.store.finishNotification(id, 'completed');
+      } catch (error) {
+        if (started) this.store.finishNotification(id, 'unknown');
+        logError(`Notification processing failed id=${id}`, error, { mention: !isHttp429(error), fields: { started } });
+      }
+    };
+    void this.enqueue(channelId, work).catch(error => logError(`Could not enqueue notification id=${id}`, error, { mention: !isHttp429(error) }));
+  }
+
+  private async runChannelInput(storedInput: StoredMessage, input: NonNullable<import('./subagent-coordinator.js').SubagentSnapshot['origin']>,
+    target: { send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> }): Promise<void> {
+    const runtime = this.getRuntime();
+    const config = runtime.discord;
+    const content = storedInput.content;
+    const kind = storedInput.source.sourceKind === 'notification' ? 'notification' : 'subagent_internal';
+    const notificationOrigin = input.entryKind === 'notification';
+    const state = this.store.channelState(input.channelId, config.defaultModel, config.ownerId);
+    const attachmentFiles: Array<{ attachment: string; name: string }> = [];
+    const attachmentToolCallIds: string[] = [];
+    await this.runAsk(this.store, storedInput.sessionId, content, {
+      baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
+      transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
+      hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin(kind), weatherTools: this.weatherTools,
+      googleTools: this.googleTools,
+      hledgerTools: runtime.hledgerTools,
+      memoryWriteAllowed: () => this.store.memoryWriteAllowed(input.channelId),
+      skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(input.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
+      imageTools: this.imageTools(attachmentFiles, input.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
+      toolFilter: this.toolFilter(input.channelId, notificationOrigin),
+      subagentCoordinator: this.subagentCoordinator, subagentOrigin: input, subagentEvent: kind === 'subagent_internal',
+      discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: input.outputChannelId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: storedInput.sessionId, memoryOriginChannelId: input.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
+      onResponseReady: async text => {
+        if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
+          if (text) logInfo('no_reply', { ...traceTextMetadata(text), replyTo: { channelId: input.outputChannelId, inputId: storedInput.id } });
+          if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
+          return;
+        }
+        let outgoing: import('./store.js').StoredMessage | undefined;
+        const delivered: string[] = [];
+        let filesDelivered = false;
+        try {
+          await sendText({ authorId: input.requesterId ?? (notificationOrigin ? 'notification' : config.ownerId), channelId: input.outputChannelId, content, reply: (body, options) => target.send(body, options) }, text, attachmentFiles, () => { filesDelivered = true; }, async (body, result) => {
+            const saved = this.recordOutgoingSegment(storedInput.sessionId, body, result, outgoing, 'butler_reply', input.channelId);
+            if (saved) { outgoing = saved; delivered.push(body); const deliveredAttachments = await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id); if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments); }
+          });
+        } finally {
+          if (outgoing) { this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); this.memoryCoordinator?.notifyReady(); }
+          if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
+        }
+      },
+    });
   }
 
   private enqueueBackground(key: string, outputChannelId: string, work: () => Promise<void>): Promise<void> {
@@ -1141,12 +1190,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   let closed = false;
   let uiStartupFailed = false;
   let closeUi: (() => Promise<void>) | undefined;
+  let closeNotifications: (() => Promise<void>) | undefined;
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     closed = true;
     shutdownPromise = (async () => {
       closeConfigWatch?.();
+      try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error, { mention: !isHttp429(error) }); }
+      closeNotifications = undefined;
       try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error, { mention: !isHttp429(error) }); }
       process.removeListener('SIGINT', onSigint);
       process.removeListener('SIGTERM', onSigterm);
@@ -1162,6 +1214,17 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   process.once('SIGINT', onSigint);
   process.once('SIGTERM', onSigterm);
   try {
+    if (settings.notifications) {
+      try {
+        const intake = await startNotificationListener(settings.notifications, payload => {
+          const result = store.acceptNotification(payload);
+          if (result.status === 'pending') handler.enqueueNotification(payload.id);
+          return result;
+        });
+        if (closed) { await intake.close(); return; }
+        closeNotifications = intake.close;
+      } catch (error) { throw new Error('Notification listener could not start', { cause: error }); }
+    }
     if (settings.ui) {
       const { port, publicOrigin, cookiePath } = settings.ui;
       try {

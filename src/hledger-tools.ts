@@ -159,7 +159,7 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     return result;
   }
   async function execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> {
-    if (!config.enabled || !isAuthorizedFinanceOrigin(origin)) throw new ToolUsageError('hledger tools require an authorized interactive Discord message; scheduled/subagent execution is not allowed.');
+    if (!config.enabled || !isAuthorizedFinanceOrigin(origin)) throw new ToolUsageError('hledger tools require an authorized interactive Discord message or a notification run; scheduled/subagent execution is not allowed.');
     if (!definitions.some(x => x.name === name)) throw new ToolUsageError('Unknown or disabled hledger tool');
     return serial(() => dispatch(name, args));
   }
