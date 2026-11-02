@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 import { constants as fsConstants } from 'node:fs';
 import { open } from 'node:fs/promises';
-import type { Store } from './store.js';
+import type { Store, MessageSource } from './store.js';
 import type { ProgressEvent } from './progress.js';
 import { formatLogTimestamp, logError, logInfo, logWarn } from './log.js';
 import { isHttp429 } from './tool-errors.js';
 import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
 
-export type MemorySource = { authorId?: string; authorName?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string };
+export type MemorySource = Pick<MessageSource, 'authorId' | 'authorName' | 'sourceKind' | 'channelId' | 'discordMessageId' | 'eventTime'>;
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; status: 'ready' | 'failed' }> };
 export type HindsightConfig = { baseUrl: string; bankId: string; timeoutMs?: number };
 type RequestTiming = { startedAt: number; requestId: string; method: string; operation: string; timeoutMs: number; headersWaitMs?: number; bodyReadMs?: number; jsonParseMs?: number; responseBytes?: number; status?: number; budget?: string; maxTokens?: number; queryChars?: number; resultCount?: number; failedStage?: string; errorType?: string; logged?: boolean };

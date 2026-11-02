@@ -9,6 +9,7 @@ import { nextCronRun, scheduleNextRun } from './scheduler.js';
 import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
 import type { TranscriptEntry } from './journal-transcript.js';
 import { projectPath } from './paths.js';
+import type { NotificationPayload } from './notifications.js';
 
 // Attachment paths are stored relative to the project root so the project directory can move.
 const storedPath = (path: string | undefined): string | null => path === undefined ? null : relative(projectPath('.'), path);
@@ -25,7 +26,13 @@ export interface Message {
 
 export interface ForwardedMessage { authorId?: string; authorName?: string; channelId?: string; discordMessageId?: string; eventTime?: string; content?: string; }
 export interface MessageSource {
-  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
+  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'notification' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
+}
+
+export type NotificationStatus = 'pending' | 'processing' | 'completed' | 'unknown';
+export interface NotificationEvent { id: string; payload: NotificationPayload; inputMessageId?: string; status: NotificationStatus }
+export class NotificationConflictError extends Error {
+  constructor() { super('Notification id already has different content'); this.name = 'NotificationConflictError'; }
 }
 
 export interface MessageInputAttachment { attachmentId: string; filename: string; mimeType: string; status: 'ready' | 'failed'; localPath?: string; origin?: 'discord_attachment' | 'butler_generated'; memoryDocumentId?: string; transcript?: string; transcriptionError?: string; error?: string; }
@@ -94,6 +101,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, input_message_id TEXT REFERENCES messages(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','completed','unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -114,6 +122,7 @@ export class Store implements SchedulerStore {
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
+    this.db.exec("UPDATE notification_events SET status='unknown',updated_at=datetime('now') WHERE status='processing'");
     this.initializeFileSettings();
   }
 
@@ -206,7 +215,7 @@ export class Store implements SchedulerStore {
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name,forwarded_message_json,is_bot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(message.id, source.authorId ?? null, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null, source.replyToMessageId ?? null, source.replyToChannelId ?? null, source.webhookId ?? null, source.sourceKind ?? null, source.authorName ?? null, source.forwardedMessage ? JSON.stringify(source.forwardedMessage) : null, source.isBot === undefined ? null : source.isBot ? 1 : 0);
-      if (source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input') {
+      if (source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input' && source.sourceKind !== 'notification') {
         this.db.prepare("INSERT INTO hindsight_pending(message_id,status,updated_at,error) VALUES(?,?,?,?)").run(message.id,canWrite?'pending':'suppressed',message.createdAt,canWrite?null:'Memory writing is disabled for this channel');
       }
       this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'preparing',?)").run(message.id, message.createdAt);
@@ -504,6 +513,52 @@ export class Store implements SchedulerStore {
 
   allSubagentRuns(): Array<Record<string, unknown>> {
     return (this.db.prepare('SELECT snapshot_json FROM subagent_runs ORDER BY updated_at DESC').all() as Array<{ snapshot_json: string }>).map(row => JSON.parse(row.snapshot_json) as Record<string, unknown>);
+  }
+
+  acceptNotification(payload: NotificationPayload): { duplicate: boolean; status: NotificationStatus } {
+    const { id, source, title, body, occurred_at } = payload;
+    const content = JSON.stringify({ id, source, title, body, occurred_at });
+    const now = new Date().toISOString();
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const existing = this.db.prepare('SELECT payload_json,status FROM notification_events WHERE id=?').get(id) as { payload_json: string; status: NotificationStatus } | undefined;
+      if (existing && existing.payload_json !== content) throw new NotificationConflictError();
+      if (!existing) this.db.prepare("INSERT INTO notification_events(id,payload_json,status,created_at,updated_at) VALUES(?,?,'pending',?,?)").run(id, content, now, now);
+      this.db.exec('COMMIT');
+      return { duplicate: Boolean(existing), status: existing?.status ?? 'pending' };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  notificationEvent(id: string): NotificationEvent | undefined {
+    const row = this.db.prepare('SELECT * FROM notification_events WHERE id=?').get(id) as { id: string; payload_json: string; input_message_id: string | null; status: NotificationStatus } | undefined;
+    return row ? { id: row.id, payload: JSON.parse(row.payload_json) as NotificationPayload, inputMessageId: row.input_message_id ?? undefined, status: row.status } : undefined;
+  }
+
+  pendingNotificationIds(): string[] {
+    return (this.db.prepare("SELECT id FROM notification_events WHERE status='pending' ORDER BY rowid").all() as Array<{ id: string }>).map(row => row.id);
+  }
+
+  claimNotification(id: string, session: string, channelId: string): StoredMessage | undefined {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const event = this.notificationEvent(id);
+      if (!event || event.status !== 'pending') { this.db.exec('COMMIT'); return undefined; }
+      if (!this.hasSession(session)) throw new Error('Unknown notification session');
+      const inputId = randomUUID();
+      const now = new Date().toISOString();
+      const content = JSON.stringify(event.payload);
+      this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(inputId, session, 'user', content, now);
+      this.db.prepare('INSERT INTO message_sources(message_id,channel_id,event_time,source_kind) VALUES(?,?,?,?)').run(inputId, channelId, event.payload.occurred_at, 'notification');
+      this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'ready',?)").run(inputId, now);
+      this.db.prepare("UPDATE notification_events SET status='processing',input_message_id=?,updated_at=? WHERE id=? AND status='pending'").run(inputId, now, id);
+      this.db.exec('COMMIT');
+      return { id: inputId, sessionId: session, role: 'user', content, createdAt: now, source: { sourceKind: 'notification', channelId, eventTime: event.payload.occurred_at }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+
+  finishNotification(id: string, status: 'completed' | 'unknown'): void {
+    const result = this.db.prepare("UPDATE notification_events SET status=?,updated_at=? WHERE id=? AND status='processing'").run(status, new Date().toISOString(), id);
+    if (Number(result.changes) !== 1) throw new Error('Notification state changed before completion');
   }
 
   saveSubagentEvent(event: { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: string; status: string }): void {

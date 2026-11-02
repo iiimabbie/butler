@@ -7,6 +7,8 @@ discord:
   # errorWebhookMentionUserId: "YOUR_DISCORD_ACCOUNT_ID"
   # Optional existing forum post (thread) ID for error notifications.
   # errorWebhookThreadId: "YOUR_DISCORD_THREAD_ID"
+  # Optional destination for external notification intake; required when notifications is configured.
+  # notificationChannelId: "YOUR_PRIVATE_DISCORD_CHANNEL_ID"
   # General channel membership and overrides live in .data/config/channels.yaml.
 
 llm:
@@ -49,6 +51,14 @@ ui:
   port: 3211
   publicOrigin: https://butler.example.com
   cookiePath: /
+
+# Optional independent notification intake. Omit the entire section to disable.
+# Values below are placeholders; use an interface reachable by your gateway.
+# Configure the destination under discord, never in the incoming payload.
+# notifications:
+#   host: 127.0.0.1
+#   port: 3212
+#   bearerToken: REPLACE_WITH_A_RANDOM_PRIVATE_TOKEN
 
 
 google:

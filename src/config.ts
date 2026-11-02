@@ -9,8 +9,10 @@ import type { LogMethods } from './log.js';
 import { projectPath } from './paths.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
+export type NotificationConfig = { host: string; port: number; bearerToken: string };
 export type ButlerConfig = {
-  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string };
+  notifications?: NotificationConfig;
+  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; notificationChannelId?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: WebConfig;
   hledger?: { enabled: boolean };
@@ -40,7 +42,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
 function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent', 'notifications'] as const) {
     if (raw[name] === undefined) continue;
     const section = name === 'subagent' && raw[name] === null ? {} : raw[name];
     if (!isRecord(section)) throw new Error(`Butler config ${name} must be an object`);
@@ -57,7 +59,9 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (errorWebhookMentionUserId !== undefined && !/^\d+$/.test(errorWebhookMentionUserId)) throw new Error('Butler config discord.errorWebhookMentionUserId must be a numeric Discord user ID');
       const errorWebhookThreadId = string('errorWebhookThreadId');
       if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId };
+      const notificationChannelId = string('notificationChannelId');
+      if (notificationChannelId !== undefined && !/^\d{17,20}$/.test(notificationChannelId)) throw new Error('Butler config discord.notificationChannelId must be a Discord channel ID');
+      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId, notificationChannelId };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
@@ -130,6 +134,12 @@ function validateConfig(raw: unknown): ButlerConfig {
       const toolsEnabled = section.toolsEnabled;
       if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
       config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
+    } else if (name === 'notifications') {
+      const host = requireSetting(string('host'), 'notifications.host');
+      const port = section.port;
+      if (!Number.isInteger(port) || Number(port) < 1 || Number(port) > 65535) throw new Error('Butler config notifications.port must be an integer from 1 to 65535');
+      const bearerToken = requireSetting(string('bearerToken'), 'notifications.bearerToken');
+      config.notifications = { host, port: port as number, bearerToken };
     } else {
       const port = section.port;
       if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Butler config ui.port must be an integer from 1 to 65535');
@@ -141,6 +151,7 @@ function validateConfig(raw: unknown): ButlerConfig {
       config.ui = { port, publicOrigin, cookiePath };
     }
   }
+  if (config.notifications && !config.discord?.notificationChannelId) throw new Error('Butler config discord.notificationChannelId is required when notifications is configured');
   return config;
 }
 
@@ -163,7 +174,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 
 const coldPaths = [
-  'discord.token', 'discord.ownerId', 'ui', 'google',
+  'discord.token', 'discord.ownerId', 'discord.notificationChannelId', 'ui', 'google', 'notifications',
   'memory.enabled', 'memory.baseUrl', 'memory.bankId',
 ] as const;
 function valueAt(config: ButlerConfig, path: string): unknown {
