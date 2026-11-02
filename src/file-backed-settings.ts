@@ -231,22 +231,6 @@ export class FileBackedSettings {
     return job;
   }
 
-  addChannel(channelId: string): void {
-    this.refresh();
-    const snapshot = this.current();
-    if (Object.hasOwn(snapshot.channels, channelId)) throw new SettingsConflictError(`Channel ${channelId} is already tracked`);
-    snapshot.channels[channelId] = {};
-    this.save('channels', snapshot);
-  }
-
-  deleteChannel(channelId: string): void {
-    this.refresh();
-    const snapshot = this.current();
-    if (!Object.hasOwn(snapshot.channels, channelId)) throw new SettingsConflictError(`Channel ${channelId} is not tracked`);
-    delete snapshot.channels[channelId];
-    this.save('channels', snapshot);
-  }
-
   patchChannel(channelId: string, patch: Record<string, unknown>): void {
     this.refresh();
     const snapshot = this.current();

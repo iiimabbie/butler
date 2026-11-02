@@ -17,7 +17,7 @@ const storedPath = (path: string | undefined): string | null => path === undefin
 
 export type ChannelReplyMode = 'all' | 'mention' | 'none';
 export interface ChannelPolicy { channelId: string; botReply: boolean | null; hindsightWrite: boolean | null; }
-export interface EffectiveChannelPolicy { tracked: boolean; botReply: boolean; hindsightWrite: boolean; replyMode: ChannelReplyMode; mode: 'queue' | 'steer'; trackedSource: string; botReplySource: string; hindsightWriteSource: string; replyModeSource: string; }
+export interface EffectiveChannelPolicy { tracked: boolean; botReply: boolean; hindsightWrite: boolean; replyMode: ChannelReplyMode; mode: 'queue' | 'steer'; }
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'auto';
 
 export interface Message {
@@ -110,7 +110,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS ask_context(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, items_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_requests(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ask_id TEXT, trace_id TEXT, turn INTEGER NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL, body_sha256 TEXT NOT NULL, finished_at TEXT, http_status INTEGER, usage_json TEXT, error_type TEXT);
       CREATE INDEX IF NOT EXISTS model_requests_session_ask ON model_requests(session_id,ask_id,turn);
-      CREATE TABLE IF NOT EXISTS latest_cpa_request(id INTEGER PRIMARY KEY CHECK(id=1), session_id TEXT NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL);
+      DROP TABLE IF EXISTS latest_cpa_request;
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
       CREATE TABLE IF NOT EXISTS session_compact_checkpoints(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, summary TEXT NOT NULL, through_message_id TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -181,7 +181,6 @@ export class Store implements SchedulerStore {
   watchFileSettings(onInvalid: (error: Error, file: string) => void): () => void { this.settings.watch(onInvalid); return () => this.settings.close(); }
   setSettingsTimezone(timezone:string):void { this.settings.setTimezone(timezone); }
 
-  setChannelOverrides(channelId:string,patch:Record<string,unknown>):void { this.settings.patchChannel(channelId,patch); }
 
   newSession(): string {
     const id = randomUUID();
@@ -627,21 +626,10 @@ export class Store implements SchedulerStore {
     if (Number(update.changes) !== 1) throw new Error(`Could not persist tool result for ${id}`);
   }
 
-  listSessions(): unknown[] {
-    return this.db.prepare('SELECT s.id,s.created_at,(SELECT content FROM messages m WHERE m.session_id=s.id ORDER BY rowid DESC LIMIT 1) latest FROM sessions s ORDER BY s.rowid DESC LIMIT 50').all();
-  }
-
-  saveLatestRequest(sessionId: string, bodyJson: string, attemptedAt = new Date().toISOString()): void {
-    this.db.prepare('INSERT INTO latest_cpa_request(id,session_id,attempted_at,body_json) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET session_id=excluded.session_id,attempted_at=excluded.attempted_at,body_json=excluded.body_json')
-      .run(sessionId, attemptedAt, bodyJson);
-  }
-
   // Private diagnostic snapshots: retain at most 1,000 requests and 24 hours.
-  // The existing latest-request UI keeps its singleton; history is queried from SQLite.
   saveModelRequest(record: { requestId: string; sessionId: string; askId?: string; traceId?: string; turn: number; bodyJson: string; bodySha256: string }, attemptedAt = new Date().toISOString()): void {
     this.db.exec('BEGIN');
     try {
-      this.saveLatestRequest(record.sessionId, record.bodyJson, attemptedAt);
       this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
         .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
       this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 1000)')
@@ -676,9 +664,6 @@ export class Store implements SchedulerStore {
 
   isTrackedChannel(channelId: string): boolean { return this.alertChannelIds.has(channelId) || Object.hasOwn(this.settings.current().channels, channelId); }
 
-  addTrackedChannel(channelId: string): void { this.settings.addChannel(channelId); }
-  deleteTrackedChannel(channelId: string): void { this.settings.deleteChannel(channelId); }
-
   channelPolicy(channelId: string): ChannelPolicy | undefined {
     const config=this.settings.current().channels[channelId];
     if(!config)return undefined;
@@ -710,11 +695,11 @@ export class Store implements SchedulerStore {
   isAlertChannel(channelId: string, _parentChannelId?: string): boolean { return this.alertChannelIds.has(channelId); }
 
   effectiveChannelPolicy(channelId:string,_parentChannelId?:string):EffectiveChannelPolicy {
-    if (this.alertChannelIds.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'mention', mode:'steer', trackedSource:channelId, botReplySource:channelId, hindsightWriteSource:channelId, replyModeSource:channelId };
+    if (this.alertChannelIds.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'mention', mode:'steer' };
     const config = this.settings.current().channels[channelId];
     const tracked = Object.hasOwn(this.settings.current().channels, channelId);
     const bool = (key: 'botReply'|'hindsightWrite', fallback: boolean) => typeof config?.[key] === 'boolean' ? config[key] as boolean : fallback;
-    return { tracked, botReply:bool('botReply',false), hindsightWrite:bool('hindsightWrite',false), replyMode:this.channelReplyMode(channelId) ?? 'mention', mode:this.channelModeOverride(channelId) ?? 'steer', trackedSource:tracked?channelId:'default', botReplySource:typeof config?.botReply==='boolean'?channelId:'default', hindsightWriteSource:typeof config?.hindsightWrite==='boolean'?channelId:'default', replyModeSource:this.channelReplyMode(channelId)?channelId:'default' };
+    return { tracked, botReply:bool('botReply',false), hindsightWrite:bool('hindsightWrite',false), replyMode:this.channelReplyMode(channelId) ?? 'mention', mode:this.channelModeOverride(channelId) ?? 'steer' };
   }
 
   setChannelPolicy(channelId:string,patch:Partial<Pick<ChannelPolicy,'botReply'|'hindsightWrite'>>):ChannelPolicy {
