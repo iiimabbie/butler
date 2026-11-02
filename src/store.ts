@@ -70,6 +70,7 @@ export class Store implements SchedulerStore {
   private readonly settings: FileBackedSettings;
   private externalStopHooks?: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void };
   private alertChannelIds = new Set<string>();
+  private alertModel?: string;
   private readonly ownedSettingsDirectory?: string;
   private closed = false;
 
@@ -670,7 +671,8 @@ export class Store implements SchedulerStore {
     return {channelId,botReply:(config.botReply as boolean|null|undefined)??null,hindsightWrite:(config.hindsightWrite as boolean|null|undefined)??null};
   }
 
-  setAlertChannelIds(ids: string[]): void {
+  setAlertChannelIds(ids: string[], model?: string): void {
+    this.alertModel = model;
     const next = new Set(ids);
     const channels = this.settings.current().channels;
     const overlap = [...next].filter(id => Object.hasOwn(channels, id));
@@ -727,7 +729,7 @@ export class Store implements SchedulerStore {
     return { ...(row?{sessionId:row.session_id}:{}), model: this.effectiveChannelModel(channelId, defaultModel) };
   }
 
-  effectiveChannelModel(channelId: string, defaultModel: string): string { return this.isAlertChannel(channelId) ? defaultModel : this.channelModelOverride(channelId) ?? defaultModel; }
+  effectiveChannelModel(channelId: string, defaultModel: string): string { return this.isAlertChannel(channelId) ? this.alertModel ?? defaultModel : this.channelModelOverride(channelId) ?? defaultModel; }
 
   effectiveChannelReasoningEffort(channelId: string): ReasoningEffort | undefined { return this.isAlertChannel(channelId) ? undefined : this.channelReasoningEffort(channelId); }
 
