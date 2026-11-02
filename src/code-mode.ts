@@ -5,11 +5,11 @@ import { ToolUsageError } from './tool-errors.js';
 export const readOnlyTools: ReadonlySet<string> = new Set([
   'memory_recall', 'memory_reflect', 'memory_tags_list',
   'history_list', 'history_get', 'history_search', 'journal_transcript_by_date',
-  'discord_fetch_channel', 'discord_fetch_channel_messages', 'discord_fetch_message', 'discord_fetch_pins',
+  'discord_read',
   'google_accounts_list', 'google_gmail_search', 'google_gmail_read', 'google_calendar_list_events',
-  'google_tasks_lists', 'google_tasks_list', 'google_drive_search', 'google_drive_read',
+  'google_tasks_read', 'google_drive_search', 'google_drive_read',
   'agent_reach', 'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_usage',
-  'weather_search', 'weather_forecast', 'skills_list', 'skills_read', 'schedule_list',
+  'weather_forecast', 'skills_read', 'schedule_list',
   'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
 ]);
 

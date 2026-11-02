@@ -11,30 +11,57 @@ const account = { type: 'string', description: 'Account email; omit to use the d
 const messageIds = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true };
 const schemas: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
   google_accounts_list: { description: 'List Google accounts, default status, connection status and gmail.modify permission.', properties: {}, required: [] },
-  google_gmail_trash: { description: 'Move messages to Trash, not permanent deletion. Gmail automatically permanently deletes them after 30 days. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
-  google_gmail_untrash: { description: 'Restore messages from Trash. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
+  gmail_trash: { description: 'Move messages to Trash, not permanent deletion. Gmail automatically permanently deletes them after 30 days. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
+  gmail_untrash: { description: 'Restore messages from Trash. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
   google_gmail_search: { description: 'Search Gmail and return message metadata. Omit account to use the default; use google_accounts_list to list accounts.', properties: { query: str, max_results: count(100, 10), page_token: str, account }, required: ['query'] },
   google_gmail_read: { description: 'Read plain text when available, otherwise raw HTML, plus attachment metadata; attachments are not downloaded. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_id: str, account }, required: ['message_id'] },
-  google_gmail_send: { description: 'Send a plain-text email to one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
-  google_gmail_create_draft: { description: 'Create an unsent plain-text email draft for one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
+  gmail_send: { description: 'Send a plain-text email to one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
+  gmail_draft: { description: 'Create an unsent plain-text email draft for one recipient. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: str, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
   google_calendar_list_events: { description: 'List calendar events; defaults to the primary calendar, start=now, and end=start+7 days. Timed values need timezone offsets.', properties: { calendar_id: str, start: str, end: str, max_results: count(250, 20), page_token: str }, required: [] },
-  google_calendar_create_event: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str }, required: ['summary', 'start', 'end'] },
-  google_calendar_update_event: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
-  google_calendar_delete_event: { description: 'Delete a calendar event. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
-  google_tasks_lists: { description: "List the authenticated user's Google Tasks task lists (the lists themselves, not the tasks inside a list). Returns each list's name and ID; use page_token to fetch another page.", properties: { max_results: count(1000, 20), page_token: str }, required: [] },
-  google_tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
-  google_tasks_create: { description: 'Create a task in task_list_id (list IDs come from google_tasks_lists); defaults to @default.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
-  google_tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, task_list_id: str }, required: ['task_id'] },
-  google_tasks_complete: { description: 'Mark a task completed; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
-  google_tasks_delete: { description: 'Delete a task; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
+  calendar_create: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str }, required: ['summary', 'start', 'end'] },
+  calendar_update: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str }, required: ['event_id'] },
+  calendar_delete: { description: 'Delete a calendar event. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
+  tasks_lists: { description: "List the authenticated user's Google Tasks task lists (the lists themselves, not the tasks inside a list). Returns each list's name and ID; use page_token to fetch another page.", properties: { max_results: count(1000, 20), page_token: str }, required: [] },
+  tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
+  tasks_create: { description: 'Create a task in task_list_id (list IDs come from tasks_lists); defaults to @default.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
+  tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, task_list_id: str }, required: ['task_id'] },
+  tasks_complete: { description: 'Mark a task completed; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
+  tasks_delete: { description: 'Delete a task; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   google_drive_search: { description: 'Search Drive by filename substring, excluding trash.', properties: { query: str, max_results: count(100, 10), page_token: str }, required: ['query'] },
   google_drive_read: { description: 'Read text files, export Docs/Slides as plain text, or export the first sheet of Sheets as CSV. Folders, shortcuts, binary files, and other types are unsupported.', properties: { file_id: str }, required: ['file_id'] },
   google_drive_upload: { description: 'Create a new Drive file; never overwrite. Provide content or file_path, not both. file_path must be inside the configured attachment directory; relative paths use that directory.', properties: { name: str, content: str, file_path: str, mime_type: str, folder_id: str }, required: ['name'] },
 };
-export const googleDefinitions = Object.entries(schemas).map(([name, s]) => ({ type: 'function', name, description: s.description, parameters: { type: 'object', properties: s.properties, required: s.required, additionalProperties: false } }));
+const googleGroups: Record<string, Record<string, string>> = {
+  google_gmail_manage: { send: 'gmail_send', create_draft: 'gmail_draft', trash: 'gmail_trash', untrash: 'gmail_untrash' },
+  google_calendar_manage: { create: 'calendar_create', update: 'calendar_update', delete: 'calendar_delete' },
+  google_tasks_read: { lists: 'tasks_lists', list: 'tasks_list' },
+  google_tasks_manage: { create: 'tasks_create', update: 'tasks_update', complete: 'tasks_complete', delete: 'tasks_delete' },
+};
+const googleGroupDescriptions: Record<string, string> = {
+  google_gmail_manage: `Manage Gmail messages.\nsend — Send a plain-text email to one recipient; required to, subject, body.\ncreate_draft — Create an unsent plain-text email draft for one recipient; required to, subject, body.\ntrash — Move messages to Trash, not permanent deletion; Gmail permanently deletes them after 30 days; required message_ids.\nuntrash — Restore messages from Trash; required message_ids.`,
+  google_calendar_manage: `Create, update or delete calendar events.\ncreate — Create an event; required summary, start, end; all_day uses YYYY-MM-DD with exclusive end, timed values need RFC3339 offsets; defaults to primary calendar.\nupdate — Update supplied event fields only; required event_id; omit all_day to preserve type, setting it requires start and end; defaults to primary calendar.\ndelete — Delete an event; required event_id; defaults to primary calendar.`,
+  google_tasks_read: `Read Google Tasks lists and tasks.\nlists — List task lists, not their tasks; returns names and IDs; optional page_token.\nlist — List tasks; defaults to @default and excludes completed tasks; optional task_list_id, show_completed, max_results, page_token.`,
+  google_tasks_manage: `Manage Google Tasks.\ncreate — Create a task; required title; optional notes and task_list_id (list IDs come from google_tasks_read action=lists); defaults to @default.\nupdate — Update supplied task fields; required task_id; empty notes clears notes; defaults to @default.\ncomplete — Mark a task completed; required task_id; defaults to @default.\ndelete — Delete a task; required task_id; defaults to @default.`,
+};
+function mergedDefinition(name: string, actions: Record<string, string>) {
+  const members = Object.values(actions).map(operation => schemas[operation]!);
+  const properties = Object.assign({}, ...members.map(schema => schema.properties));
+  return { type: 'function', name, description: googleGroupDescriptions[name]!, parameters: { type: 'object', properties: { action: { type: 'string', enum: Object.keys(actions) }, ...properties }, required: ['action'], additionalProperties: false } };
+}
+const groupedOperations = new Set(Object.values(googleGroups).flatMap(group => Object.values(group)));
+export const googleDefinitions = [
+  ...Object.entries(googleGroups).map(([name, actions]) => mergedDefinition(name, actions)),
+  ...Object.entries(schemas).filter(([name]) => !groupedOperations.has(name)).map(([name, schema]) => ({ type: 'function', name, description: schema.description, parameters: { type: 'object', properties: schema.properties, required: schema.required, additionalProperties: false } })),
+];
 export type GoogleToolRuntime = { definitions: typeof googleDefinitions; available(): Promise<boolean>; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 export function createGoogleToolRuntime(client: GoogleClient, attachmentDir?: string): GoogleToolRuntime {
-  return { definitions: googleDefinitions, available: () => client.available(), execute: (name, args) => execute(client, name, args, attachmentDir) };
+  return { definitions: googleDefinitions, available: () => client.available(), execute: (name, args) => {
+    if (!Object.hasOwn(googleGroups, name)) { if (groupedOperations.has(name)) throw new ToolUsageError('Unknown Google tool'); return execute(client, name, args, attachmentDir); }
+    const actions = googleGroups[name]!;
+    if (typeof args.action !== 'string' || !Object.hasOwn(actions, args.action)) throw new ToolUsageError(`Unknown or missing action. Valid actions: ${Object.keys(actions).join(', ')}`);
+    const { action, ...operationArgs } = args;
+    return execute(client, actions[action as string]!, operationArgs, attachmentDir);
+  } };
 }
 
 async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, attachmentDir?: string): Promise<unknown> {
@@ -44,10 +71,10 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   const calendar = `/calendar/v3/calendars/${encodeURIComponent(s('calendar_id', 'primary'))}/events`;
   const tasks = `/tasks/v1/lists/${encodeURIComponent(s('task_list_id', '@default'))}/tasks`;
   if (n === 'google_accounts_list') return { accounts: await c.accounts() };
-  const gmailAccount = n.startsWith('google_gmail_') ? await c.account(a.account as string | undefined) : undefined;
-  if (n === 'google_gmail_trash' || n === 'google_gmail_untrash') {
+  const gmailAccount = /^(google_)?gmail_/.test(n) ? await c.account(a.account as string | undefined) : undefined;
+  if (n === 'gmail_trash' || n === 'gmail_untrash') {
     await c.requireModify(gmailAccount!);
-    const action = n === 'google_gmail_trash' ? 'trash' : 'untrash';
+    const action = n === 'gmail_trash' ? 'trash' : 'untrash';
     const results: { id: string; ok: boolean; error?: string }[] = [];
     for (const id of a.message_ids as string[]) {
       try { await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(id)}/${action}`, { account: gmailAccount, method: 'POST' }); results.push({ id, ok: true }); }
@@ -68,9 +95,9 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     const r = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(s('message_id'))}`, { account: gmailAccount, query: { format: 'full' } });
     return { id: r.id, thread_id: r.threadId, internal_date: r.internalDate, headers: headers(r.payload?.headers), body: decodeMessage(r.payload), attachments: attachmentMetadata(r.payload) };
   }
-  if (n === 'google_gmail_send' || n === 'google_gmail_create_draft') {
+  if (n === 'gmail_send' || n === 'gmail_draft') {
     const raw = Buffer.from(makeMime(s('to'), s('subject'), s('body')), 'utf8').toString('base64url');
-    const draft = n === 'google_gmail_create_draft';
+    const draft = n === 'gmail_draft';
     return c.request(draft ? '/gmail/v1/users/me/drafts' : '/gmail/v1/users/me/messages/send', { account: gmailAccount, method: 'POST', body: draft ? { message: { raw } } : { raw } });
   }
   if (n === 'google_calendar_list_events') {
@@ -81,8 +108,8 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     const r = await c.request(calendar, { query: { timeMin: start, timeMax: end, maxResults: number('max_results', 20), pageToken: s('page_token') || undefined, singleEvents: true, orderBy: 'startTime' } });
     return { items: r.items ?? [], next_page_token: r.nextPageToken ?? null };
   }
-  if (n === 'google_calendar_create_event' || n === 'google_calendar_update_event') {
-    const create = n === 'google_calendar_create_event';
+  if (n === 'calendar_create' || n === 'calendar_update') {
+    const create = n === 'calendar_create';
     const body: Record<string, unknown> = {};
     for (const k of ['summary', 'description', 'location']) if (a[k] !== undefined) body[k] = s(k);
     const hasTime = a.start !== undefined || a.end !== undefined || a.all_day !== undefined;
@@ -104,24 +131,24 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     if (!Object.keys(body).length) throw new ToolUsageError('At least one event field must be supplied');
     return c.request(create ? calendar : `${calendar}/${encodeURIComponent(s('event_id'))}`, { method: create ? 'POST' : 'PATCH', body });
   }
-  if (n === 'google_calendar_delete_event') return c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`, { method: 'DELETE' });
-  if (n === 'google_tasks_lists') {
+  if (n === 'calendar_delete') return c.request(`${calendar}/${encodeURIComponent(s('event_id'))}`, { method: 'DELETE' });
+  if (n === 'tasks_lists') {
     const r = await c.request('/tasks/v1/users/@me/lists', { query: { maxResults: number('max_results', 20), pageToken: s('page_token') || undefined } });
     return { items: (r.items ?? []).map((list: Record<string, unknown>) => ({ id: list.id, name: list.title })), next_page_token: r.nextPageToken ?? null };
   }
-  if (n === 'google_tasks_list') {
+  if (n === 'tasks_list') {
     const r = await c.request(tasks, { query: { showCompleted: a.show_completed as boolean ?? false, showHidden: a.show_completed as boolean ?? false, maxResults: number('max_results', 20), pageToken: s('page_token') || undefined } });
     return { items: (r.items ?? []).map(withoutTaskDue), next_page_token: r.nextPageToken ?? null };
   }
-  if (n === 'google_tasks_create' || n === 'google_tasks_update') {
+  if (n === 'tasks_create' || n === 'tasks_update') {
     const body: Record<string, unknown> = {};
     for (const k of ['title', 'notes']) if (a[k] !== undefined) body[k] = s(k);
     if (!Object.keys(body).length) throw new ToolUsageError('At least one task field must be supplied');
-    const create = n === 'google_tasks_create';
+    const create = n === 'tasks_create';
     return withoutTaskDue(await c.request(create ? tasks : `${tasks}/${encodeURIComponent(s('task_id'))}`, { method: create ? 'POST' : 'PATCH', body }));
   }
-  if (n === 'google_tasks_complete') return withoutTaskDue(await c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'PATCH', body: { status: 'completed' } }));
-  if (n === 'google_tasks_delete') return c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'DELETE' });
+  if (n === 'tasks_complete') return withoutTaskDue(await c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'PATCH', body: { status: 'completed' } }));
+  if (n === 'tasks_delete') return c.request(`${tasks}/${encodeURIComponent(s('task_id'))}`, { method: 'DELETE' });
   if (n === 'google_drive_search') {
     const q = `name contains '${s('query').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}' and trashed = false`;
     const r = await c.request('/drive/v3/files', { query: { q, fields: 'files(id,name,mimeType,size,modifiedTime,webViewLink),nextPageToken', pageSize: number('max_results', 10), pageToken: s('page_token') || undefined } });

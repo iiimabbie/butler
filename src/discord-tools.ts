@@ -15,24 +15,43 @@ const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
 const emojisSchema = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 64 } };
 const specs: ToolSpec[] = [
-  { name: 'discord_send_message', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
-  { name: 'discord_fetch_message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_fetch_channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
-  { name: 'discord_fetch_pins', description: 'List pinned messages in a channel, newest pin first; before (a pinned_at timestamp) continues toward older pins.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'string', minLength: 1, maxLength: 40 } }, required: ['channelId'] },
-  { name: 'discord_edit_message', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
-  { name: 'discord_delete_message', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'send', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
+  { name: 'message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
+  { name: 'pins', description: 'List pinned messages in a channel, newest pin first; before (a pinned_at timestamp) continues toward older pins.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'string', minLength: 1, maxLength: 40 } }, required: ['channelId'] },
+  { name: 'edit', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
+  { name: 'delete', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
-  { name: 'discord_pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_fetch_channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
-  { name: 'discord_create_forum_post', description: 'Create a Forum or Media post; channelId is the forum ID and content is the first post body. appliedTagIds must come from that forum’s available tags.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true } }, required: ['channelId', 'title', 'content'] },
-  { name: 'discord_archive_thread', description: 'Archive a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_delete_thread', description: 'Delete a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
-  { name: 'discord_rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
-  { name: 'discord_rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
+  { name: 'pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
+  { name: 'create_forum_post', description: 'Create a Forum or Media post; channelId is the forum ID and content is the first post body. appliedTagIds must come from that forum’s available tags.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true } }, required: ['channelId', 'title', 'content'] },
+  { name: 'archive', description: 'Archive a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'delete_thread', description: 'Delete a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
+  { name: 'rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
+  { name: 'rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
   { name: 'discord_attach_to_reply', description: 'Queue a regular file for the final reply. Absolute paths are allowed; relative paths use the project root. filename must be a plain filename.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
 ];
-export const discordMessageTools: DiscordToolDefinition[] = specs.map(({ name, description, properties, required }) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } }));
+const discordGroups: Record<string, Record<string, string>> = {
+  discord_read: { message: 'message', channel_messages: 'channel_messages', pins: 'pins', channel: 'channel' },
+  discord_message: { send: 'send', edit: 'edit', delete: 'delete', pin: 'pin', unpin: 'unpin' },
+  discord_thread: { create_forum_post: 'create_forum_post', archive: 'archive', delete: 'delete_thread', rename_post: 'rename_post', rename_forum: 'rename_forum' },
+};
+const groupDescriptions: Record<string, string> = {
+  discord_read: 'Read Discord messages, pins and channel details.\nmessage — Fetch a message and prepare its original attachments; required channelId, messageId.\nchannel_messages — Fetch channel messages; required channelId; optional limit and before (older messages).\npins — List pinned messages, newest first; required channelId; optional limit and before (pinned_at timestamp for older pins).\nchannel — Fetch channel details, forum tags and whether a tag is required; required channelId.',
+  discord_message: 'Send, edit, delete or pin Discord messages.\nsend — Send a channel message; required channelId, content; mentions do not notify anyone.\nedit — Edit a message authored by this bot; required channelId, messageId, content.\ndelete — Delete a channel message; required channelId, messageId.\npin — Pin a message; required channelId, messageId.\nunpin — Unpin a message; required channelId, messageId.',
+  discord_thread: 'Create and manage Discord forum posts and threads.\ncreate_forum_post — Create a Forum or Media post; required channelId, title, content; appliedTagIds must come from that forum’s available tags.\narchive — Archive a thread; required channelId (parent), messageId (thread).\ndelete — Delete a thread; required channelId (parent), messageId (thread).\nrename_post — Rename a forum post thread; required threadId, name.\nrename_forum — Rename a forum channel; required channelId, name.',
+};
+const discordGroupsByOperation = new Map(Object.entries(discordGroups).flatMap(([tool, actions]) => Object.values(actions).map(operation => [operation, tool] as const)));
+function publicDefinition(name: string, members: ToolSpec[]): DiscordToolDefinition {
+  const grouped = name in discordGroups;
+  const properties = Object.assign({}, ...members.map(member => member.properties));
+  return { type: 'function', name, description: grouped ? groupDescriptions[name]! : members[0]!.description, parameters: { type: 'object', properties: grouped ? { action: { type: 'string', enum: Object.keys(discordGroups[name]!) }, ...properties } : properties, required: grouped ? ['action'] : members[0]!.required, additionalProperties: false } };
+}
+export const discordMessageTools: DiscordToolDefinition[] = [
+  ...Object.entries(discordGroups).map(([name, actions]) => publicDefinition(name, Object.values(actions).map(operation => specs.find(spec => spec.name === operation)!))),
+  ...specs.filter(spec => !discordGroupsByOperation.has(spec.name)).map(spec => publicDefinition(spec.name, [spec])),
+];
 export type DiscordToolRuntime = { definitions: DiscordToolDefinition[]; context: DiscordToolContext; takeInputMessages(): StoredMessage[]; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 
 // Keep diagnostics single-line and bounded; never expose credentials or webhook URLs.
@@ -131,8 +150,14 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     return target;
   };
   return { definitions: discordMessageTools, context: options.context, takeInputMessages, async execute(name, args) {
-    const spec = specs.find(item => item.name === name); if (!spec) throw new ToolUsageError(`Unknown Discord tool: ${name}`);
-    validateArgs(spec, args);
+    const action = args.action;
+    const operation = Object.hasOwn(discordGroups, name) ? typeof action === 'string' && Object.hasOwn(discordGroups[name]!, action) ? discordGroups[name]![action] : undefined : discordGroupsByOperation.has(name) ? undefined : name;
+    if (!operation) throw new ToolUsageError(Object.hasOwn(discordGroups, name) ? `Unknown or missing action. Valid actions: ${Object.keys(discordGroups[name]!).join(', ')}` : `Unknown Discord tool: ${name}`);
+    const operationArgs = name in discordGroups ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'action')) : args;
+    const spec = specs.find(item => item.name === operation); if (!spec) throw new ToolUsageError(`Unknown Discord tool: ${name}`);
+    validateArgs(spec, operationArgs);
+    args = operationArgs;
+    name = operation;
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : stringArg(args.content, 'content');
@@ -152,7 +177,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       }
       return { ok: true, channelId, messageId, emojis: added };
     }
-    if (name === 'discord_fetch_message') return fetchMessage(channelId!, messageId!);
+    if (name === 'message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
       const file = stringArg(args.file, 'file');
       if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new ToolUsageError('Attachment must be a local file path');
@@ -164,13 +189,13 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
     }
     let method = 'GET'; let path = ''; let body: unknown;
-    if (name === 'discord_fetch_channel') {
+    if (name === 'channel') {
       const channel = asRecord(await api('GET', `/channels/${channelId}`));
       if (String(channel.id) !== channelId) throw new Error('Discord returned a different channel than requested');
       const tags = channel.available_tags;
       if (tags !== undefined && !Array.isArray(tags)) throw new Error('Discord returned invalid available_tags');
       return { id: channel.id, name: channel.name ?? null, type: channel.type, flags: channel.flags ?? 0, available_tags: tags ?? [], require_tag: (Number(channel.flags ?? 0) & 16) !== 0 };
-    } else if (name === 'discord_create_forum_post') {
+    } else if (name === 'create_forum_post') {
       const parent = await checkRootOrChild(channelId!); const type = Number(parent.type);
       if (![15,16].includes(type)) throw new ToolUsageError('Target channel is not a forum/media channel');
       const availableTags = parent.available_tags;
@@ -182,36 +207,36 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       if (requireTag && !appliedTagIds?.length) return { ok: false, confirmed: false, requiresTag: true, forumId: channelId, available_tags: tags };
       method='POST'; path=`/channels/${channelId}/threads`;
       body={name:args.title,message:{content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}},auto_archive_duration:1440,...(appliedTagIds?.length ? {applied_tags:appliedTagIds} : {})};
-    } else if (['discord_archive_thread','discord_delete_thread'].includes(name)) {
+    } else if (['archive','delete_thread'].includes(name)) {
       const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new ToolUsageError('Thread does not belong to the specified root');
-      if (name === 'discord_delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
-    } else if (name === 'discord_rename_post') {
+      if (name === 'delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
+    } else if (name === 'rename_post') {
       const target = await checkRootOrChild(stringArg(args.threadId,'threadId'),true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new ToolUsageError('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
-    } else if (name === 'discord_rename_forum') {
+    } else if (name === 'rename_forum') {
       const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new ToolUsageError('Target is not a forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {
-        case 'discord_send_message':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
-        case 'discord_fetch_message':path=`${base}/messages/${messageId}`;break;
-        case 'discord_fetch_channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
-        case 'discord_fetch_pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
-        case 'discord_edit_message':method='PATCH';path=`${base}/messages/${messageId}`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
-        case 'discord_delete_message':method='DELETE';path=`${base}/messages/${messageId}`;break;
-        case 'discord_pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;
-        case 'discord_unpin':method='DELETE';path=`${base}/messages/pins/${messageId}`;break;
+        case 'send':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
+        case 'message':path=`${base}/messages/${messageId}`;break;
+        case 'channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
+        case 'pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
+        case 'edit':method='PATCH';path=`${base}/messages/${messageId}`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
+        case 'delete':method='DELETE';path=`${base}/messages/${messageId}`;break;
+        case 'pin':method='PUT';path=`${base}/messages/pins/${messageId}`;break;
+        case 'unpin':method='DELETE';path=`${base}/messages/pins/${messageId}`;break;
       }
     }
     const result=await api(method,path,body);
-    if(name==='discord_fetch_message')return asRecord(result);
-    if(name==='discord_fetch_channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
-    if(name==='discord_fetch_pins'){const page=asRecord(result);if(!Array.isArray(page.items)||typeof page.has_more!=='boolean')throw new Error('Discord returned an invalid pin page');return {pins:page.items,has_more:page.has_more,next_before:page.has_more?(asRecord(page.items.at(-1)).pinned_at??null):null};}
+    if(name==='message')return asRecord(result);
+    if(name==='channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
+    if(name==='pins'){const page=asRecord(result);if(!Array.isArray(page.items)||typeof page.has_more!=='boolean')throw new Error('Discord returned an invalid pin page');return {pins:page.items,has_more:page.has_more,next_before:page.has_more?(asRecord(page.items.at(-1)).pinned_at??null):null};}
     const record = isRecord(result) ? result : null;
-    if (name === 'discord_send_message') {
+    if (name === 'send') {
       if (!record || typeof record.id !== 'string') throw new Error('Discord send response has no message ID; delivery cannot be recorded and outcome is unknown');
       persistDeliveredMessage(options.context, channelId!, record, content!);
     }
-    if (name === 'discord_create_forum_post') {
+    if (name === 'create_forum_post') {
       const postId = record?.id;
       const createdMessage = isRecord(record?.message) ? record.message : null;
       const createdChannel = isRecord(record?.channel) ? record.channel : record;
@@ -221,7 +246,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       persistDeliveredMessage(options.context, postId, { ...createdMessage, id: messageId }, content!);
       return { ok: true, confirmed: true, forumId: channelId, postId, url: `https://discord.com/channels/${guildId}/${postId}`, messageId, result };
     }
-    return { ok: true, confirmed: true, channelId: channelId ?? null, ...(name === 'discord_send_message' ? { messageId: record?.id ?? null, result } : name === 'discord_edit_message' ? { messageId: messageId ?? null, result } : name === 'discord_rename_post' || name === 'discord_rename_forum' ? { id: record?.id ?? null, result } : { messageId: messageId ?? null, result }) };
+    return { ok: true, confirmed: true, channelId: channelId ?? null, ...(name === 'send' ? { messageId: record?.id ?? null, result } : name === 'edit' ? { messageId: messageId ?? null, result } : name === 'rename_post' || name === 'rename_forum' ? { id: record?.id ?? null, result } : { messageId: messageId ?? null, result }) };
   } };
 }
 
