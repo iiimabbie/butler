@@ -12,7 +12,7 @@ export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type NotificationConfig = { host: string; port: number; bearerToken: string };
 export type ButlerConfig = {
   notifications?: NotificationConfig;
-  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; errorWebhookModel?: string; notificationChannelId?: string };
+  discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; errorWebhookModel?: string; notificationChannelId?: string; notificationModel?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
   web?: WebConfig;
   hledger?: { enabled: boolean };
@@ -32,7 +32,7 @@ export function configuredFixedChannels(config: ButlerConfig): FixedChannel[] {
   const discord = config.discord;
   return [
     ...(discord?.errorWebhookUrl && discord.errorWebhookThreadId ? [{ id: discord.errorWebhookThreadId, model: discord.errorWebhookModel }] : []),
-    ...(discord?.notificationChannelId ? [{ id: discord.notificationChannelId }] : []),
+    ...(discord?.notificationChannelId ? [{ id: discord.notificationChannelId, model: discord.notificationModel }] : []),
   ];
 }
 
@@ -67,7 +67,7 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (errorWebhookThreadId !== undefined && !/^\d+$/.test(errorWebhookThreadId)) throw new Error('Butler config discord.errorWebhookThreadId must be a numeric Discord thread ID');
       const notificationChannelId = string('notificationChannelId');
       if (notificationChannelId !== undefined && !/^\d{17,20}$/.test(notificationChannelId)) throw new Error('Butler config discord.notificationChannelId must be a Discord channel ID');
-      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId, errorWebhookModel: string('errorWebhookModel'), notificationChannelId };
+      config.discord = { token: string('token'), ownerId: string('ownerId'), errorWebhookUrl, errorWebhookMentionUserId, errorWebhookThreadId, errorWebhookModel: string('errorWebhookModel'), notificationChannelId, notificationModel: string('notificationModel') };
     } else if (name === 'llm') {
       const baseUrl = string('baseUrl');
       if (baseUrl !== undefined) validateHttpUrl(baseUrl, 'llm.baseUrl');
