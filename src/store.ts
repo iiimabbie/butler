@@ -10,6 +10,7 @@ import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
 import type { TranscriptEntry } from './journal-transcript.js';
 import { projectPath } from './paths.js';
 import type { NotificationPayload } from './notifications.js';
+import type { WorkspaceContext } from './context.js';
 
 // Attachment paths are stored relative to the project root so the project directory can move.
 const storedPath = (path: string | undefined): string | null => path === undefined ? null : relative(projectPath('.'), path);
@@ -113,6 +114,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
       CREATE TABLE IF NOT EXISTS session_compact_checkpoints(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, summary TEXT NOT NULL, through_message_id TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_workspace(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, context_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_opening_context(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL, attachments_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deploy_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, text TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS hledger_schedules(id TEXT PRIMARY KEY, schedule_json TEXT NOT NULL);
@@ -461,6 +463,18 @@ export class Store implements SchedulerStore {
   saveCompactCheckpoint(sessionId: string, summary: string, throughMessageId: string): void {
     this.db.prepare(`INSERT INTO session_compact_checkpoints(session_id,summary,through_message_id,updated_at) VALUES(?,?,?,?)
       ON CONFLICT(session_id) DO UPDATE SET summary=excluded.summary,through_message_id=excluded.through_message_id,updated_at=excluded.updated_at`).run(sessionId, summary, throughMessageId, new Date().toISOString());
+    // Compaction already rewrites the history after the prefix, so the next ask re-reads the workspace files almost for free.
+    this.db.prepare('DELETE FROM session_workspace WHERE session_id=?').run(sessionId);
+  }
+
+  // Workspace files as first read for this session; reused until compaction so edits to them do not invalidate the cached prefix every ask.
+  workspaceSnapshot(sessionId: string): WorkspaceContext | undefined {
+    const row = this.db.prepare('SELECT context_json FROM session_workspace WHERE session_id=?').get(sessionId) as { context_json: string } | undefined;
+    return row && JSON.parse(row.context_json) as WorkspaceContext;
+  }
+
+  saveWorkspaceSnapshot(sessionId: string, context: WorkspaceContext): void {
+    this.db.prepare('INSERT INTO session_workspace(session_id,context_json) VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET context_json=excluded.context_json').run(sessionId, JSON.stringify(context));
   }
 
   createSubagentWindow(parentSessionId: string, model: string, cwd: string): string {

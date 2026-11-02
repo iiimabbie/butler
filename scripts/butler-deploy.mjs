@@ -54,7 +54,7 @@ if (!await systemctl('stop', 'stop')) {
 await fs.rm(previous, { recursive: true, force: true });
 await fs.rename(dist, previous);
 await fs.rename(build, dist);
-notice('部署完成，新版已啟動。');
+notice('« Deployment complete. The new version is running. »');
 if (await systemctl('start', 'start')) process.exit(0);
 await systemctl('stop new build', 'stop');
 await fs.rm(dist, { recursive: true, force: true });

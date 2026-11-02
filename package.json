@@ -14,7 +14,8 @@
     "discord": "node dist/main.js",
     "discord:register": "node dist/main.js register-discord-commands",
     "discord:deploy": "npm run build && npm run discord:register",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prompt:dump": "node scripts/prompt-dump.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

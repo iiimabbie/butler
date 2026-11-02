@@ -4,7 +4,7 @@ import { readOnlyTools } from './code-mode.js';
  * plus observational tools kept out of scripts. Shell, delegation, new tools and tools with mixed
  * read/write modes default to effectful.
  */
-const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([...readOnlyTools, 'tools_catalog', 'local_process_output', 'subagent_list', 'subagent_status']);
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([...readOnlyTools, 'local_process_output', 'subagent_list', 'subagent_status']);
 const ACTIVE_STATUSES = new Set(['queued', 'running', 'waiting', 'stopping', 'pending', 'in_progress', 'requires_action', 'requires_approval', 'awaiting_approval']);
 const UNCERTAIN_STATUSES = new Set(['failed', 'unknown', 'failed_unknown', 'interrupted', 'cancelled', 'canceled', 'handoff']);
 

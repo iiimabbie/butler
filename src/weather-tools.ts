@@ -7,24 +7,17 @@ const DAILY_FIELDS = ['weather_code', 'temperature_2m_max', 'temperature_2m_min'
 
 export const weatherDefinitions = [
   {
-    type: 'function', name: 'weather_search',
-    description: 'Find location candidates and return coordinates for weather_forecast. location takes one place name, such as "板橋", "Banqiao" or "Taipei"; if the Chinese name finds nothing, use the English name.',
-    parameters: {
-      type: 'object', properties: { location: { type: 'string', minLength: 1 }, country_code: { type: 'string', pattern: '^[A-Za-z]{2}$' } },
-      required: ['location'], additionalProperties: false,
-    },
-  },
-  {
     type: 'function', name: 'weather_forecast',
-    description: 'Get model-based current conditions and forecast for coordinates. Values are forecasts, not measured observations; weather_code is a WMO code, and null means unavailable.',
+    description: 'Get model-based current conditions and forecast using coordinates or a place name. The location form uses the top geocoding match and lists other candidates; retry with coordinates or a more specific name (such as its English name or with country_code) if the match is wrong. Values are forecasts, not measured observations; weather_code is a WMO code, and null means unavailable. days defaults to 3.',
     parameters: {
       type: 'object', properties: {
+        location: { type: 'string', minLength: 1 }, country_code: { type: 'string', pattern: '^[A-Za-z]{2}$' },
         latitude: { type: 'number', minimum: -90, maximum: 90 }, longitude: { type: 'number', minimum: -180, maximum: 180 },
         days: { type: 'integer', minimum: 1, maximum: 7, default: 3 },
-      }, required: ['latitude', 'longitude'], additionalProperties: false,
+      }, required: [], additionalProperties: false,
     },
   },
-];
+] as const;
 
 export type WeatherToolRuntime = {
   definitions: typeof weatherDefinitions;
@@ -36,10 +29,18 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
   return {
     definitions: weatherDefinitions,
     async execute(name, args) {
-      if (name !== 'weather_search' && name !== 'weather_forecast') throw new ToolUsageError('Unknown weather tool');
-      const allowed = name === 'weather_search' ? ['location', 'country_code'] : ['latitude', 'longitude', 'days'];
+      if (name !== 'weather_forecast') throw new ToolUsageError('Unknown weather tool');
+      const allowed = ['location', 'country_code', 'latitude', 'longitude', 'days'];
       if (Object.keys(args).some(key => !allowed.includes(key))) throw new ToolUsageError('Unknown weather tool argument');
-      if (name === 'weather_search') {
+      const locationForm = args.location !== undefined;
+      if (!locationForm && args.country_code !== undefined) throw new ToolUsageError('country_code requires location');
+      const coordinateForm = args.latitude !== undefined || args.longitude !== undefined;
+      if (locationForm === coordinateForm || (locationForm && (args.latitude !== undefined || args.longitude !== undefined)) || (!locationForm && (args.latitude === undefined || args.longitude === undefined))) throw new ToolUsageError('Provide either location (optionally country_code) or both latitude and longitude');
+      const days = args.days ?? 3;
+      if (!Number.isSafeInteger(days) || (days as number) < 1 || (days as number) > 7) throw new ToolUsageError('days must be an integer from 1 to 7');
+      let chosenLocation: Record<string, unknown> | undefined;
+      let otherCandidates: Record<string, unknown>[] = [];
+      if (locationForm) {
         const location = text(args.location, 'location');
         const url = new URL('https://geocoding-api.open-meteo.com/v1/search');
         url.search = new URLSearchParams({ name: location, count: '5', language: 'zh' }).toString();
@@ -58,14 +59,15 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
             timezone: optionalText('timezone'),
           };
         });
-        return { source: SOURCE, geocoding_source: 'https://www.geonames.org/', location, result_count: results.length, results };
+        if (!results.length) throw new ToolUsageError(`No location matched "${location}"; try the English place name or add country_code.`);
+        chosenLocation = results[0]!;
+        otherCandidates = results.slice(1);
+        args = { ...args, latitude: chosenLocation.latitude, longitude: chosenLocation.longitude };
       }
       let latitude: number;
       let longitude: number;
       try { latitude = coordinate(args.latitude, 'latitude', -90, 90); longitude = coordinate(args.longitude, 'longitude', -180, 180); }
       catch (error) { throw new ToolUsageError(error instanceof Error ? error.message : String(error)); }
-      const days = args.days ?? 3;
-      if (!Number.isSafeInteger(days) || (days as number) < 1 || (days as number) > 7) throw new ToolUsageError('days must be an integer from 1 to 7');
       const url = new URL('https://api.open-meteo.com/v1/forecast');
       url.search = new URLSearchParams({ latitude: String(latitude), longitude: String(longitude), forecast_days: String(days), timezone: 'auto', current: CURRENT_FIELDS.join(','), daily: DAILY_FIELDS.join(',') }).toString();
       const body = await request(url, fetcher);
@@ -100,6 +102,7 @@ export function createWeatherToolRuntime(config: { fetcher?: typeof fetch } = {}
       if (typeof body.utc_offset_seconds !== 'number' || !Number.isSafeInteger(body.utc_offset_seconds)) invalidResponse();
       return {
         source: SOURCE, data_kind: 'model-based forecast, not measured observations',
+        ...(chosenLocation ? { location: chosenLocation, other_candidates: otherCandidates, geocoding_source: 'https://www.geonames.org/' } : {}),
         latitude: coordinate(body.latitude, 'latitude', -90, 90), longitude: coordinate(body.longitude, 'longitude', -180, 180),
         timezone: responseText(body.timezone), utc_offset_seconds: body.utc_offset_seconds,
         current: currentOutput, current_units: currentUnitOutput, daily: dailyOutput, daily_units: dailyUnitOutput,

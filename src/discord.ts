@@ -48,8 +48,8 @@ const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 // The notification channel uses one fixed tool set for every run so its session prefix stays cacheable.
-const NOTIFICATION_CHANNEL_DENIED_TOOLS = new Set(['google_gmail_send', 'google_gmail_trash', 'google_calendar_delete_event', 'google_tasks_delete']);
-const notificationChannelTool = (name: string): boolean => name.startsWith('hledger_') || (name.startsWith('google_') && !NOTIFICATION_CHANNEL_DENIED_TOOLS.has(name));
+const NOTIFICATION_CHANNEL_DENIED_ACTIONS: Readonly<Record<string, readonly string[]>> = { google_gmail_manage: ['send'], google_calendar_manage: ['delete'], google_tasks_manage: ['delete'] };
+const notificationChannelTool = (name: string, action?: string): boolean => name.startsWith('hledger_') || (name.startsWith('google_') && (!action || !NOTIFICATION_CHANNEL_DENIED_ACTIONS[name]?.includes(action)));
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
@@ -212,7 +212,7 @@ export class DiscordHandler {
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
-            try { logInfo('tool_call', { tool: 'discord_fetch_message', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_fetch_message', { channelId: message.reference.channelId, messageId: message.reference.messageId }); }
+            try { logInfo('tool_call', { tool: 'discord_read', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_read', { action: 'message', channelId: message.reference.channelId, messageId: message.reference.messageId }); }
             catch (error) { logWarn('Discord referenced message could not be retrieved', error); }
           }
           await this.runAsk(this.store, state.sessionId, userContent, {
