@@ -38,9 +38,3 @@ export function resolveSupportedImageType(bytes: Uint8Array, filename: string, m
   }
   return detected;
 }
-
-export function imageUploadFilename(filename: string, type: SupportedImageType): string {
-  const dot = filename.lastIndexOf('.');
-  const ext = dot >= 0 ? filename.slice(dot).toLowerCase() : '';
-  return MIME_BY_EXTENSION[ext] ? filename : `${filename}${type.extension}`;
-}

@@ -6,7 +6,6 @@ import type { Store, MessageSource } from './store.js';
 import type { ProgressEvent } from './progress.js';
 import { formatLogTimestamp, logError, logInfo, logWarn } from './log.js';
 import { isHttp429 } from './tool-errors.js';
-import { AttachmentImageTypeConflictError, imageUploadFilename, resolveSupportedImageType } from './attachment-image-type.js';
 
 export type MemorySource = Pick<MessageSource, 'authorId' | 'authorName' | 'sourceKind' | 'channelId' | 'discordMessageId' | 'eventTime'>;
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; status: 'ready' | 'failed' }> };
@@ -228,10 +227,8 @@ export class Hindsight {
       const bytes = await handle.readFile();
       if (bytes.length !== stat.size) throw new Error('Attachment archive file read was incomplete');
       assertWriteAllowed(writeAllowed);
-      const imageType = resolveSupportedImageType(bytes, input.filename, input.mimeType ?? 'application/octet-stream');
-      const uploadFilename = imageType ? imageUploadFilename(input.filename, imageType) : input.filename;
       const form = new FormData();
-      form.set('files', new Blob([new Uint8Array(bytes)], imageType ? { type: imageType.mimeType } : undefined), uploadFilename);
+      form.set('files', new Blob([new Uint8Array(bytes)]), input.filename);
       form.set('request', JSON.stringify({ files_metadata: [{ document_id: input.documentId, parser: 'butler', timestamp: input.timestamp, context: input.context, metadata: input.metadata }] }));
       const { response, trace } = await this.request(`${this.bankUrl()}/files/retain`, { method: 'POST', body: form, headers: {} }, 'attachment_submit', {}, 120_000, writeAllowed);
       const text = await this.readResponse(response, trace);
@@ -246,7 +243,6 @@ export class Hindsight {
     } catch (error) {
       if (error instanceof MemoryWriteSuppressedError) throw error;
       if (error instanceof ConversationSubmissionError) throw error;
-      if (error instanceof AttachmentImageTypeConflictError) throw new ConversationSubmissionError('rejection', `Attachment type metadata conflict: ${error.message}`);
       throw new ConversationSubmissionError('unknown', `Attachment conversion outcome unknown: ${safeError(error)}`);
     } finally { await handle.close(); }
   }

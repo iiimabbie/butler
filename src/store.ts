@@ -235,7 +235,8 @@ export class Store implements SchedulerStore {
       this.db.prepare('DELETE FROM message_input_attachments WHERE message_id=?').run(messageId);
       const insert = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,local_path,status,error,origin,memory_document_id,transcript,transcription_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
       for (const a of attachments) {
-        const documentId = a.status === 'ready' && a.localPath ? a.memoryDocumentId ?? `attachment:${messageId}:${a.attachmentId}` : undefined;
+        // Image descriptions are scene detail rather than events; the surrounding conversation already carries what mattered.
+        const documentId = a.status === 'ready' && a.localPath && !a.mimeType.startsWith('image/') ? a.memoryDocumentId ?? `attachment:${messageId}:${a.attachmentId}` : undefined;
         insert.run(messageId, a.attachmentId, a.filename, a.mimeType, storedPath(a.localPath), a.status, a.error ?? null, a.origin ?? null, documentId ?? null, a.transcript ?? null, a.transcriptionError ?? null);
         if (documentId) {
           const channelId = (this.db.prepare('SELECT channel_id FROM message_sources WHERE message_id=?').get(messageId) as { channel_id: string | null } | undefined)?.channel_id ?? undefined;
