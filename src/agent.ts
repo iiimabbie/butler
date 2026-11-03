@@ -417,16 +417,39 @@ export async function ask(store: Store, session: string, prompt: string, config:
         throw new Error(`LLM response status ${String(raw.status)} cannot complete the turn`);
       }
       const calls = body.output.filter(isFunctionCall);
+      const nativeImages = body.output.filter(item => isRecord(item) && item.type === 'image_generation_call');
+      const nativeImageNotices: unknown[] = [];
+      if (nativeImages.length) {
+        if (!config.imageTools || config.toolFilter?.('image_generate') === false || config.toolFilter?.('image_save') === false) {
+          throw new Error('Native image output cannot be accepted: image generation and image_save must be available; generation was not retried');
+        }
+        if (toolChoice !== undefined) throw new Error('Native image output arrived while tool use was restricted; it was not accepted and generation was not retried');
+        for (const nativeImage of nativeImages) {
+          const image = await config.imageTools.acceptNativeImage(nativeImage);
+          recovery.recordToolResult('image_generate', image);
+          nativeImageNotices.push({ role: 'user', content: `[Butler runtime notice] An upstream native image has already been generated and accepted: ${JSON.stringify(image)}. Do not generate it again. Call image_save with this exact temporary path and a readable semantic filename before replying. No identity reference use is established by this result.` });
+        }
+        // Require image_save once on the next turn; a reply without it then gets the pending reminder and fails on a second miss.
+        forceImageSave = true;
+      }
       const responseInputStart = input.length;
       const responseCandidate = responseText(body);
       logTrace('model_candidate', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(responseCandidate), disposition: calls.length ? 'context_only_not_delivered' : 'candidate_for_selection', reason: calls.length ? 'tool_calls_present' : 'no_tool_calls' });
       // OpenAI re-renders an earlier reasoning item once a newer one follows, which breaks the prompt cache
       // from that point, so its reasoning is not sent back; tool calls and outputs carry the work forward.
       // Claude requires its thinking to be returned unchanged within a tool loop.
-      input.push(...(config.model.startsWith('claude') ? body.output : body.output.filter(item => !(isRecord(item) && item.type === 'reasoning'))));
+      input.push(...body.output.filter(item => !(isRecord(item) && (item.type === 'image_generation_call' || (item.type === 'reasoning' && !config.model.startsWith('claude'))))));
       if (calls.length === 0) {
         liveGroups.push(input.slice(responseInputStart)); liveGroupProtected.push(false);
         const text = responseCandidate;
+        const pendingImages = config.imageTools?.pendingImages() ?? [];
+        if (pendingImages.length) {
+          if (recoveryFinalTextOnly) throw new Error('Final-text recovery cannot execute image_save while tools are disabled');
+          if (imageSaveRequiredAttempted) throw new Error(`Image generation was not saved; image_save was required for ${pendingImages.map(image => image.path).join(', ')}`);
+          const reminder = { role: 'user', content: `[Butler runtime notice] Save every generated image before replying. Call image_save now using this exact generated path and a readable semantic filename: ${pendingImages.map(image => image.path).join(', ')}` }; runtimeReminders.push(reminder); input.push(reminder);
+          forceImageSave = true;
+          continue;
+        }
         const lateSteer = await config.consumeSteer?.();
         if (lateSteer) {
           clearRecoveryModeForSteer();
@@ -445,14 +468,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
           liveGroups.push([steerInput]); liveGroupProtected.push(true);
           config.onSteerPersisted?.(savedLateSteer.id);
           toolOwnerId = savedLateSteer.id;
-          continue;
-        }
-        const pendingImages = config.imageTools?.pendingImages() ?? [];
-        if (pendingImages.length) {
-          if (recoveryFinalTextOnly) throw new Error('Final-text recovery cannot execute image_save while tools are disabled');
-          if (imageSaveRequiredAttempted) throw new Error(`Image generation was not saved; image_save was required for ${pendingImages.map(image => image.path).join(', ')}`);
-          const reminder = { role: 'user', content: `[Butler runtime notice] Save every generated image before replying. Call image_save now using this exact generated path and a readable semantic filename: ${pendingImages.map(image => image.path).join(', ')}` }; runtimeReminders.push(reminder); input.push(reminder);
-          forceImageSave = true;
           continue;
         }
         const emptyCompletedAfterSave = imageSaveSucceeded && isRecord(raw) && raw.status === 'completed' && !text.trim();
@@ -519,6 +534,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const outputs = await Promise.all(calls.map(runCall));
         for (const [index, call] of calls.entries()) await appendOutput(call, outputs[index]);
       } else for (const call of calls) await appendOutput(call, await runCall(call));
+      // After every call output, so toolWork replays in sent order; a reply without calls gets the pending image_save reminder instead.
+      input.push(...nativeImageNotices);
       const toolGroup = input.slice(responseInputStart);
       liveGroups.push(toolGroup); liveGroupProtected.push(false);
       toolWork.set(toolOwnerId, [...toolWork.get(toolOwnerId) ?? [], ...toolGroup]);
