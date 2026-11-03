@@ -2,8 +2,6 @@ import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:
 import { dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ToolUsageError } from './tool-errors.js';
-import type { FinanceIdentity } from './finance-origin.js';
-import { isAuthorizedFinanceOrigin } from './finance-origin.js';
 
 export type HledgerConfig = { enabled: boolean; journalPath: string; schedules: { load(): unknown[]; save(schedules: ScheduleMetadata[]): void } };
 const str = { type: 'string', minLength: 1 };
@@ -35,7 +33,7 @@ type AccountMetadata = { type?: 'asset'|'liability'|'equity'|'income'|'expense';
 type ScheduleMetadata = { id: string; name: string; frequency: 'monthly'|'bimonthly'; startDate: string; enabled: boolean; postings: Posting[] };
 type SourceRef = { account: string; currency: string };
 
-export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> };
+export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args): Promise<unknown> };
 export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime {
   const journal = resolve(config.journalPath), directory = dirname(journal), backups = resolve(directory, 'backups');
   const definitions = config.enabled ? [...hledgerDefinitions] : [];
@@ -158,8 +156,8 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     }
     return result;
   }
-  async function execute(name: string, args: Args, origin?: FinanceIdentity): Promise<unknown> {
-    if (!config.enabled || !isAuthorizedFinanceOrigin(origin)) throw new ToolUsageError('hledger tools require an authorized interactive Discord message or a notification run; scheduled/subagent execution is not allowed.');
+  async function execute(name: string, args: Args): Promise<unknown> {
+    if (!config.enabled) throw new ToolUsageError('hledger tools are disabled');
     if (!definitions.some(x => x.name === name)) throw new ToolUsageError('Unknown or disabled hledger tool');
     return serial(() => dispatch(name, args));
   }
