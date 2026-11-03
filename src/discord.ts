@@ -261,6 +261,7 @@ export class DiscordHandler {
               if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
                 logInfo('no_reply', { ...traceTextMetadata(text), replyTo: message.messageId ? { channelId: message.channelId, messageId: message.messageId } : { channelId: message.channelId, inputId: stored.id } });
                 if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
+                attachmentFiles.splice(0); attachmentToolCallIds.splice(0);
                 return;
               }
               if (text || attachmentFiles.length) {
@@ -286,6 +287,9 @@ export class DiscordHandler {
                   }
                   if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
                 }
+                // A draft delivered before a late steer is followed by another reply; each attachment goes out once.
+                attachmentFiles.splice(0); attachmentToolCallIds.splice(0);
+                deliveryAttempted = false; filesDelivered = false;
               }
             },
           }); askSucceeded = true;

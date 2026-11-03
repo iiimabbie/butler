@@ -431,7 +431,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const lateSteer = await config.consumeSteer?.();
         if (lateSteer) {
           clearRecoveryModeForSteer();
-          logTrace('model_candidate_deferred', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), reason: 'late_steer_context_only' });
+          // The draft stays in context as already said, so deliver it before answering the steer.
+          if (text.trim()) {
+            logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'not_delivered' : 'selected', reason: 'draft_before_late_steer' });
+            await config.onResponseReady?.(text);
+          }
           logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: lateSteer.stored?.source?.discordMessageId ?? lateSteer.stored?.id, status: 'consumed_late' });
           if (!lateSteer.stored) throw new Error('late steer input must already be persisted');
           const savedLateSteer = lateSteer.stored;
