@@ -199,11 +199,7 @@ export class DiscordHandler {
           const prepared = preparedInput;
           const userContent = prepared.content;
           const state = { ...stateAtIngestion, model: this.store.channelState(message.channelId, config.defaultModel, config.ownerId).model };
-          let openingContext = this.store.sessionOpeningContext(state.sessionId);
-          if (!openingContext) {
-            try { openingContext = await this.readOpeningMessage(message.channelId); if (openingContext) this.store.saveSessionOpeningContext(state.sessionId, openingContext); }
-            catch (error) { logWarn('Discord opening message lookup failed', error); }
-          }
+          const openingContext = await this.sessionOpeningContext(state.sessionId, message.channelId);
           this.activeAsk.add(message.channelId);
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
@@ -624,6 +620,17 @@ export class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
+  // Every channel input (message, notification, handoff, subagent event) carries the channel's opening message as standing context.
+  private async sessionOpeningContext(sessionId: string, channelId: string): Promise<SessionOpeningContext | undefined> {
+    const stored = this.store.sessionOpeningContext(sessionId);
+    if (stored) return stored;
+    try {
+      const opening = await this.readOpeningMessage(channelId);
+      if (opening) this.store.saveSessionOpeningContext(sessionId, opening);
+      return opening;
+    } catch (error) { logWarn('Discord opening message lookup failed', error); return undefined; }
+  }
+
   private async handoff(input: HandoffInput): Promise<void> {
     const config = this.getRuntime().discord;
     const target = await this.outputChannel(input.targetChannelId);
@@ -672,9 +679,10 @@ export class DiscordHandler {
     const state = this.store.channelState(input.channelId, config.defaultModel, config.ownerId);
     const attachmentFiles: Array<{ attachment: string; name: string }> = [];
     const attachmentToolCallIds: string[] = [];
+    const openingContext = await this.sessionOpeningContext(storedInput.sessionId, input.channelId);
     await this.runAsk(this.store, storedInput.sessionId, content, {
       baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
-      transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
+      transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, openingContext, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
       hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
       googleTools: this.googleTools,
       hledgerTools: runtime.hledgerTools,
