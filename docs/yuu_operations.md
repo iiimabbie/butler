@@ -56,6 +56,14 @@ channels:
     model: null # 使用全域預設
 ```
 
+## 外來 skill 的安裝與更新
+
+外來 skill 保持上游原樣，來源記在 `workspace/skills/.lock.json`：Git 來源記 repo 網址與 skill 所在子路徑，網址來源記每個檔案的下載網址，另記目前版本（commit 或內容雜湊）與內容雜湊。`skills_manage install` 從 Git 安裝時自動寫入；網址來源的 skill 手動在 lock 新增一筆 `source` 後跑一次 `update`。
+
+- 看有沒有新版：叫 Renee 用 `skills_manage` 的 `check`，不會改任何檔案。
+- 更新：`update`（不帶 name 就是全部）。本機改過的 skill 會被跳過，確定要蓋掉才加 `force: true`。舊版移到 `workspace/.trash/`。
+- 自己寫的 skill（例如 `hf-ssh-chat`）不在 lock 裡，`check` 會列在 `untracked`。
+
 ## Discord 的 `/restart` 與 `npm restart`
 
 Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進行中或排隊工作時才受理，Butler 以狀態碼 75 結束，由 systemd 重新啟動。終端機 `npm restart` 則由人直接停止並重新啟動常駐服務，使用目前已建置的 `dist`，不會重新 build。要更新程式時使用部署流程，不要把 restart 當成 deploy。
