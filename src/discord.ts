@@ -59,7 +59,7 @@ export class DiscordHandler {
   private readonly backgroundOutputChannels = new Map<string, string>();
   private readonly ingressTails = new Map<string, Promise<void>>();
   private readonly activeIngestions = new Set<Promise<void>>();
-  private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number }>();
+  private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number; send: () => void }>();
   private readonly activeAsk = new Set<string>();
   private readonly activeAskIds = new Map<string, string>();
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource; attachments?: import('./store.js').MessageInputAttachment[]; stored: import('./store.js').StoredMessage }>>>();
@@ -208,7 +208,7 @@ export class DiscordHandler {
           this.activeAsk.add(message.channelId);
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
-          progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
+          progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); this.refreshTyping(message.channelId); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { logInfo('tool_call', { tool: 'discord_read', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_read', { action: 'message', channelId: message.reference.channelId, messageId: message.reference.messageId }); }
@@ -255,12 +255,12 @@ export class DiscordHandler {
               logTrace('steer_dequeue', { askId, traceId, sessionId: stored.sessionId, storedMessageId, remaining: pending?.length ?? 0 });
               if (!pending?.length) this.pendingSteer.delete(message.channelId);
             },
-            onAskFinishing: () => this.activeAsk.delete(message.channelId),
+            onAskFinishing: () => { this.activeAsk.delete(message.channelId); stopTyping?.(); },
             onResponseReady: async text => {
-              stopTyping?.();
               if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
                 logInfo('no_reply', { ...traceTextMetadata(text), replyTo: message.messageId ? { channelId: message.channelId, messageId: message.messageId } : { channelId: message.channelId, inputId: stored.id } });
                 if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
+                attachmentFiles.splice(0); attachmentToolCallIds.splice(0);
                 return;
               }
               if (text || attachmentFiles.length) {
@@ -286,6 +286,10 @@ export class DiscordHandler {
                   }
                   if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
                 }
+                // A draft delivered before a late steer is followed by another reply; each attachment goes out once.
+                attachmentFiles.splice(0); attachmentToolCallIds.splice(0);
+                deliveryAttempted = false; filesDelivered = false;
+                this.refreshTyping(message.channelId);
               }
             },
           }); askSucceeded = true;
@@ -468,7 +472,7 @@ export class DiscordHandler {
     if (!active) {
       const send = () => { void sendTyping().catch(error => logWarn('Discord typing indicator failed', error)); };
       send();
-      active = { timer: setInterval(send, 8_000), refs: 0 };
+      active = { timer: setInterval(send, 8_000), refs: 0, send };
       this.typing.set(channelId, active);
     }
     active.refs++;
@@ -482,6 +486,9 @@ export class DiscordHandler {
       this.typing.delete(channelId);
     };
   }
+
+  // Discord hides a typing indicator as soon as the same account posts a message, so resend it instead of waiting for the next interval.
+  private refreshTyping(channelId: string): void { this.typing.get(channelId)?.send(); }
 
   private recordOutgoingSegment(sessionId: string, content: string, result: unknown, existing?: import('./store.js').StoredMessage, sourceKind: 'butler_reply' | 'butler_tool_message' = 'butler_reply', originChannelId?: string): import('./store.js').StoredMessage | undefined {
     if (!isRecord(result) || typeof result.id !== 'string' || typeof result.channelId !== 'string' || !isRecord(result.createdAt) || typeof result.createdAt.toISOString !== 'function') return;
