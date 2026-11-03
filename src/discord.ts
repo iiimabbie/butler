@@ -16,7 +16,6 @@ import { LocalToolRuntime } from './local-tools.js';
 import { ProgressRenderer } from './progress.js';
 import { Scheduler, type ScheduledTaskRequest } from './scheduler.js';
 import { createScheduleToolRuntime } from './schedule-tools.js';
-import { financeInteractiveOrigin, financeNonInteractiveOrigin } from './finance-origin.js';
 import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
@@ -232,7 +231,6 @@ export class DiscordHandler {
             webTools: runtime.webTools,
             hledgerTools: runtime.hledgerTools,
             toolFilter: this.toolFilter(message.channelId),
-            executionOrigin: financeInteractiveOrigin({ requesterId: message.authorId, channelId: message.channelId, messageId: message.messageId, human: !message.isBot && !message.isWebhook }),
             weatherTools: this.weatherTools,
             memoryWriteAllowed: () => this.store.memoryWriteAllowed(message.channelId),
             skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
@@ -543,7 +541,6 @@ export class DiscordHandler {
         localTools: this.localTools,
         webTools: commandRuntime.webTools,
         hledgerTools: commandRuntime.hledgerTools,
-        executionOrigin: financeNonInteractiveOrigin('scheduler'),
         weatherTools: this.weatherTools,
         memoryWriteAllowed: () => this.store.memoryWriteAllowed(request.outputChannelId),
         skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
@@ -667,7 +664,7 @@ export class DiscordHandler {
     await this.runAsk(this.store, storedInput.sessionId, content, {
       baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
       transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
-      hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, executionOrigin: financeNonInteractiveOrigin(kind), weatherTools: this.weatherTools,
+      hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
       googleTools: this.googleTools,
       hledgerTools: runtime.hledgerTools,
       memoryWriteAllowed: () => this.store.memoryWriteAllowed(input.channelId),

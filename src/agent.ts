@@ -20,7 +20,6 @@ import type { WeatherToolRuntime } from './weather-tools.js';
 import type { SkillsToolRuntime } from './skills.js';
 import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
-import type { FinanceIdentity } from './finance-origin.js';
 import type { HledgerRuntime } from './hledger-tools.js';
 import type { ProgressEvent } from './progress.js';
 import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
@@ -67,7 +66,6 @@ export interface AgentConfig {
   scheduleTools?: ScheduleToolRuntime;
   imageTools?: ImageToolRuntime;
   hledgerTools?: HledgerRuntime;
-  executionOrigin?: FinanceIdentity;
   reasoningEffort?: ReasoningEffort;
   onProgress?: (event: ProgressEvent) => void;
   onResponseReady?: (text: string) => Promise<void>;
@@ -622,8 +620,8 @@ export async function executeCall(store: Store, session: string, call: FunctionC
         ? formatRecall(await config.hindsight.recall(query))
         : await config.hindsight.reflect(query, config.signal);
     } else if (call.name.startsWith('hledger_')) {
-      if (!config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable for this execution origin');
-      result = await config.hledgerTools.execute(call.name, runtimeArgs, config.executionOrigin!);
+      if (!config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable');
+      result = await config.hledgerTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('weather_')) {
       if (!config.weatherTools) throw new ToolUsageError('Weather tools are unavailable in this entry point');
       result = await config.weatherTools.execute(call.name, runtimeArgs);
