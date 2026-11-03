@@ -28,8 +28,14 @@ services:
       HINDSIGHT_API_REQUEST_RECALL_MAX_TOKENS: "1200"
       HINDSIGHT_API_REQUEST_REFLECT_BUDGET: "mid"
       HINDSIGHT_API_REQUEST_REFLECT_MAX_TOKENS: "1600"
-      # Total reflect deadline; Butler waits 30 s longer to receive this timeout response.
-      HINDSIGHT_API_REFLECT_WALL_TIMEOUT: "600"
+      # Interactive reflect: faster agent steps and a per-call deadline above the 30 s upstream default.
+      HINDSIGHT_API_REFLECT_LLM_REASONING_EFFORT: "medium"
+      HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"
+      # Background mental-model refresh would inherit reflect's effort; keep the shared default.
+      HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT: "high"
+      # Total reflect deadline; Butler waits 30 s longer to receive this timeout response,
+      # staying under Node fetch's 300 s response-headers timeout.
+      HINDSIGHT_API_REFLECT_WALL_TIMEOUT: "270"
     ports:
       - "127.0.0.1:18888:8888"
       - "127.0.0.1:19999:9999"
