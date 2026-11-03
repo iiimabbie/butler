@@ -103,8 +103,9 @@ export class Hindsight {
   }
 
   async reflect(query: string, signal?: AbortSignal): Promise<unknown> {
-    // Outlasts HINDSIGHT_API_REFLECT_WALL_TIMEOUT (600 s) so the server's own timeout response is received.
-    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 630_000, undefined, signal);
+    // Outlasts HINDSIGHT_API_REFLECT_WALL_TIMEOUT (270 s) so the server's own timeout response is received,
+    // and stays within Node fetch's 300 s response-headers timeout.
+    const result = await this.post(`${this.bankUrl()}/reflect`, { query, include: { facts: {} } }, 300_000, undefined, signal);
     const record = asRecord(result);
     if (typeof record?.text !== 'string' || !(record.based_on === null || asRecord(record.based_on))) throw new Error('Hindsight reflect response is invalid');
     return result;
