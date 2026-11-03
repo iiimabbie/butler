@@ -619,7 +619,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.message !== 'string' || !runtimeArgs.message.trim() || Object.keys(runtimeArgs).some(key => !['subagent_id', 'message', 'model'].includes(key))) throw new ToolUsageError('Invalid or unavailable subagent message');
       const window = store.getSubagentWindow(runtimeArgs.subagent_id, session);
       if (!window) throw new ToolUsageError('Unknown subagent window for this parent session; use subagent_list to find the actual ID.');
-      const model = runtimeArgs.model === undefined ? window.model : await validateSubagentModel(runtimeArgs.model, config.baseUrl, config.apiKey, config.fetcher);
+      const model = await validateSubagentModel(runtimeArgs.model ?? window.model, config.baseUrl, config.apiKey, config.fetcher);
       store.setSubagentModel(window.id, model);
       const task = { task: 'Continue the existing task', context: 'Use the persisted window.', constraints: 'Do not repeat completed actions.', expected_output: 'Return the continuation result.' };
       const resume = subagentExecutor(store, session, runtimeArgs.subagent_id, task, config, model);
