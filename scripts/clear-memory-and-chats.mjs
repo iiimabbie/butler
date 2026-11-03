@@ -9,11 +9,11 @@ import YAML from 'yaml';
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BACKUP_ROOT = path.join(ROOT, 'backups', 'memory-and-chats');
 export const CLEAR_TABLES = [
-  'memory_batch_sources', 'message_input_attachments', 'message_sources', 'hindsight_pending',
+  'memory_batch_sources', 'attachment_memory_jobs', 'message_input_attachments', 'message_sources', 'hindsight_pending',
   'discord_outgoing_segments', 'message_preparation', 'memory_batches', 'tool_calls',
   'subagent_inbox', 'subagent_events', 'subagent_runs', 'subagent_windows',
   'session_compact_checkpoints', 'session_workspace', 'session_opening_context', 'session_context_usage',
-  'attachment_deliveries', 'model_requests', 'ask_context',
+  'attachment_deliveries', 'model_requests', 'ask_context', 'notification_events',
   'restart_notice', 'session_sources', 'messages', 'sessions',
 ];
 export const KEEP_TABLES = [

@@ -25,7 +25,16 @@ export interface ImageAttachmentFile {
 export interface ImageToolRuntime {
   definitions: Array<Record<string, unknown>>;
   execute(name: string, args: Record<string, unknown>): Promise<unknown>;
+  acceptNativeImage(output: unknown): Promise<PendingImageResult>;
   pendingImages(): Array<{ path: string; filename: string }>;
+}
+
+interface PendingImageResult {
+  status: 'awaiting_save';
+  filename: string;
+  path: string;
+  mime: string;
+  next_step: string;
 }
 
 const RESPONSE_LIMIT = 20 * 1024 * 1024;
@@ -71,9 +80,39 @@ export function createImageToolRuntime(options: {
   const definitions: Array<Record<string, unknown>> = [generationDefinition, ...(config.identityReferencePath ? [selfDefinition] : []), saveDefinition];
   const pending = new Map<string, { filename: string; mime: string; archivePath: string }>();
 
+  const registerImage = async (bytes: Buffer): Promise<PendingImageResult> => {
+    if (!bytes.length || bytes.length > RESPONSE_LIMIT) throw new Error('Generated image must be from 1 byte to 20 MiB; outcome is unknown and must not be retried automatically');
+    const image = detectImage(bytes);
+    if (!image) throw new Error('Generated image is not PNG, JPEG or WebP data; outcome is unknown and must not be retried automatically');
+    const archivePath = join(options.attachmentDir, 'images', `${randomUUID()}-generated.${image.extension}`);
+    const filename = `${randomUUID()}.${image.extension}`;
+    const path = join(options.attachmentDir, filename);
+    try {
+      await mkdir(dirname(archivePath), { recursive: true, mode: 0o700 });
+      await writeFile(archivePath, bytes, { flag: 'wx', mode: 0o600 });
+      await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
+    } catch {
+      throw new Error('Generated image could not be archived or saved as a temporary image; generation was not retried and must not be retried automatically');
+    }
+    pending.set(path, { filename, mime: image.mime, archivePath });
+    return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'Save it with image_save using this exact path before delivery. Do not generate it again.' };
+  };
+
   return {
     definitions,
     pendingImages: () => [...pending].map(([path, image]) => ({ path, filename: image.filename })),
+    async acceptNativeImage(output) {
+      if (!isRecord(output) || output.type !== 'image_generation_call' || output.status !== 'completed') {
+        throw new Error('Native image output must be a completed image_generation_call; generation was not retried');
+      }
+      const encoded = output.result;
+      if (typeof encoded !== 'string' || !encoded.length || encoded.length > Math.ceil(RESPONSE_LIMIT / 3) * 4) {
+        throw new Error('Native image result must be non-empty base64 of at most 20 MiB; outcome is unknown and must not be retried automatically');
+      }
+      const bytes = Buffer.from(encoded, 'base64');
+      if (bytes.toString('base64') !== encoded) throw new Error('Native image result is invalid base64; outcome is unknown and must not be retried automatically');
+      return registerImage(bytes);
+    },
     async execute(name, args) {
       if (name === 'image_save') {
         if (Object.keys(args).some(key => key !== 'path' && key !== 'destination') || typeof args.path !== 'string' || typeof args.destination !== 'string') throw new ToolUsageError('image_save requires only path and destination');
@@ -141,24 +180,7 @@ export function createImageToolRuntime(options: {
       }
 
       const bytes = await readGeneratedImage(response, [config.apiKey, args.prompt]);
-      const image = detectImage(bytes);
-      if (!image) throw new Error('Image generation returned unrecognized image data; outcome is unknown and must not be retried automatically');
-      const archiveName = `${randomUUID()}-generated.${image.extension}`;
-      const archiveDir = join(options.attachmentDir, 'images');
-      await mkdir(archiveDir, { recursive: true, mode: 0o700 });
-      const archivePath = join(archiveDir, archiveName);
-      try { await writeFile(archivePath, bytes, { flag: 'wx', mode: 0o600 }); }
-      catch { throw new Error('Generated image could not be saved to the attachment archive; generation outcome is unknown and must not be retried automatically'); }
-      const filename = `${randomUUID()}.${image.extension}`;
-      await mkdir(options.attachmentDir, { recursive: true });
-      const path = join(options.attachmentDir, filename);
-      try {
-        await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
-      } catch {
-        throw new Error('Generated image could not be saved as an attachment; generation outcome is unknown and must not be retried automatically');
-      }
-      pending.set(path, { filename, mime: image.mime, archivePath });
-      return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'Save it with image_save using this exact path before delivery.', ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
+      return { ...await registerImage(bytes), ...(name === 'image_generate_self' ? { identity_reference_used: true } : {}) };
     },
   };
 }
