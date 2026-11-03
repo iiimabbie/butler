@@ -523,7 +523,7 @@ export class DiscordHandler {
       await this.runAsk(this.store, session, request.prompt, {
         baseUrl: commandRuntime.discord.baseUrl,
         apiKey: commandRuntime.discord.apiKey,
-        model: state.model,
+        model: request.job.model ?? state.model,
         maxContextTokens: config.maxContextTokens,
         modelContextTokens: config.modelContextTokens,
         transcription: commandRuntime.settings.transcription,
