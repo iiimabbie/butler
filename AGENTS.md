@@ -1,8 +1,8 @@
 # Repository Instructions
 
-## Code Review Guidelines
+## Engineering Guidelines
 
-Apply these guidelines when reviewing changes, including a self-review before delivery.
+Apply these guidelines when implementing or reviewing changes, including the self-review before delivery.
 
 ### Review the Resulting Design
 
@@ -25,16 +25,16 @@ Apply these guidelines when reviewing changes, including a self-review before de
 - Add a lock, hash, identifier, cache, or retry only for an identified need that existing execution, transaction, storage guarantees, or values cannot meet.
 - Preserve necessary authorization, input validation, and recovery behavior while simplifying the implementation.
 
-### Verification Policy
+### Verification
 
 - Run `npm run typecheck` for TypeScript changes and `npm run build` before deployment. Check changed `ui/app.js` with `node --check`.
 - Do not add test files, test dependencies, or a test suite. Use one-off smoke checks in a temporary directory and remove them afterwards.
 - Deployment uses `npm run deploy`. Run `npm run discord:register` only when slash command definitions change; it replaces every registered command.
-
-### Verify and Report
-
-- Follow the verification policy above. Check affected callers and relevant failure paths, and confirm that replaced behavior leaves no stale references.
+- Check affected callers and relevant failure paths, and confirm that replaced behavior leaves no stale references.
 - During self-review, simplify redundant mechanisms and remove obsolete code before delivery. Report which checks actually ran and any remaining verification gaps.
+
+### Review Findings
+
 - In a review-only task, report findings without modifying code unless implementation is also requested.
 - Report concrete defects or maintainability problems introduced or materially worsened by the change. Identify the location, affected path or triggering condition, consequence, and simplest appropriate correction.
 - For unnecessary complexity, identify the redundant mechanism and the existing or simpler implementation that can meet the requirement.
