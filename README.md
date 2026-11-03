@@ -63,7 +63,7 @@ google:
   clientSecret: DESKTOP_CLIENT_SECRET
 memory:
   baseUrl: http://127.0.0.1:18888
-  bankId: butler-discord
+  bankId: Renee
 image:
   baseUrl: https://your-cpa.example/v1
   apiKey: IMAGE_API_KEY
