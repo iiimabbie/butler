@@ -86,11 +86,12 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
           const results = [];
           for (const skillName of names) {
             try { results.push(action === 'update'
-              ? await updateOne(skillName, lock.skills[skillName]!, lock, skillsDirectory, stagingDirectory, workspace, args.force === true)
+              ? await updateOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory, workspace, args.force === true)
               : await checkOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory)); }
             catch (error) { results.push({ name: skillName, status: 'failed', error: error instanceof Error ? error.message : String(error) }); }
+            // Persist after each skill so an interruption cannot leave replaced files with a stale hash.
+            if (action === 'update') await writeLock(lockPath, lock);
           }
-          if (action === 'update') await writeLock(lockPath, lock);
           if (action === 'check') {
             const installed = await installedSkills(skillsDirectory);
             return { results, untracked: installed.map(skill => skill.name).filter(skillName => !(skillName in lock.skills)) };
@@ -293,7 +294,7 @@ async function fetchSkill(entry: SkillLockEntry, name: string, staging: string):
   } catch (error) { await rm(temp, { recursive: true, force: true }); throw error; }
 }
 
-async function updateOne(name: string, entry: SkillLockEntry, lock: SkillLock, skills: string, staging: string, workspace: string, force: boolean) {
+async function updateOne(name: string, entry: SkillLockEntry, skills: string, staging: string, workspace: string, force: boolean) {
   const safeName = validName(name);
   const installed = resolve(skills, safeName);
   try { await lstat(installed); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { name, status: 'missing' }; throw error; }
@@ -305,15 +306,24 @@ async function updateOne(name: string, entry: SkillLockEntry, lock: SkillLock, s
       if (entry.revision !== fetched.revision) { entry.revision = fetched.revision; entry.updatedAt = new Date().toISOString(); }
       return { name, status: 'up_to_date' };
     }
-    const trash = resolve(workspace, '.trash');
-    await mkdir(trash, { recursive: true });
-    await rename(installed, resolve(trash, `${name}-${Date.now()}`));
-    await cp(fetched.directory, installed, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: src => basename(src) !== '.git' });
-    const from = entry.revision;
-    entry.revision = fetched.revision;
-    entry.hash = await contentHash(installed);
-    entry.updatedAt = new Date().toISOString();
-    return { name, status: 'updated', ...(from === undefined ? {} : { from }), to: fetched.revision };
+    // Build the complete replacement first, then swap with renames so the skill is never left half-copied.
+    const ready = await mkdtemp(resolve(staging, 'ready-'));
+    try {
+      const replacement = resolve(ready, 'skill');
+      await cp(fetched.directory, replacement, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: src => basename(src) !== '.git' });
+      const hash = await contentHash(replacement);
+      const trash = resolve(workspace, '.trash');
+      await mkdir(trash, { recursive: true });
+      const previous = resolve(trash, `${name}-${Date.now()}`);
+      await rename(installed, previous);
+      try { await rename(replacement, installed); }
+      catch (error) { await rename(previous, installed); throw error; }
+      const from = entry.revision;
+      entry.revision = fetched.revision;
+      entry.hash = hash;
+      entry.updatedAt = new Date().toISOString();
+      return { name, status: 'updated', ...(from === undefined ? {} : { from }), to: fetched.revision };
+    } finally { await rm(ready, { recursive: true, force: true }); }
   } finally { await fetched.cleanup(); }
 }
 
