@@ -7,7 +7,8 @@ import { MessageFlags } from 'discord.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
-export type DiscordToolContext = { channelId: string; messageId?: string; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type HandoffInput = { targetChannelId: string; content: string; cardMessageId: string; cardTime: string; originChannelId: string; originMessageId?: string; requesterId?: string };
+export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -31,6 +32,7 @@ const specs: ToolSpec[] = [
   { name: 'rename_post', description: 'Rename a forum post thread.', properties: { threadId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['threadId', 'name'] },
   { name: 'rename_forum', description: 'Rename a forum channel.', properties: { channelId: snowflake, name: { type: 'string', minLength: 1, maxLength: 100 } }, required: ['channelId', 'name'] },
   { name: 'discord_attach_to_reply', description: 'Queue a regular file for the final reply. Absolute paths are allowed; relative paths use the project root. filename must be a plain filename.', properties: { file: { type: 'string', minLength: 1, maxLength: 500 }, filename: { type: 'string', minLength: 1, maxLength: 120 } }, required: ['file'] },
+  { name: 'discord_handoff', description: 'Hand work over to another tracked channel\'s Butler session. Posts a handoff card there and starts that session on it right away. That session sees only title and content, so include the goal, what is already known or done, relevant links/IDs and what remains. The target channel owns the work afterwards. Do not hand back work you just received.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['channelId', 'title', 'content'] },
 ];
 const discordGroups: Record<string, Record<string, string>> = {
   discord_read: { message: 'message', channel_messages: 'channel_messages', pins: 'pins', channel: 'channel' },
@@ -161,7 +163,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : stringArg(args.content, 'content');
-    if (content !== undefined && content.length > 2000) throw new ToolUsageError('Discord message exceeds 2000 characters');
+    if (content !== undefined && name !== 'discord_handoff' && content.length > 2000) throw new ToolUsageError('Discord message exceeds 2000 characters');
     if (name === 'discord_react') {
       const emojis = args.emojis as string[];
       const added: string[] = [];
@@ -187,6 +189,20 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new ToolUsageError('filename must be a plain filename');
       options.context.attachmentFiles.push({ attachment: real, name });
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
+    }
+    if (name === 'discord_handoff') {
+      const handoff = options.context.handoff;
+      if (!handoff) throw new ToolUsageError('Handoff is not available here');
+      if (channelId === options.context.channelId) throw new ToolUsageError('Cannot hand off to the current channel');
+      if (!options.context.store?.isTrackedChannel(channelId!)) throw new ToolUsageError('Target channel is not tracked by Butler');
+      const title = stringArg(args.title, 'title'); const originChannelId = options.context.channelId; const originMessageId = options.context.messageId; const requesterId = options.context.requesterId;
+      const origin = asRecord(await api('GET', `/channels/${originChannelId}`));
+      const link = originMessageId ? `https://discord.com/channels/${typeof origin.guild_id === 'string' ? origin.guild_id : '@me'}/${originChannelId}/${originMessageId}` : undefined;
+      const card = asRecord(await api('POST', `/channels/${channelId}/messages`, { allowed_mentions: { parse: [] }, embeds: [{ color: 0x8FBC8F, author: { name: '📨 交接' }, title, description: content, fields: [{ name: '來自', value: `<#${originChannelId}>${link ? ` · [原訊息](${link})` : ''}`, inline: true }, ...(requesterId ? [{ name: '交辦', value: `<@${requesterId}>`, inline: true }] : [])], footer: { text: 'Butler session handoff' }, timestamp: new Date().toISOString() }] }));
+      if (typeof card.id !== 'string' || typeof card.timestamp !== 'string' || !Number.isFinite(Date.parse(card.timestamp))) throw new Error('Discord handoff card response lacks a valid message ID or timestamp; card outcome is unknown and must not be retried automatically');
+      try { await handoff({ targetChannelId: channelId!, content: `${title}\n\n${content}`, cardMessageId: card.id, cardTime: card.timestamp, originChannelId, originMessageId, requesterId }); }
+      catch (error) { throw new Error(`Handoff card ${card.id} was posted but the target session could not be started (${error instanceof Error ? error.message : String(error)}); do not retry automatically`); }
+      return { ok: true, confirmed: true, channelId, messageId: card.id, started: true };
     }
     let method = 'GET'; let path = ''; let body: unknown;
     if (name === 'channel') {

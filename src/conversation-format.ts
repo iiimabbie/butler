@@ -8,7 +8,7 @@ type Turn = Record<string, unknown> & { _authorId?: string; _actualChannelId?: s
 export function buildConversationPayload(operationId: string, channelId: string, sessionId: string, messages: readonly StoredMessage[]): ConversationRetainPayload {
   const turns: Turn[] = messages.flatMap(message => {
     const source = message.source;
-    if (source.sourceKind === 'scheduled_input' || source.sourceKind === 'notification') return [];
+    if (source.sourceKind === 'scheduled_input' || source.sourceKind === 'notification' || source.sourceKind === 'session_handoff') return [];
     const isButlerMessage = source.sourceKind === 'butler_reply' || source.sourceKind === 'butler_tool_message';
     if (!isButlerMessage) return [externalTurn(message, channelId)];
     if (!message.discordSegments.length) throw new Error(`Butler message ${message.id} has no successfully delivered Discord segments`);
