@@ -1,15 +1,15 @@
 import { ToolUsageError } from './tool-errors.js';
 import { randomUUID } from 'node:crypto';
-import { DEFAULT_SCHEDULE_TIMEZONE, scheduleNextRun, type CreateScheduleInput, type ScheduleJob, type SchedulerStore, type ScheduleNotify } from './scheduler.js';
+import { DEFAULT_SCHEDULE_TIMEZONE, scheduleNextRun, type CreateScheduleInput, type ScheduleJob, type SchedulerStore, type ScheduleNotify, type ScheduleUpdate } from './scheduler.js';
 
 const idSchema = { type: 'string', minLength: 1, maxLength: 200 };
 const textSchema = { type: 'string', minLength: 1, maxLength: 4000 };
-const properties = { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: { type: 'string', minLength: 1, maxLength: 120 }, runAt: { type: 'string', minLength: 1, maxLength: 80 }, timezone: { type: 'string', minLength: 1, maxLength: 100 }, enabled: { type: 'boolean' }, notify: { type: 'string', enum: ['always', 'on_event'], description: 'always (default): report results normally. on_event: the runtime automatically instructs the agent to return exactly [no_reply] when there is nothing noteworthy and suppresses that sentinel. Do not repeat silence or [no_reply] instructions in content; describe only the task and what warrants a report.' } };
+const properties = { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: { type: 'string', minLength: 1, maxLength: 120 }, runAt: { type: 'string', minLength: 1, maxLength: 80 }, timezone: { type: 'string', minLength: 1, maxLength: 100 }, enabled: { type: 'boolean' }, model: { type: ['string', 'null'], minLength: 1, maxLength: 200, description: 'LLM model ID for this schedule\'s runs; omit on create (or null on update) to use the output channel\'s model.' }, notify: { type: 'string', enum: ['always', 'on_event'], description: 'always (default): report results normally. on_event: the runtime automatically instructs the agent to return exactly [no_reply] when there is nothing noteworthy and suppresses that sentinel. Do not repeat silence or [no_reply] instructions in content; describe only the task and what warrants a report.' } };
 
 const scheduleActions = ['create', 'update', 'enable', 'disable', 'delete'] as const;
 const scheduleManageProperties = { action: { type: 'string', enum: scheduleActions }, ...properties, kind: { type: 'string', enum: ['cron', 'reminder'] } };
 export const scheduleToolDefinitions = [
-  { type: 'function', name: 'schedule_manage', description: 'Manage persistent independent schedules across channels.\ncreate — Create a cron task (five-field cron expression) or one-time reminder (valid ISO runAt); required kind, outputChannelId, content; optional cron or runAt, timezone, notify. The schedule is independent of its creation channel; outputChannelId may be any text channel the bot can send to and can be changed later; timezone defaults to configured schedule timezone. notify is always by default; on_event suppresses routine no-event results and instructs the agent to return exactly [no_reply] when nothing is noteworthy.\nupdate — Update a schedule by ID, including output channel and notify policy; required id; optional content, cron, runAt, timezone, enabled, notify.\nenable — Enable a schedule; required id.\ndisable — Disable a schedule; required id.\ndelete — Delete a schedule; required id.', parameters: { type: 'object', properties: scheduleManageProperties, required: ['action'], additionalProperties: false } },
+  { type: 'function', name: 'schedule_manage', description: 'Manage persistent independent schedules across channels.\ncreate — Create a cron task (five-field cron expression) or one-time reminder (valid ISO runAt); required kind, outputChannelId, content; optional cron or runAt, timezone, notify, model. The schedule is independent of its creation channel; outputChannelId may be any text channel the bot can send to and can be changed later; timezone defaults to configured schedule timezone. notify is always by default; on_event suppresses routine no-event results and instructs the agent to return exactly [no_reply] when nothing is noteworthy.\nupdate — Update a schedule by ID, including output channel and notify policy; required id; optional content, cron, runAt, timezone, enabled, notify, model.\nenable — Enable a schedule; required id.\ndisable — Disable a schedule; required id.\ndelete — Delete a schedule; required id.', parameters: { type: 'object', properties: scheduleManageProperties, required: ['action'], additionalProperties: false } },
   { type: 'function', name: 'schedule_list', description: 'List all independent schedules across channels.', parameters: { type: 'object', properties: {}, additionalProperties: false } },
 ] as const;
 export interface ScheduleToolRuntime {
@@ -49,6 +49,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
           kind,
           notify: notifyArg(args.notify, 'always'),
           content: stringArg(args.content, 'content'),
+          ...(args.model === undefined || args.model === null ? {} : { model: stringArg(args.model, 'model') }),
           timezone: args.timezone === undefined ? (options.defaultTimezone ?? DEFAULT_SCHEDULE_TIMEZONE) : stringArg(args.timezone, 'timezone'),
           ...(args.cron === undefined ? {} : { cron: stringArg(args.cron, 'cron') }),
           ...(args.runAt === undefined ? {} : { runAt: stringArg(args.runAt, 'runAt') }),
@@ -56,7 +57,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         if (kind === 'reminder' && input.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
         if (kind === 'cron' && input.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
         const timestamp = now();
-        const job: ScheduleJob = { id: randomUUID(), ...input, notify: input.notify ?? 'always', timezone: input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, cron: input.cron ?? null, runAt: input.runAt ?? null, enabled: true, nextRun: scheduleNextRun(input, timestamp), createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString() };
+        const job: ScheduleJob = { id: randomUUID(), ...input, notify: input.notify ?? 'always', model: input.model ?? null, timezone: input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, cron: input.cron ?? null, runAt: input.runAt ?? null, enabled: true, nextRun: scheduleNextRun(input, timestamp), createdAt: timestamp.toISOString(), updatedAt: timestamp.toISOString() };
         return options.store.createSchedule(job);
       }
       if (name === 'schedule_list') return options.store.listSchedules();
@@ -69,7 +70,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         return options.store.updateSchedule(id, { enabled, nextRun: enabled ? scheduleNextRun(current, now()) : null });
       }
       if (action === 'update') {
-        const patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>> = {};
+        const patch: ScheduleUpdate = {};
         if (args.outputChannelId !== undefined) { patch.outputChannelId = stringArg(args.outputChannelId, 'outputChannelId'); await assertOutput(patch.outputChannelId); }
         if (args.content !== undefined) patch.content = stringArg(args.content, 'content');
         if (args.cron !== undefined) patch.cron = stringArg(args.cron, 'cron');
@@ -77,6 +78,7 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
         if (args.timezone !== undefined) patch.timezone = stringArg(args.timezone, 'timezone');
         if (args.enabled !== undefined) { if (typeof args.enabled !== 'boolean') throw new ToolUsageError('enabled must be boolean'); patch.enabled = args.enabled; }
         if (args.notify !== undefined) patch.notify = notifyArg(args.notify);
+        if (args.model !== undefined) patch.model = args.model === null ? null : stringArg(args.model, 'model');
         const candidate = { ...current, ...patch };
         if (candidate.kind === 'cron' && patch.runAt !== undefined) throw new ToolUsageError('Cron schedule cannot include runAt');
         if (candidate.kind === 'reminder' && patch.cron !== undefined) throw new ToolUsageError('Reminder cannot include cron');
@@ -90,8 +92,8 @@ export function createScheduleToolRuntime(options: ScheduleToolOptions): Schedul
 
 function validateScheduleArgs(action: string, args: Record<string, unknown>): void {
   const schemas: Record<string, { required: string[]; properties: Record<string, Record<string, unknown>> }> = {
-    create: { required: ['kind', 'outputChannelId', 'content'], properties: { kind: { type: 'string', enum: ['cron', 'reminder'] }, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, notify: properties.notify } },
-    update: { required: ['id'], properties: { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, enabled: properties.enabled, notify: properties.notify } },
+    create: { required: ['kind', 'outputChannelId', 'content'], properties: { kind: { type: 'string', enum: ['cron', 'reminder'] }, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, notify: properties.notify, model: properties.model } },
+    update: { required: ['id'], properties: { id: idSchema, outputChannelId: idSchema, content: textSchema, cron: properties.cron, runAt: properties.runAt, timezone: properties.timezone, enabled: properties.enabled, notify: properties.notify, model: properties.model } },
     enable: { required: ['id'], properties: { id: idSchema } }, disable: { required: ['id'], properties: { id: idSchema } }, delete: { required: ['id'], properties: { id: idSchema } },
   };
   const schema = schemas[action]!;
@@ -99,8 +101,10 @@ function validateScheduleArgs(action: string, args: Record<string, unknown>): vo
   for (const [key, value] of Object.entries(args)) {
     const rule = schema.properties[key];
     if (!rule) throw new ToolUsageError(`Unexpected argument: ${key}`);
-    if (rule.type === 'string' && (typeof value !== 'string' || value.length < Number(rule.minLength ?? 0) || value.length > Number(rule.maxLength ?? Infinity) || (Array.isArray(rule.enum) && !rule.enum.includes(value)))) throw new ToolUsageError(`${key} is invalid`);
-    if (rule.type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} is invalid`);
+    if (Array.isArray(rule.type) && value === null && rule.type.includes('null')) continue;
+    const type = Array.isArray(rule.type) ? rule.type[0] : rule.type;
+    if (type === 'string' && (typeof value !== 'string' || value.length < Number(rule.minLength ?? 0) || value.length > Number(rule.maxLength ?? Infinity) || (Array.isArray(rule.enum) && !rule.enum.includes(value)))) throw new ToolUsageError(`${key} is invalid`);
+    if (type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} is invalid`);
   }
 }
 

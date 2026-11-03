@@ -7,7 +7,7 @@ import { dirname, join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { FileBackedSettings, SettingsConflictError, type SettingsSnapshot } from './file-backed-settings.js';
 import { nextCronRun, scheduleNextRun } from './scheduler.js';
-import type { ScheduleJob, ScheduleRun, SchedulerStore } from './scheduler.js';
+import type { ScheduleJob, ScheduleRun, SchedulerStore, ScheduleUpdate } from './scheduler.js';
 import type { TranscriptEntry } from './journal-transcript.js';
 import { projectPath } from './paths.js';
 import type { NotificationPayload } from './notifications.js';
@@ -817,7 +817,7 @@ export class Store implements SchedulerStore {
   createSchedule(job:ScheduleJob):ScheduleJob { this.settings.refresh();if(this.getSchedule(job.id))throw new SettingsConflictError(`Schedule ${job.id} already exists`);this.settings.upsertSchedule(job);this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(job.nextRun,job.id);return this.getSchedule(job.id)!; }
   getSchedule(id:string):ScheduleJob|undefined { const snapshot=this.settings.current();const job=[...snapshot.crons,...snapshot.reminders].find(item=>item.id===id);if(!job)return undefined;const runtime=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;return {...job,nextRun:runtime?runtime.next_run:null}; }
   listSchedules():ScheduleJob[] { const snapshot=this.settings.current();return [...snapshot.crons,...snapshot.reminders].map(job=>this.getSchedule(job.id)!).sort((a,b)=>a.createdAt.localeCompare(b.createdAt)||a.id.localeCompare(b.id)); }
-  updateSchedule(id:string,patch:Partial<Pick<ScheduleJob,'outputChannelId'|'content'|'cron'|'runAt'|'timezone'|'enabled'|'nextRun'|'notify'>>):ScheduleJob|undefined { this.settings.refresh();const current=this.getSchedule(id);if(!current)return undefined;const {nextRun,...definitionPatch}=patch;if(Object.keys(definitionPatch).length)this.settings.patchSchedule(id,{...definitionPatch,updatedAt:new Date().toISOString()});if(Object.hasOwn(patch,'nextRun'))this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(nextRun??null,id);return this.getSchedule(id); }
+  updateSchedule(id:string,patch:ScheduleUpdate):ScheduleJob|undefined { this.settings.refresh();const current=this.getSchedule(id);if(!current)return undefined;const {nextRun,...definitionPatch}=patch;if(Object.keys(definitionPatch).length)this.settings.patchSchedule(id,{...definitionPatch,updatedAt:new Date().toISOString()});if(Object.hasOwn(patch,'nextRun'))this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(nextRun??null,id);return this.getSchedule(id); }
   deleteSchedule(id:string):boolean { return Boolean(this.settings.deleteSchedule(id)); }
 
   claimScheduleRun(id:string,scheduledAt:string,nextRun:string|null,now:string):{job:ScheduleJob;run:ScheduleRun}|undefined {

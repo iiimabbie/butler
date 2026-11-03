@@ -34,12 +34,13 @@ function requiredString(value: unknown, field: string): string {
 function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: number, timezone: string): ScheduleJob {
   const label = `${kind === 'cron' ? 'crons.yaml' : 'reminders.yaml'}[${index}]`;
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
-  const allowed = new Set(['id', 'creatorId', 'outputChannelId', 'content', 'timezone', 'createdAt', 'updatedAt', 'notify', 'enabled', kind === 'cron' ? 'cron' : 'runAt']);
+  const allowed = new Set(['id', 'creatorId', 'outputChannelId', 'content', 'timezone', 'createdAt', 'updatedAt', 'notify', 'model', 'enabled', kind === 'cron' ? 'cron' : 'runAt']);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`${label}.${key} is not a supported field`);
   for (const key of ['id', 'creatorId', 'outputChannelId', 'content', 'createdAt']) requiredString(value[key], `${label}.${key}`);
   const enabled = value.enabled === undefined ? true : value.enabled;
   if (typeof enabled !== 'boolean') throw new Error(`${label}.enabled must be boolean`);
   if (value.notify !== undefined && value.notify !== 'always' && value.notify !== 'on_event') throw new Error(`${label}.notify must be always or on_event`);
+  if (value.model !== undefined && value.model !== null) requiredString(value.model, `${label}.model`);
   if (!channelIdPattern.test(value.creatorId as string) || !channelIdPattern.test(value.outputChannelId as string)) throw new Error(`${label}: creatorId and outputChannelId must be Discord IDs`);
   const zone = value.timezone === undefined ? timezone : requiredString(value.timezone, `${label}.timezone`);
   try { new Intl.DateTimeFormat('en', { timeZone: zone }); } catch { throw new Error(`${label}.timezone is invalid`); }
@@ -55,7 +56,7 @@ function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: numb
     if (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(time) || !Number.isFinite(Date.parse(time))) throw new Error(`${label}.runAt must be an ISO date-time with a timezone`);
     runAt = new Date(time).toISOString();
   }
-  return { id: value.id as string, creatorId: value.creatorId as string, outputChannelId: value.outputChannelId as string, content: value.content as string, kind, cron, runAt, timezone: zone, enabled, notify: (value.notify as ScheduleJob['notify'] | undefined) ?? 'always', nextRun: null, createdAt: value.createdAt as string, updatedAt: (value.updatedAt as string | undefined) ?? value.createdAt as string };
+  return { id: value.id as string, creatorId: value.creatorId as string, outputChannelId: value.outputChannelId as string, content: value.content as string, kind, cron, runAt, timezone: zone, enabled, notify: (value.notify as ScheduleJob['notify'] | undefined) ?? 'always', model: (value.model as string | null | undefined) ?? null, nextRun: null, createdAt: value.createdAt as string, updatedAt: (value.updatedAt as string | undefined) ?? value.createdAt as string };
 }
 
 export function validateSettings(crons: unknown, reminders: unknown, channels: unknown, timezone = 'Asia/Taipei'): SettingsSnapshot {
@@ -87,7 +88,7 @@ export function validateSettings(crons: unknown, reminders: unknown, channels: u
 }
 
 function serializeJob(job: ScheduleJob): Record<string, unknown> {
-  return { id: job.id, creatorId: job.creatorId, outputChannelId: job.outputChannelId, content: job.content, ...(job.kind === 'cron' ? { cron: job.cron } : { runAt: job.runAt }), timezone: job.timezone, notify: job.notify, enabled: job.enabled, createdAt: job.createdAt };
+  return { id: job.id, creatorId: job.creatorId, outputChannelId: job.outputChannelId, content: job.content, ...(job.kind === 'cron' ? { cron: job.cron } : { runAt: job.runAt }), timezone: job.timezone, notify: job.notify, ...(job.model ? { model: job.model } : {}), enabled: job.enabled, createdAt: job.createdAt };
 }
 
 export class FileBackedSettings {

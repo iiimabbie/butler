@@ -12,6 +12,8 @@ export interface ScheduleJob {
   creatorId: string;
   kind: ScheduleKind;
   notify: ScheduleNotify;
+  /** Model for this schedule's runs; null uses the output channel's model. */
+  model: string | null;
   content: string;
   cron: string | null;
   runAt: string | null;
@@ -32,11 +34,14 @@ export interface ScheduleRun {
   error: string | null;
 }
 
+export type ScheduleUpdate = Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify' | 'model'>>;
+
 export interface CreateScheduleInput {
   outputChannelId: string;
   creatorId: string;
   kind: ScheduleKind;
   notify?: ScheduleNotify;
+  model?: string;
   content: string;
   cron?: string;
   runAt?: string;
@@ -48,7 +53,7 @@ export interface SchedulerStore {
   createSchedule(job: ScheduleJob): ScheduleJob;
   getSchedule(id: string): ScheduleJob | undefined;
   listSchedules(): ScheduleJob[];
-  updateSchedule(id: string, patch: Partial<Pick<ScheduleJob, 'outputChannelId' | 'content' | 'cron' | 'runAt' | 'timezone' | 'enabled' | 'nextRun' | 'notify'>>): ScheduleJob | undefined;
+  updateSchedule(id: string, patch: ScheduleUpdate): ScheduleJob | undefined;
   deleteSchedule(id: string): boolean;
   /** Transaction: if due and eligible, insert running execution (unique job/time) and update nextRun; return undefined if already claimed/not due/disabled. */
   claimScheduleRun(id: string, scheduledAt: string, nextRun: string | null, now: string): { job: ScheduleJob; run: ScheduleRun } | undefined;
