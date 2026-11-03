@@ -2,7 +2,7 @@
 
 ## 目前的設定備份
 
-- Bank：`butler-discord`
+- Bank：`Renee`
 - 2026-10-08 歷史設定快照已從版控移除；此文件不再提供備份檔連結。
 - 這份備份包含 bank 自訂設定、完整生效設定、名稱與性格參數，以及 directives／aliases／webhooks 資訊。
 - 不含記憶、文件、observations 或知識頁內容；不能用來復原被刪除的記憶。
@@ -40,15 +40,15 @@ node scripts/clear-hindsight-memory.mjs
 
 預設從 .data/config.yaml 讀取 memory.bankId 與 memory.baseUrl，只查詢目標與資料數量，不建立備份、不修改服務。
 
-### 正式清空 butler-discord
+### 正式清空 Renee
 
 **記憶刪除無法復原。設定備份不是記憶備份。**
 
 ```bash
 node scripts/clear-hindsight-memory.mjs \
-  --bank-id butler-discord \
+  --bank-id Renee \
   --execute \
-  --confirm-bank butler-discord
+  --confirm-bank Renee
 ```
 
 `--confirm-bank` 必須與目標 bank ID 完全相同。腳本不會自行停止或重啟 Butler。
@@ -93,7 +93,7 @@ node scripts/clear-memory-and-chats.mjs
 ```bash
 node scripts/clear-memory-and-chats.mjs \
   --execute \
-  --confirm-bank butler-discord \
+  --confirm-bank Renee \
   --confirm-database /home/iiimabbie/workspace/butler/.data/butler.sqlite
 ```
 

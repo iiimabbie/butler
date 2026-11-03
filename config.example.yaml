@@ -73,7 +73,7 @@ transcription:
 # Optional shared long-term memory.
 memory:
   baseUrl: http://127.0.0.1:18888
-  bankId: butler-discord
+  bankId: Renee
   timeoutMs: 30000
   # recallBudget: 2.00
   # reflectBudget: 2.00

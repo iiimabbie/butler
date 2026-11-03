@@ -1,6 +1,6 @@
 # Hindsight Service
 
-Local Hindsight service for Butler shared memory. Butler uses the configured formal bank `butler-discord`; the separate `butler-hindsight-synthetic-eval` bank is reserved for synthetic evaluation data. Butler remains a native Node service.
+Local Hindsight service for Butler shared memory. Butler uses the configured formal bank `Renee`; the separate `butler-hindsight-synthetic-eval` bank is reserved for synthetic evaluation data. Butler remains a native Node service.
 
 ## Requirements
 
@@ -60,7 +60,7 @@ Butler does not send `budget` or `max_tokens` on automatic recall, memory tools 
 
 Change these in compose and recreate the service. These are default values; explicit HTTP API callers can override them. Butler never does.
 
-Bank `butler-discord` uses fixed retrieval budgets low=30, mid=60, high=100, with `recall_max_tokens=1200` also aligned for non-HTTP/internal callers. These are search budgets, **not merged-candidate counts**. Reranking caps are low=30, mid=50, high=50. The 20,000-token context guard is still required because the count limit alone cannot prevent long-text overflow.
+Bank `Renee` uses fixed retrieval budgets low=30, mid=60, high=100, with `recall_max_tokens=1200` also aligned for non-HTTP/internal callers. These are search budgets, **not merged-candidate counts**. Reranking caps are low=30, mid=50, high=50. The 20,000-token context guard is still required because the count limit alone cannot prevent long-text overflow.
 
 ## Task recovery
 
@@ -72,4 +72,4 @@ Classification delegates to the image's existing typed `remote_retry` classifier
 
 `compose.yaml` sets `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE=Traditional Chinese (Taiwan)` as the single output-language policy for retain, observations, reflect, and their generated summaries. Missions and Butler's person-summary prompt describe content and attribution, not output language. Changing this system-level environment setting requires recreating the Hindsight container; it does not rewrite existing memories. Butler does not supply missions or language overrides when creating banks.
 
-The formal `butler-discord` bank stores `retain_mission`, `observations_mission`, and `reflect_mission` as bank configuration overrides (persisted by Hindsight, not injected by Butler or compose). Retain and observations use explicit third-person subjects, including Renee's own experiences. Reflect uses third person for reusable knowledge, Mental Models and person pages; Renee dialogue may use first person without changing event participants. Original quotations and diaries retain their authors' pronouns. Legacy ambiguous pronouns must not be assumed to refer to Renee.
+The formal `Renee` bank stores `retain_mission`, `observations_mission`, and `reflect_mission` as bank configuration overrides (persisted by Hindsight, not injected by Butler or compose). Retain and observations use explicit third-person subjects, including Renee's own experiences. Reflect uses third person for reusable knowledge, Mental Models and person pages; Renee dialogue may use first person without changing event participants. Original quotations and diaries retain their authors' pronouns. Legacy ambiguous pronouns must not be assumed to refer to Renee.
