@@ -208,7 +208,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const contextMessages = [...sessionMessages];
     let workspace = store.workspaceSnapshot(session);
     if (!workspace) { workspace = await loadWorkspaceContext(config.workspaceDirectory); store.saveWorkspaceSnapshot(session, workspace); }
-    const { input: prefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config, workspace);
+    const { input: initialPrefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config, workspace);
+    let prefixInput = initialPrefixInput;
     const availableToolNames: ReadonlySet<string> = new Set(fullAvailableTools.map(tool => String(tool.name)));
     const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
     let stableInput: unknown[] = [...prefixInput, ...openingInput, ...compactInput];
@@ -328,6 +329,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
               store.clearContextUsage(session);
               priorUsage = undefined;
               compactInput = [{ role: 'user', content: `Prior conversation summary (historical background):\n${checkpoint.summary}` }];
+              // The checkpoint dropped the workspace snapshot and this request misses the cache anyway, so re-read the files now instead of breaking the cache again next ask.
+              workspace = await loadWorkspaceContext(config.workspaceDirectory);
+              store.saveWorkspaceSnapshot(session, workspace);
+              prefixInput = (await promptPrefix(config, workspace)).input;
               stableInput = [...prefixInput, ...openingInput, ...compactInput];
               const checkpointIndex = storedHistory.findIndex(message => message.id === checkpoint.throughMessageId);
               const retained = liveGroups.map((group, index) => ({ group, protected: liveGroupProtected[index] ?? false }))
