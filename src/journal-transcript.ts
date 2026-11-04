@@ -10,6 +10,7 @@ export interface TranscriptEntry {
   authorName: string;
   timestamp: string;
   content: string;
+  replyToMessageId: string | null;
 }
 
 export interface TranscriptPage {
@@ -51,7 +52,10 @@ export function formatTranscript(store: Store, dateValue: unknown, timezone: str
     hourCycle: 'h23', timeZoneName: 'longOffset',
   });
   const { start, end } = transcriptCandidateWindow(date);
-  const entries = store.transcriptCandidates(start, end)
+  const candidates = store.transcriptCandidates(start, end);
+  // Reply targets name who "you" means; Discord replies often carry no mention in the text.
+  const authorsByMessage = new Map(candidates.map(entry => [entry.discordMessageId, entry.authorName || entry.authorId]));
+  const entries = candidates
     .map((entry, stableOrder) => ({ ...entry, milliseconds: Date.parse(entry.timestamp), stableOrder }))
     .filter(entry => Number.isFinite(entry.milliseconds) && partsDate(formatter, new Date(entry.milliseconds)) === date)
     .sort((a, b) => a.channelId.localeCompare(b.channelId) || a.milliseconds - b.milliseconds || a.stableOrder - b.stableOrder);
@@ -60,7 +64,7 @@ export function formatTranscript(store: Store, dateValue: unknown, timezone: str
     const localTime = formatter.formatToParts(new Date(entry.milliseconds));
     const time = `${part(localTime, 'year')}-${part(localTime, 'month')}-${part(localTime, 'day')} ${part(localTime, 'hour')}:${part(localTime, 'minute')}:${part(localTime, 'second')} ${part(localTime, 'timeZoneName')}`;
     const messages = channelGroups.get(entry.channelId) ?? [];
-    messages.push(`[${time}] 作者：${entry.authorName || entry.authorId}（${entry.authorId}）｜Discord 訊息：${entry.discordMessageId}\n${entry.content}`);
+    messages.push(`[${time}] 作者：${entry.authorName || entry.authorId}（${entry.authorId}）｜Discord 訊息：${entry.discordMessageId}${entry.replyToMessageId ? `｜回覆 ${authorsByMessage.get(entry.replyToMessageId) ?? '範圍外'} 的訊息：${entry.replyToMessageId}` : ''}\n${entry.content}`);
     channelGroups.set(entry.channelId, messages);
   }
   const transcript = [...channelGroups]
