@@ -57,7 +57,7 @@ export function formatTranscript(store: Store, dateValue: unknown, timezone: str
   const authorsByMessage = new Map(candidates.map(entry => [entry.discordMessageId, entry.authorName || entry.authorId]));
   const entries = candidates
     .map((entry, stableOrder) => ({ ...entry, milliseconds: Date.parse(entry.timestamp), stableOrder }))
-    .filter(entry => Number.isFinite(entry.milliseconds) && partsDate(formatter, new Date(entry.milliseconds)) === date)
+    .filter(entry => store.memoryWriteAllowed(entry.channelId) && Number.isFinite(entry.milliseconds) && partsDate(formatter, new Date(entry.milliseconds)) === date)
     .sort((a, b) => a.channelId.localeCompare(b.channelId) || a.milliseconds - b.milliseconds || a.stableOrder - b.stableOrder);
   const channelGroups = new Map<string, string[]>();
   for (const entry of entries) {

@@ -1,7 +1,10 @@
 import { logError } from './log.js';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { logInfo } from './log.js';
+import { Agent } from 'undici';
 
+// Node fetch otherwise aborts at undici's 300 s header/body timeouts; the AbortSignal below is the only limit.
+const modelDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 const traceInstanceId = randomUUID();
 const traceHmacKey = randomBytes(32);
 export function traceTextMetadata(text: string): { textLength: number; textHmac: string } {
@@ -32,7 +35,7 @@ export async function requestModel(options: {
   let bodyMs: number | null = null;
   log({ event: 'start' });
   try {
-    response = await options.fetcher(options.url, { method: 'POST', headers: options.headers, body: options.body, signal });
+    response = await options.fetcher(options.url, { method: 'POST', headers: options.headers, body: options.body, signal, dispatcher: modelDispatcher } as RequestInit);
     headersMs = Math.round(performance.now() - started);
     const upstreamRequestId = response.headers.get('x-request-id') ?? response.headers.get('request-id');
     stage = 'body';

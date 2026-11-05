@@ -69,7 +69,8 @@ export class Hindsight {
     logMemoryPhase('bank_setup', started, 'completed');
   }
 
-  async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean): Promise<string> {
+  /** Recalls memories for this message, leaving out those already in the replayed history; returns '' when every recalled memory is already there. */
+  async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean, replayedMemoryIds: ReadonlySet<string> = new Set()): Promise<string> {
     try { await this.ensureBank(store, session, onProgress, writeAllowed); }
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
     const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
@@ -92,7 +93,10 @@ export class Hindsight {
     store.finishTool(audit, 'completed', auditView(result));
     logMemoryPhase('recall', recallStarted, 'completed');
     emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'completed' });
-    return memoryBlock(result);
+    const results = asRecord(result)!.results as Array<Record<string, unknown>>;
+    const fresh = results.filter(item => !replayedMemoryIds.has(String(item.id)));
+    if (results.length && !fresh.length) return '';
+    return memoryBlock({ results: fresh });
   }
 
   async recall(query: string): Promise<unknown> {

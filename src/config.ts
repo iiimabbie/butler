@@ -13,7 +13,7 @@ export type NotificationConfig = { host: string; port: number; bearerToken: stri
 export type ButlerConfig = {
   notifications?: NotificationConfig;
   discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; errorWebhookModel?: string; notificationChannelId?: string; notificationModel?: string };
-  llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number> };
+  llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number>; requestTimeoutMs?: number };
   web?: WebConfig;
   hledger?: { enabled: boolean };
   ui?: { port: number; publicOrigin: string; cookiePath: string };
@@ -75,7 +75,9 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (maxContextTokens !== undefined && (!Number.isSafeInteger(maxContextTokens) || (maxContextTokens as number) <= 0)) throw new Error('Butler config llm.maxContextTokens must be a positive integer');
       const modelContextTokens = section.modelContextTokens;
       if (modelContextTokens !== undefined && (!isRecord(modelContextTokens) || Object.entries(modelContextTokens).some(([model, limit]) => !model.trim() || !Number.isSafeInteger(limit) || (limit as number) <= 0))) throw new Error('Butler config llm.modelContextTokens must map model IDs to positive integers');
-      config.llm = { baseUrl, apiKey: string('apiKey'), model: string('model'), maxContextTokens: (maxContextTokens as number | undefined) ?? 150000, modelContextTokens: (modelContextTokens as Record<string, number> | undefined) ?? {} };
+      const requestTimeoutMs = section.requestTimeoutMs;
+      if (requestTimeoutMs !== undefined && (!Number.isSafeInteger(requestTimeoutMs) || (requestTimeoutMs as number) <= 0)) throw new Error('Butler config llm.requestTimeoutMs must be a positive integer');
+      config.llm = { baseUrl, apiKey: string('apiKey'), model: string('model'), maxContextTokens: (maxContextTokens as number | undefined) ?? 150000, modelContextTokens: (modelContextTokens as Record<string, number> | undefined) ?? {}, requestTimeoutMs: (requestTimeoutMs as number | undefined) ?? 600_000 };
     } else if (name === 'hledger') {
       const enabled = section.enabled;
       if (typeof enabled !== 'boolean') throw new Error('Butler config hledger.enabled must be boolean');

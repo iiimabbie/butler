@@ -16,6 +16,7 @@ llm:
   apiKey: YOUR_CPA_API_KEY
   model: YOUR_CHAT_MODEL
   maxContextTokens: 150000
+  requestTimeoutMs: 600000
   modelContextTokens:
     gpt-6.1-sol: 272000
 

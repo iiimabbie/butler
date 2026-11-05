@@ -42,7 +42,7 @@ export interface AgentConfig {
   maxContextTokens?: number;
   modelContextTokens?: Record<string, number>;
   fetcher?: typeof fetch;
-  timeoutMs?: number;
+  timeoutMs: number;
   signal?: AbortSignal;
   askId?: string; traceId?: string;
   consumeSteer?: () => { content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined | Promise<{ content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined>;
@@ -123,7 +123,7 @@ export const tools = [
     type: 'function', name: 'history_search', description: 'Search stored tool-call records across sessions by tool name, arguments or result text using SQLite LIKE matching (% matches any sequence; _ matches one character). This searches operation records, not conversation messages or semantic memory. Results are newest first; offset counts records (default 0), limit defaults to 20, maximum 100. Results include 500-character previews; use the page next_offset for more records and history_get for complete result content.',
     parameters: { type: 'object', properties: { query: { type: 'string' }, ...historyPageSchema.properties }, required: ['query'], additionalProperties: false },
   },
-  { type: 'function', name: 'journal_transcript_by_date', description: 'Read Butler-recorded pure Discord conversation text for a complete YYYY-MM-DD date across all current and archived sessions, including human and third-party bot messages and Butler text actually delivered to Discord. The date uses the configured schedule timezone. This reads conversation, not tool calls/results or long-term memory; internal scheduled inputs are excluded. Results can change as later messages arrive. offset is a character offset (default 0), limit defaults to 4000 and maximum 100000; continue from next_offset until null. Records include only content Butler has captured.', parameters: { ...transcriptPageSchema, properties: { ...transcriptPageSchema.properties, date: { type: 'string', description: '完整日期 YYYY-MM-DD' } } } },
+  { type: 'function', name: 'journal_transcript_by_date', description: 'Read Butler-recorded pure Discord conversation text for a complete YYYY-MM-DD date across all current and archived sessions in channels that currently allow memory writes, including human and third-party bot messages and Butler text actually delivered to Discord. The date uses the configured schedule timezone. This reads conversation, not tool calls/results or long-term memory; internal scheduled inputs are excluded. Results can change as later messages arrive. offset is a character offset (default 0), limit defaults to 4000 and maximum 100000; continue from next_offset until null. Records include only content Butler has captured.', parameters: { ...transcriptPageSchema, properties: { ...transcriptPageSchema.properties, date: { type: 'string', description: '完整日期 YYYY-MM-DD' } } } },
   { type: 'function', name: 'memory_recall', description: 'Retrieve relevant memories from shared long-term conversation history across sessions. Use to remember past conversations, preferences, relationships, decisions, experiences, and ongoing activities. Include relevant people, topics, Discord account IDs, or time context in the query when useful. Returns matching memory records rather than a complete conversation log. Use remembered information naturally without unnecessary evidence disclaimers. An empty result does not establish that something never happened.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
   { type: 'function', name: 'memory_reflect', description: 'Synthesize useful answers from shared long-term memories, including personal preferences, relationships, past decisions, changing circumstances, and connections across conversations. Ask a specific question identifying relevant people, topics, and dates when useful. Returns a generated synthesis with supporting memory references. Answer naturally and prioritize useful information over repetitive evidence qualifications. Preserve meaningful uncertainty, corrections, and contradictions without inventing missing facts. Use memory_recall when individual memory records are needed.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
 ];
@@ -211,11 +211,13 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const { input: initialPrefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config, workspace);
     let prefixInput = initialPrefixInput;
     const availableToolNames: ReadonlySet<string> = new Set(fullAvailableTools.map(tool => String(tool.name)));
-    const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
+    const savedAskContexts = store.askContexts(sessionMessages.filter(message => !fresh.some(current => current.id === message.id)).map(message => message.id));
+    // Memories already in the replayed history (formatRecall lines from earlier recalls) are not sent again.
+    const replayedMemoryIds = new Set([...JSON.stringify([...savedAskContexts.values()]).matchAll(/\[id=([0-9a-f-]{36})/g)].map(match => match[1]!));
+    const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed, replayedMemoryIds) : '';
     let stableInput: unknown[] = [...prefixInput, ...openingInput, ...compactInput];
     // Per-message context follows the history so the prefix above stays cacheable across messages.
     const askContextInput: unknown[] = memory ? [{ role: 'user', content: memory }] : [];
-    const savedAskContexts = store.askContexts(sessionMessages.filter(message => !fresh.some(current => current.id === message.id)).map(message => message.id));
     const initialGroups = await Promise.all(sessionMessages.map(async message => {
       const inputMessage = message.id === config.storedInput!.id && message.content !== prompt ? { ...message, content: prompt } : message;
       let items: unknown[];
@@ -387,7 +389,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
       let result: Awaited<ReturnType<typeof requestModel>>;
       try {
-        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher, askId: config.askId, traceId: config.traceId, requestId });
+        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs, fetcher, askId: config.askId, traceId: config.traceId, requestId });
       } catch (error) {
         store.finishModelRequest(requestId, { errorType: error instanceof Error ? error.name : 'unknown' });
         throw error;

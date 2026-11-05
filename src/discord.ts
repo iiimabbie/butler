@@ -33,7 +33,7 @@ import { logTrace, traceTextMetadata } from './model-request.js';
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
+export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number>; requestTimeoutMs: number };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsightFor?: (channelId: string | undefined) => import('./hindsight.js').Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
@@ -210,7 +210,7 @@ export class DiscordHandler {
             catch (error) { logWarn('Discord referenced message could not be retrieved', error); }
           }
           await this.runAsk(this.store, state.sessionId, userContent, {
-            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
+            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
             transcriptTimezone: runtime.settings.schedule?.timezone,
             messageSource: prepared.source,
             storedInput: stored,
@@ -522,6 +522,7 @@ export class DiscordHandler {
         model: request.job.model ?? state.model,
         maxContextTokens: config.maxContextTokens,
         modelContextTokens: config.modelContextTokens,
+        timeoutMs: config.requestTimeoutMs,
         transcription: commandRuntime.settings.transcription,
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
@@ -681,7 +682,7 @@ export class DiscordHandler {
     const attachmentToolCallIds: string[] = [];
     const openingContext = await this.sessionOpeningContext(storedInput.sessionId, input.channelId);
     await this.runAsk(this.store, storedInput.sessionId, content, {
-      baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
+      baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
       transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, openingContext, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
       hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
       googleTools: this.googleTools,
@@ -774,7 +775,7 @@ async function sendText(message: TextMessage, text: string, files?: Array<{ atta
     let stage = 'send';
     logTrace('discord_segment_start', segment);
     try {
-      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
+      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files: files.map((file, slot) => ({ ...file, name: outgoingAttachmentName(file.name, slot) })) } : {}) });
       const discordMessageId = isRecord(result) && typeof result.id === 'string' && /^[0-9]{2,32}$/.test(result.id) ? result.id : undefined;
       logTrace('discord_segment_sent', { ...segment, discordMessageId });
       stage = 'persistence_callback';
@@ -789,14 +790,29 @@ async function sendText(message: TextMessage, text: string, files?: Array<{ atta
   logTrace('discord_delivery_complete', { ...context, chunks: chunks.length });
 }
 
+// ASCII upload names with unique slots survive Discord filename normalization.
+function outgoingAttachmentName(name: string, slot: number): string {
+  return `butler-${slot}-${name.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+}
+
 async function archiveDeliveredAttachments(result: unknown, files: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {
+  if (!files.length) return [];
   if (!isRecord(result) || !isRecord(result.attachments) || typeof result.attachments.values !== 'function') return [];
   const items = [...(result.attachments.values as () => Iterable<unknown>)()];
+  if (!items.length) return [];
+  if (items.length !== files.length) {
+    logError(`Delivered Discord attachment count mismatch message=${messageId} expected=${files.length} actual=${items.length}`, new Error('Attachment count mismatch'));
+    return [];
+  }
   const delivered: import('./store.js').MessageInputAttachment[] = [];
-  for (const item of items) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
     if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') continue;
-    const file = files.find(candidate => candidate.name === item.name);
-    if (!file) continue;
+    const file = files.find((candidate, slot) => outgoingAttachmentName(candidate.name, slot) === item.name);
+    if (!file) {
+      logError(`Delivered Discord attachment has no matching upload message=${messageId} filename=${item.name}`, new Error('Attachment mapping mismatch'));
+      continue;
+    }
     const mimeType = typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream';
     let localPath = file.archivePath;
     if (!localPath) {
@@ -830,6 +846,7 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     attachmentDir: attachmentsPath,
     maxContextTokens: config.llm?.maxContextTokens ?? 150000,
     modelContextTokens: config.llm?.modelContextTokens ?? {},
+    requestTimeoutMs: config.llm?.requestTimeoutMs ?? 600_000,
   };
 }
 
