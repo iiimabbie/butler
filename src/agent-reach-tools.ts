@@ -88,7 +88,8 @@ export async function executeAgentReach(args: Record<string, unknown>, parentSig
     // The attached form keeps a value starting with "-" from being parsed as a flag.
     else argv.push(`--${param.name}=${String(value)}`);
   }
-  // End-of-options prevents positional text from becoming CLI flags.
-  argv.push(`--timeout=${Math.max(1, Math.floor((Number(timeout) - (Date.now() - started)) / 1000))}`, '--', ...positional);
+  argv.push(`--timeout=${Math.max(1, Math.floor((Number(timeout) - (Date.now() - started)) / 1000))}`);
+  // End-of-options prevents positional text from becoming CLI flags; argparse rejects a bare trailing "--".
+  if (positional.length) argv.push('--', ...positional);
   return run(argv);
 }
