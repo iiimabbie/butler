@@ -211,11 +211,13 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const { input: initialPrefixInput, tools: fullAvailableTools, googleRuntime } = await promptPrefix(config, workspace);
     let prefixInput = initialPrefixInput;
     const availableToolNames: ReadonlySet<string> = new Set(fullAvailableTools.map(tool => String(tool.name)));
-    const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed) : '';
+    const savedAskContexts = store.askContexts(sessionMessages.filter(message => !fresh.some(current => current.id === message.id)).map(message => message.id));
+    // Memories already in the replayed history (formatRecall lines from earlier recalls) are not sent again.
+    const replayedMemoryIds = new Set([...JSON.stringify([...savedAskContexts.values()]).matchAll(/\[id=([0-9a-f-]{36})/g)].map(match => match[1]!));
+    const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(fresh[0]!.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, fresh[0]!, config.onProgress, config.memoryWriteAllowed, replayedMemoryIds) : '';
     let stableInput: unknown[] = [...prefixInput, ...openingInput, ...compactInput];
     // Per-message context follows the history so the prefix above stays cacheable across messages.
     const askContextInput: unknown[] = memory ? [{ role: 'user', content: memory }] : [];
-    const savedAskContexts = store.askContexts(sessionMessages.filter(message => !fresh.some(current => current.id === message.id)).map(message => message.id));
     const initialGroups = await Promise.all(sessionMessages.map(async message => {
       const inputMessage = message.id === config.storedInput!.id && message.content !== prompt ? { ...message, content: prompt } : message;
       let items: unknown[];
