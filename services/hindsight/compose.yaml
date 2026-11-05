@@ -32,7 +32,7 @@ services:
       HINDSIGHT_API_REFLECT_LLM_REASONING_EFFORT: "medium"
       HINDSIGHT_API_REFLECT_LLM_TIMEOUT: "120"
       # Background mental-model refresh would inherit reflect's effort; keep the shared default.
-      HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT: "high"
+      HINDSIGHT_API_MENTAL_MODEL_REFRESH_LLM_REASONING_EFFORT: "medium"
       # Total reflect deadline; Butler waits 30 s longer to receive this timeout response,
       # staying under Node fetch's 300 s response-headers timeout.
       HINDSIGHT_API_REFLECT_WALL_TIMEOUT: "270"
