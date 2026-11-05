@@ -7,6 +7,7 @@ import io
 import json
 import math
 import os
+import plistlib
 import re
 import shutil
 import subprocess
@@ -47,6 +48,8 @@ class ButlerParser(FileParser):
             return await self._video(file_data, filename)
         if ext == ".zip":
             return self._zip(file_data, filename)
+        if ext == ".shortcut":
+            return self._shortcut(file_data, filename)
         if ext in _TEXT:
             try:
                 text = file_data.decode("utf-8")
@@ -61,6 +64,163 @@ class ButlerParser(FileParser):
                 raise RuntimeError("Document parser returned no content")
             return result
         raise UnsupportedFileTypeError(f"Unsupported Butler file type: {ext or '(no extension)'}")
+
+    def _shortcut(self, data: bytes, filename: str) -> str:
+        signed = data.startswith(b"AEA1")
+        if signed:
+            # Decode only: a signed envelope is not a plist, and must never be executed.
+            with tempfile.TemporaryDirectory(prefix="butler-shortcut-") as tmp:
+                source, target = Path(tmp) / "signed.shortcut", Path(tmp) / "workflow.plist"
+                source.write_bytes(data)
+                try:
+                    result = subprocess.run(
+                        ["shortcut-sign", "extract", "-i", str(source), "-o", str(target)],
+                        capture_output=True, timeout=15, check=False,
+                    )
+                    if result.returncode != 0 or not target.is_file():
+                        raise RuntimeError("Signed Apple Shortcut could not be extracted")
+                    if target.stat().st_size > 20 * 1024 * 1024:
+                        raise RuntimeError("Extracted Apple Shortcut exceeds 20 MiB")
+                    data = target.read_bytes()
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise RuntimeError("Signed Apple Shortcut extraction failed") from exc
+        try:
+            workflow = plistlib.loads(data)
+            actions = workflow.get("WFWorkflowActions") if isinstance(workflow, dict) else None
+            if not isinstance(actions, list) or any(
+                not isinstance(action, dict)
+                or not isinstance(action.get("WFWorkflowActionIdentifier"), str)
+                or not isinstance(action.get("WFWorkflowActionParameters", {}), dict)
+                for action in actions
+            ):
+                raise ValueError("Invalid workflow actions")
+        except (plistlib.InvalidFileException, ValueError, TypeError, OverflowError) as exc:
+            raise RuntimeError("Shortcut does not contain a valid Apple workflow property list") from exc
+
+        # Stable step references replace identifiers only in reference fields, never literals.
+        refs = {}
+        groups = {}
+        for step, action in enumerate(actions, 1):
+            params = action.get("WFWorkflowActionParameters", {})
+            if isinstance(params.get("UUID"), str):
+                refs[params["UUID"]] = step
+            group = params.get("GroupingIdentifier")
+            if isinstance(group, str) and group not in groups:
+                groups[group] = f"g{len(groups) + 1}"
+
+        aliases = {"WFSerializationType": "serialization", "WFTextTokenString": "token_string",
+                   "WFTextTokenAttachment": "token_attachment", "WFWorkflowActionParameters": "parameters",
+                   "WFDictionaryFieldValueItems": "dictionary_items", "WFItemType": "item_type",
+                   "WFKey": "key", "WFValue": "value", "WFInput": "input",
+                   "WFTextActionText": "text", "WFControlFlowMode": "flow",
+                   "GroupingIdentifier": "group", "OutputUUID": "output_step"}
+
+        def compact(value):
+            if isinstance(value, bytes):
+                return {"omitted_binary_bytes": len(value)}
+            if isinstance(value, list):
+                return [compact(item) for item in value]
+            if isinstance(value, dict):
+                result = {}
+                resolved_output = isinstance(value.get("OutputUUID"), str) and value["OutputUUID"] in refs
+                for key, item in value.items():
+                    if key == "OutputName" and resolved_output:
+                        continue  # Display label is redundant with the referenced action.
+                    out_key = aliases.get(key, key)
+                    if out_key != key and out_key in value:
+                        out_key = key
+                    if key == "OutputUUID" and isinstance(item, str) and item in refs:
+                        result[out_key] = f"@{refs[item]}"
+                    elif key == "GroupingIdentifier" and isinstance(item, str) and item in groups:
+                        result[out_key] = groups[item]
+                    else:
+                        result[out_key] = compact(item)
+                return result
+            # Dates and plist UIDs are rare, but must not break serialization.
+            if hasattr(value, "isoformat"):
+                return {"plist_date": value.isoformat()}
+            if isinstance(value, plistlib.UID):
+                return {"plist_uid": value.data}
+            return value
+
+        rendered = []
+        for step, action in enumerate(actions, 1):
+            params = {key: value for key, value in action.get("WFWorkflowActionParameters", {}).items() if key != "UUID"}
+            row = [f"@{step}", action["WFWorkflowActionIdentifier"].removeprefix("is.workflow.actions."), compact(params)]
+            extra = {key: compact(value) for key, value in action.items() if key not in ("WFWorkflowActionIdentifier", "WFWorkflowActionParameters")}
+            if extra:
+                row.append(extra)
+            rendered.append(row)
+
+        # Drop presentation/editor metadata, retaining input/output contracts, triggers and unknown fields.
+        omitted = {"WFWorkflowActions", "WFWorkflowIcon", "WFWorkflowClientVersion", "WFWorkflowMinimumClientVersion", "WFWorkflowMinimumClientVersionString", "WFQuickActionSurfaces"}
+        metadata = compact({key: value for key, value in workflow.items() if key not in omitted})
+        header = {"shortcut": filename, "signed_envelope": signed, "workflow": metadata,
+                  "key_aliases": {short: long for long, short in aliases.items()}, "format": "actions=[step,id,parameters,optional_extra]; ids omit is.workflow.actions.; OutputUUID=@step; ControlFlowMode 0=start,1=branch,2=end; binary omitted, not executed"}
+        dump = lambda value: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        whole = {**header, "actions": rendered}
+        if len(dump(whole)) <= 8000:
+            return dump(whole)
+
+        # Split only between complete top-level control-flow groups. The line is a
+        # structured JSONL unit, so HS retains it whole within its configured budget.
+        blocks, current, active = [], [], []
+        for row, action in zip(rendered, actions):
+            params = action.get("WFWorkflowActionParameters", {})
+            group, mode = params.get("GroupingIdentifier"), params.get("WFControlFlowMode")
+            current.append(row)
+            if group is not None and mode == 0:
+                active.append(group)
+            elif group is not None and mode == 2:
+                if not active or active.pop() != group:
+                    return dump({**whole, "warning": "Unbalanced control flow; HS may split oversized content"})
+            if not active:
+                blocks.append(current)
+                current = []
+        if current:
+            blocks.append(current)
+
+        def references(value):
+            if isinstance(value, dict):
+                found = {refs[value["OutputUUID"]]} if isinstance(value.get("OutputUUID"), str) and value["OutputUUID"] in refs else set()
+                for item in value.values():
+                    found.update(references(item))
+                return found
+            if isinstance(value, list):
+                return set().union(*(references(item) for item in value)) if value else set()
+            return set()
+
+        def unit(rows):
+            first = int(rows[0][0][1:])
+            pending, needed = set(), set()
+            for row in rows:
+                pending.update(references(actions[int(row[0][1:]) - 1]))
+            # Named variables can reference prior assignments without an OutputUUID.
+            for step, action in enumerate(actions[:first - 1], 1):
+                if action["WFWorkflowActionIdentifier"] == "is.workflow.actions.setvariable":
+                    pending.add(step)
+            while pending:
+                step = pending.pop()
+                if step >= first or step in needed:
+                    continue
+                needed.add(step)
+                pending.update(references(actions[step - 1]))
+            return {**header, "dependencies": [rendered[step - 1] for step in sorted(needed)], "actions": rows}
+
+        lines, packed = [], []
+        for block in blocks:
+            candidate = packed + block
+            if packed and len(dump(unit(candidate))) > 8000:
+                lines.append(unit(packed))
+                packed = block
+            else:
+                packed = candidate
+        if packed:
+            lines.append(unit(packed))
+        for line in lines:
+            if len(dump(line)) > 8000:
+                line["warning"] = "Complete control block/dependencies exceed 8000 chars; HS may split this unit"
+        return "\n".join(dump(line) for line in lines) if lines else dump(whole)
 
     async def _vision(self, image_bytes: bytes, prompt: str) -> str:
         from openai import AsyncOpenAI

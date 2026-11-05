@@ -1,8 +1,10 @@
 FROM ghcr.io/vectorize-io/hindsight:1.0.0@sha256:a88678c038b0e4340822b02a5efc566c56d8176b5bffa731bc433fd37f978e4c
 
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libplist-2.0-4 && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir --target=/app/api/.venv/lib/python3.11/site-packages PyMuPDF==1.26.7
+# Pinned upstream extractor for AEA-signed Apple Shortcuts (never executes workflows).
+RUN python -c "import urllib.request,hashlib,pathlib; p=pathlib.Path('/usr/local/bin/shortcut-sign'); b=urllib.request.urlopen('https://github.com/0xilis/shortcut-sign/releases/download/v1.0.0-beta.5/shortcut-sign-linux-x86_64').read(); assert hashlib.sha256(b).hexdigest() == '5d7eccd78b28940d0108f827d442fb5275d00191fc29f2907e9260500b743940'; p.write_bytes(b); p.chmod(0o755)"
 USER hindsight
 
 COPY --chown=hindsight:hindsight butler-file-parser.py /tmp/butler.py
