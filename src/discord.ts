@@ -774,7 +774,7 @@ async function sendText(message: TextMessage, text: string, files?: Array<{ atta
     let stage = 'send';
     logTrace('discord_segment_start', segment);
     try {
-      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files } : {}) });
+      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files: files.map((file, slot) => ({ ...file, name: outgoingAttachmentName(file.name, slot) })) } : {}) });
       const discordMessageId = isRecord(result) && typeof result.id === 'string' && /^[0-9]{2,32}$/.test(result.id) ? result.id : undefined;
       logTrace('discord_segment_sent', { ...segment, discordMessageId });
       stage = 'persistence_callback';
@@ -789,14 +789,29 @@ async function sendText(message: TextMessage, text: string, files?: Array<{ atta
   logTrace('discord_delivery_complete', { ...context, chunks: chunks.length });
 }
 
+// ASCII upload names with unique slots survive Discord filename normalization.
+function outgoingAttachmentName(name: string, slot: number): string {
+  return `butler-${slot}-${name.replace(/[^A-Za-z0-9._-]/g, '_')}`;
+}
+
 async function archiveDeliveredAttachments(result: unknown, files: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {
+  if (!files.length) return [];
   if (!isRecord(result) || !isRecord(result.attachments) || typeof result.attachments.values !== 'function') return [];
   const items = [...(result.attachments.values as () => Iterable<unknown>)()];
+  if (!items.length) return [];
+  if (items.length !== files.length) {
+    logError(`Delivered Discord attachment count mismatch message=${messageId} expected=${files.length} actual=${items.length}`, new Error('Attachment count mismatch'));
+    return [];
+  }
   const delivered: import('./store.js').MessageInputAttachment[] = [];
-  for (const item of items) {
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index];
     if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') continue;
-    const file = files.find(candidate => candidate.name === item.name);
-    if (!file) continue;
+    const file = files.find((candidate, slot) => outgoingAttachmentName(candidate.name, slot) === item.name);
+    if (!file) {
+      logError(`Delivered Discord attachment has no matching upload message=${messageId} filename=${item.name}`, new Error('Attachment mapping mismatch'));
+      continue;
+    }
     const mimeType = typeof item.contentType === 'string' ? item.contentType : 'application/octet-stream';
     let localPath = file.archivePath;
     if (!localPath) {
