@@ -42,7 +42,7 @@ export interface AgentConfig {
   maxContextTokens?: number;
   modelContextTokens?: Record<string, number>;
   fetcher?: typeof fetch;
-  timeoutMs?: number;
+  timeoutMs: number;
   signal?: AbortSignal;
   askId?: string; traceId?: string;
   consumeSteer?: () => { content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined | Promise<{ content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined>;
@@ -389,7 +389,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
       let result: Awaited<ReturnType<typeof requestModel>>;
       try {
-        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs ?? 180_000, fetcher, askId: config.askId, traceId: config.traceId, requestId });
+        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs, fetcher, askId: config.askId, traceId: config.traceId, requestId });
       } catch (error) {
         store.finishModelRequest(requestId, { errorType: error instanceof Error ? error.name : 'unknown' });
         throw error;

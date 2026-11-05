@@ -33,7 +33,7 @@ import { logTrace, traceTextMetadata } from './model-request.js';
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
-export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number> };
+export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number>; requestTimeoutMs: number };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsightFor?: (channelId: string | undefined) => import('./hindsight.js').Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 export type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('./store.js').ForwardedMessage; channelId: string; parentChannelId?: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
@@ -210,7 +210,7 @@ export class DiscordHandler {
             catch (error) { logWarn('Discord referenced message could not be retrieved', error); }
           }
           await this.runAsk(this.store, state.sessionId, userContent, {
-            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
+            baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
             transcriptTimezone: runtime.settings.schedule?.timezone,
             messageSource: prepared.source,
             storedInput: stored,
@@ -522,6 +522,7 @@ export class DiscordHandler {
         model: request.job.model ?? state.model,
         maxContextTokens: config.maxContextTokens,
         modelContextTokens: config.modelContextTokens,
+        timeoutMs: config.requestTimeoutMs,
         transcription: commandRuntime.settings.transcription,
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
@@ -681,7 +682,7 @@ export class DiscordHandler {
     const attachmentToolCallIds: string[] = [];
     const openingContext = await this.sessionOpeningContext(storedInput.sessionId, input.channelId);
     await this.runAsk(this.store, storedInput.sessionId, content, {
-      baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens,
+      baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
       transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, openingContext, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
       hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
       googleTools: this.googleTools,
@@ -845,6 +846,7 @@ export function readDiscordConfig(config: ButlerConfig): DiscordConfig {
     attachmentDir: attachmentsPath,
     maxContextTokens: config.llm?.maxContextTokens ?? 150000,
     modelContextTokens: config.llm?.modelContextTokens ?? {},
+    requestTimeoutMs: config.llm?.requestTimeoutMs ?? 600_000,
   };
 }
 
