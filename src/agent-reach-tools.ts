@@ -58,6 +58,7 @@ export async function executeAgentReach(args: Record<string, unknown>, parentSig
     if (result?.ok === true) return result;
     // Never include raw stderr/environment in errors; only the CLI's structured error.
     const error = result?.error;
+    if (error?.code === 'BAD_INPUT') throw new ToolUsageError(`Agent Reach BAD_INPUT: ${String(error.message ?? '').slice(0, 500)}`);
     if (typeof error?.code === 'string') throw new Error(`Agent Reach ${error.code}: ${String(error.message ?? '').slice(0, 500)}`);
     throw new Error('Agent Reach failed (missing executable, invalid output, output limit or process failure); inspect local installation');
   };
@@ -87,7 +88,8 @@ export async function executeAgentReach(args: Record<string, unknown>, parentSig
     // The attached form keeps a value starting with "-" from being parsed as a flag.
     else argv.push(`--${param.name}=${String(value)}`);
   }
-  // End-of-options prevents positional text from becoming CLI flags.
-  argv.push(`--timeout=${Math.max(1, Math.floor((Number(timeout) - (Date.now() - started)) / 1000))}`, '--', ...positional);
+  argv.push(`--timeout=${Math.max(1, Math.floor((Number(timeout) - (Date.now() - started)) / 1000))}`);
+  // End-of-options prevents positional text from becoming CLI flags; argparse rejects a bare trailing "--".
+  if (positional.length) argv.push('--', ...positional);
   return run(argv);
 }

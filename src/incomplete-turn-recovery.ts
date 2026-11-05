@@ -28,7 +28,7 @@ export class IncompleteTurnRecovery {
       else this.unsafe = true;
     }
     if (effectful || processTool) {
-      if ('error' in output || output.ok === false || output.accepted === false || output.timed_out === true || output.stopped === true ||
+      if ((output.error !== undefined && output.error !== null) || output.ok === false || output.accepted === false || output.timed_out === true || output.stopped === true ||
           (typeof output.status === 'string' && UNCERTAIN_STATUSES.has(output.status))) this.unsafe = true;
       // Background delegates are checked against the live coordinator at decision time.
       // Deployment acceptance deliberately waits for ask completion, so it may be
