@@ -45,11 +45,6 @@ const imageModelInflight = new Map<string, Promise<string[]>>();
 const MODEL_TTL = 10 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
-// The notification channel uses one fixed tool set for every run so its session prefix stays cacheable.
-const NOTIFICATION_CHANNEL_DENIED_ACTIONS: Readonly<Record<string, readonly string[]>> = { google_gmail_manage: ['send'], google_calendar_manage: ['delete'], google_tasks_manage: ['delete'] };
-// Ledger and Google for bookkeeping; Discord messages and handoffs for owner-directed communication, plus conversation lookup.
-const NOTIFICATION_CHANNEL_EXTRA_TOOLS: ReadonlySet<string> = new Set(['code_execute', 'discord_read', 'discord_react', 'discord_message', 'discord_handoff', 'memory_recall', 'memory_reflect']);
-const notificationChannelTool = (name: string, action?: string): boolean => name.startsWith('hledger_') || NOTIFICATION_CHANNEL_EXTRA_TOOLS.has(name) || (name.startsWith('google_') && (!action || !NOTIFICATION_CHANNEL_DENIED_ACTIONS[name]?.includes(action)));
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
 
 export class DiscordHandler {
@@ -226,7 +221,6 @@ export class DiscordHandler {
             localTools: this.localTools,
             webTools: runtime.webTools,
             hledgerTools: runtime.hledgerTools,
-            toolFilter: this.toolFilter(message.channelId),
             weatherTools: this.weatherTools,
             memoryWriteAllowed: () => this.store.memoryWriteAllowed(message.channelId),
             skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE),
@@ -494,9 +488,6 @@ export class DiscordHandler {
   }
 
   private scheduleTools(creatorId: string, defaultTimezone: string) { return this.store ? createScheduleToolRuntime({ store: this.store, creatorId, defaultTimezone, isOutputChannelAllowed: async id => Boolean(await this.outputChannel(id)) }) : undefined; }
-  private toolFilter(channelId: string, notification = false): ((name: string) => boolean) | undefined {
-    return notification || channelId === this.getRuntime().settings.discord?.notificationChannelId ? notificationChannelTool : undefined;
-  }
   private imageTools(attachmentFiles: Array<{ attachment: string; name: string }>, channelId: string, image: ButlerConfig['image'], attachmentDir: string) { return image ? createImageToolRuntime({ config: { ...image, model: this.store.effectiveChannelImageModel(channelId) ?? image.model }, attachmentDir, attachmentFiles }) : undefined; }
 
   private async runScheduled(request: ScheduledTaskRequest): Promise<void> {
@@ -546,7 +537,6 @@ export class DiscordHandler {
         workspaceDirectory: DEFAULT_WORKSPACE,
         messageSource: { sourceKind: 'scheduled_input', channelId: request.outputChannelId, eventTime: request.run.scheduledAt },
         discordContext: { channelId: request.outputChannelId },
-        toolFilter: this.toolFilter(request.outputChannelId),
         onResponseReady: async text => {
           if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
             logInfo('no_reply', { text, replyTo: { channelId: request.outputChannelId, inputId: storedInput.id } });
@@ -690,7 +680,6 @@ export class DiscordHandler {
       memoryWriteAllowed: () => this.store.memoryWriteAllowed(input.channelId),
       skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(input.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
       imageTools: this.imageTools(attachmentFiles, input.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
-      toolFilter: this.toolFilter(input.channelId, notificationOrigin),
       subagentCoordinator: this.subagentCoordinator, subagentOrigin: input, subagentEvent: storedInput.source.sourceKind === 'subagent_event',
       discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: input.outputChannelId, requesterId: input.requesterId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: storedInput.sessionId, memoryOriginChannelId: input.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
       onResponseReady: async text => {
