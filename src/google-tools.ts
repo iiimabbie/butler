@@ -264,7 +264,11 @@ function decodeMimePart(part: any): string {
   try { decoder = new TextDecoder(charset, { fatal: true }); }
   catch { throw new Error('Gmail MIME charset is not supported; message body was not decoded'); }
   try { return decoder.decode(bytes); }
-  catch { throw new Error('Gmail MIME body is invalid for its declared charset; message body was not decoded'); }
+  catch {
+    // Gmail may return UTF-8 body bytes while retaining a legacy charset header.
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { throw new Error('Gmail MIME body is invalid for its declared charset and UTF-8; message body was not decoded'); }
+  }
 }
 function attachmentMetadata(part: any): unknown[] {
   const out: unknown[] = [];
