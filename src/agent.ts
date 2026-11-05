@@ -534,7 +534,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       };
       const appendOutput = async (call: FunctionCall, output: unknown) => {
         recovery.recordToolResult(call.name, output);
-        const failed = isRecord(output) && 'error' in output;
+        const failed = hasToolError(output);
         const serialized = JSON.stringify(output);
         if (call.name === 'image_save' && isRecord(output) && !failed) imageSaveSucceeded = true;
         input.push({ type: 'function_call_output', call_id: call.call_id, output: serialized });
@@ -700,7 +700,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   // Persistence failures are intentionally outside the tool execution catch. Do not replay a completed tool.
   try { store.finishTool(id, 'completed', result); }
   catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { auditPersistenceFailure: true }); }
-  const displayedError = isRecord(result) && 'error' in result ? errorMessage(result.error) : undefined;
+  const displayedError = hasToolError(result) ? errorMessage(result.error) : undefined;
   emitProgress(config, { type: 'tool_end', callId: call.call_id, toolName: call.name, status: displayedError ? 'failed' : 'completed', ...(displayedError ? { error: displayedError } : {}) });
   return { tool_history_id: id, ...asOutput(result) };
 }
@@ -836,6 +836,11 @@ function responseText(body: ResponsesBody): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Tools such as Agent Reach return `error: null` on success; only a non-null error marks a failure. */
+function hasToolError(output: unknown): output is Record<string, unknown> & { error: unknown } {
+  return isRecord(output) && output.error !== undefined && output.error !== null;
 }
 
 function errorMessage(error: unknown): string {
