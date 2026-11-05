@@ -22,6 +22,10 @@ const ALLOWED_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const MIME_EXTENSIONS: Record<string, string> = { '.pdf':'application/pdf','.doc':'application/msword','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.docm':'application/vnd.ms-word.document.macroEnabled.12','.xls':'application/vnd.ms-excel','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.xlsm':'application/vnd.ms-excel.sheet.macroEnabled.12','.ppt':'application/vnd.ms-powerpoint','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.odt':'application/vnd.oasis.opendocument.text','.ods':'application/vnd.oasis.opendocument.spreadsheet','.odp':'application/vnd.oasis.opendocument.presentation','.rtf':'application/rtf','.txt':'text/plain','.csv':'text/csv','.tsv':'text/tab-separated-values','.json':'application/json','.xml':'application/xml','.html':'text/html','.htm':'text/html','.md':'text/markdown','.c':'text/plain','.h':'text/plain','.cc':'text/plain','.cpp':'text/plain','.hpp':'text/plain','.cs':'text/plain','.java':'text/plain','.kt':'text/plain','.kts':'text/plain','.go':'text/plain','.rs':'text/plain','.py':'text/plain','.pyw':'text/plain','.js':'text/javascript','.jsx':'text/javascript','.mjs':'text/javascript','.cjs':'text/javascript','.ts':'text/typescript','.tsx':'text/typescript','.mts':'text/typescript','.cts':'text/typescript','.sh':'text/x-shellscript','.bash':'text/x-shellscript','.zsh':'text/x-shellscript','.sql':'text/plain','.yaml':'text/yaml','.yml':'text/yaml','.toml':'text/plain','.ini':'text/plain','.css':'text/css','.scss':'text/plain','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.heic':'image/heic','.heif':'image/heif','.mp3':'audio/mpeg','.wav':'audio/wav','.m4a':'audio/mp4','.ogg':'audio/ogg','.opus':'audio/opus','.flac':'audio/flac','.mp4':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.mkv':'video/x-matroska','.avi':'video/x-msvideo' };
 export type InputAttachment = MessageInputAttachment & { localPath?: string };
 
+export function imageInputContent(bytes: Buffer, mimeType: string) {
+  return { type: 'input_image', image_url: `data:${mimeType};base64,${bytes.toString('base64')}` };
+}
+
 export async function archiveOutgoingAttachment(sourcePath: string, filename: string, attachmentDir: string, mimeType?: string): Promise<{ localPath: string; mimeType: string }> {
   let fd: number | undefined;
   try {
@@ -135,7 +139,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       content.push({ type: 'input_text', text: `[音訊附件 ${attachment.filename}；${unavailable}${transcript}]` });
       continue;
     }
-    let data: string;
+    let raw: Buffer;
     let inputMimeType = safeMime(attachment.mimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
     try {
       const path = safeLocalPath(attachment.localPath, attachmentDir);
@@ -143,7 +147,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       try {
         const stat = fstatSync(fd);
         if (!stat.isFile() || stat.size > MAX_ATTACHMENT_BYTES) throw new Error();
-        const raw = readFileSync(fd);
+        raw = readFileSync(fd);
         if (raw.length !== stat.size) throw new Error();
         if (isOrdinaryZip(attachment, raw)) {
           const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/read-safe-zip.py');
@@ -170,17 +174,16 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
           content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；無法辨識檔案格式（application/octet-stream），不支援作為模型檔案輸入，原檔已保留，未上傳；不能據此聲稱已讀取內容。]` });
           continue;
         }
-        data = raw.toString('base64');
       } finally { closeSync(fd); }
     } catch (error) {
       const detail = error instanceof AttachmentImageTypeConflictError ? `檔案簽章與來源名稱/MIME 不一致：${error.message}` : '附件目前不可用；最後已知位置無法讀取，可能已搬移或刪除。';
       content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；${detail}]` });
       continue;
     }
-    if (inputMimeType.startsWith('image/')) content.push({ type: 'input_image', image_url: `data:${inputMimeType};base64,${data}` });
+    if (inputMimeType.startsWith('image/')) content.push(imageInputContent(raw, inputMimeType));
     else {
       const fileMimeType = safeMime(inputMimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
-      content.push({ type: 'input_file', filename: attachment.filename, file_data: `data:${fileMimeType};base64,${data}` });
+      content.push({ type: 'input_file', filename: attachment.filename, file_data: `data:${fileMimeType};base64,${raw.toString('base64')}` });
     }
   }
   return content;
