@@ -2,7 +2,8 @@ import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFi
 import { writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import type { MessageInputAttachment, StoredMessage } from './store.js';
 import { transcribeAudio, type AudioTranscriptionConfig } from './audio-transcription.js';
@@ -22,8 +23,34 @@ const ALLOWED_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const MIME_EXTENSIONS: Record<string, string> = { '.pdf':'application/pdf','.doc':'application/msword','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.docm':'application/vnd.ms-word.document.macroEnabled.12','.xls':'application/vnd.ms-excel','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.xlsm':'application/vnd.ms-excel.sheet.macroEnabled.12','.ppt':'application/vnd.ms-powerpoint','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.odt':'application/vnd.oasis.opendocument.text','.ods':'application/vnd.oasis.opendocument.spreadsheet','.odp':'application/vnd.oasis.opendocument.presentation','.rtf':'application/rtf','.txt':'text/plain','.csv':'text/csv','.tsv':'text/tab-separated-values','.json':'application/json','.xml':'application/xml','.html':'text/html','.htm':'text/html','.md':'text/markdown','.c':'text/plain','.h':'text/plain','.cc':'text/plain','.cpp':'text/plain','.hpp':'text/plain','.cs':'text/plain','.java':'text/plain','.kt':'text/plain','.kts':'text/plain','.go':'text/plain','.rs':'text/plain','.py':'text/plain','.pyw':'text/plain','.js':'text/javascript','.jsx':'text/javascript','.mjs':'text/javascript','.cjs':'text/javascript','.ts':'text/typescript','.tsx':'text/typescript','.mts':'text/typescript','.cts':'text/typescript','.sh':'text/x-shellscript','.bash':'text/x-shellscript','.zsh':'text/x-shellscript','.sql':'text/plain','.yaml':'text/yaml','.yml':'text/yaml','.toml':'text/plain','.ini':'text/plain','.css':'text/css','.scss':'text/plain','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.heic':'image/heic','.heif':'image/heif','.mp3':'audio/mpeg','.wav':'audio/wav','.m4a':'audio/mp4','.ogg':'audio/ogg','.opus':'audio/opus','.flac':'audio/flac','.mp4':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.mkv':'video/x-matroska','.avi':'video/x-msvideo' };
 export type InputAttachment = MessageInputAttachment & { localPath?: string };
 
-export function imageInputContent(bytes: Buffer, mimeType: string) {
-  return { type: 'input_image', image_url: `data:${mimeType};base64,${bytes.toString('base64')}` };
+/** Longest edge of images sent to the model; image tokens scale with pixel count (same bound as umiro-agent-v1). */
+export const MODEL_IMAGE_EDGE = 768;
+const execFileAsync = promisify(execFile);
+
+async function probeImageSize(path: string): Promise<{ width: number; height: number } | undefined> {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x', path], { timeout: 10_000, encoding: 'utf8' });
+    const [width, height] = stdout.trim().split('x').map(Number);
+    return width! > 0 && height! > 0 ? { width: width!, height: height! } : undefined;
+  } catch { return undefined; }
+}
+
+/**
+ * Model input for an image file. Images whose longest edge exceeds MODEL_IMAGE_EDGE, or whose
+ * bytes were not read because they exceed MAX_ATTACHMENT_BYTES, are re-encoded as JPEG with the
+ * aspect ratio kept. If downscaling fails, the original bytes are sent when available.
+ */
+export async function modelImageInput(path: string, mimeType: string, raw?: Buffer): Promise<{ content: { type: 'input_image'; image_url: string }; mimeType: string; bytes: number; downscaled: boolean }> {
+  const encode = (bytes: Buffer, mime: string, downscaled: boolean) => ({ content: { type: 'input_image' as const, image_url: `data:${mime};base64,${bytes.toString('base64')}` }, mimeType: mime, bytes: bytes.length, downscaled });
+  const size = raw ? await probeImageSize(path) : undefined;
+  if (raw && (!size || Math.max(size.width, size.height) <= MODEL_IMAGE_EDGE)) return encode(raw, mimeType, false);
+  const scale = `scale='min(${MODEL_IMAGE_EDGE},iw)':'min(${MODEL_IMAGE_EDGE},ih)':force_original_aspect_ratio=decrease`;
+  try {
+    const { stdout } = await execFileAsync('ffmpeg', ['-nostdin', '-v', 'error', '-i', path, '-frames:v', '1', '-vf', scale, '-q:v', '3', '-f', 'image2pipe', '-c:v', 'mjpeg', 'pipe:1'], { encoding: 'buffer', maxBuffer: MAX_ATTACHMENT_BYTES, timeout: 30_000 });
+    if (stdout.length) return encode(stdout, 'image/jpeg', true);
+  } catch { /* fall through */ }
+  if (raw) return encode(raw, mimeType, false);
+  throw new Error('image could not be downscaled');
 }
 
 export async function archiveOutgoingAttachment(sourcePath: string, filename: string, attachmentDir: string, mimeType?: string): Promise<{ localPath: string; mimeType: string }> {
@@ -140,9 +167,10 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       continue;
     }
     let raw: Buffer;
+    let localPath: string;
     let inputMimeType = safeMime(attachment.mimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
     try {
-      const path = safeLocalPath(attachment.localPath, attachmentDir);
+      const path = localPath = safeLocalPath(attachment.localPath, attachmentDir);
       const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
       try {
         const stat = fstatSync(fd);
@@ -180,7 +208,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
       content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；${detail}]` });
       continue;
     }
-    if (inputMimeType.startsWith('image/')) content.push(imageInputContent(raw, inputMimeType));
+    if (inputMimeType.startsWith('image/')) content.push((await modelImageInput(localPath, inputMimeType, raw)).content);
     else {
       const fileMimeType = safeMime(inputMimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
       content.push({ type: 'input_file', filename: attachment.filename, file_data: `data:${fileMimeType};base64,${raw.toString('base64')}` });
