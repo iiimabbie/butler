@@ -87,6 +87,7 @@ export class DiscordHandler {
 
   // Deploy and restart outcomes are posted by Butler itself, which never reads its own Discord messages; this puts them in the channel session.
   recordRuntimeNotice(channelId: string, text: string): void {
+    if (!this.store.isTrackedChannel(channelId)) return;
     try {
       const config = this.getRuntime().discord;
       const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
