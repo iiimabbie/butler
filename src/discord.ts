@@ -514,6 +514,7 @@ export class DiscordHandler {
         maxContextTokens: config.maxContextTokens,
         modelContextTokens: config.modelContextTokens,
         timeoutMs: config.requestTimeoutMs,
+        attachmentDir: config.attachmentDir,
         transcription: commandRuntime.settings.transcription,
         transcriptTimezone: commandRuntime.settings.schedule?.timezone,
         storedInput,
@@ -673,7 +674,7 @@ export class DiscordHandler {
     const openingContext = await this.sessionOpeningContext(storedInput.sessionId, input.channelId);
     await this.runAsk(this.store, storedInput.sessionId, content, {
       baseUrl: config.baseUrl, apiKey: config.apiKey, model: state.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
-      transcriptTimezone: runtime.settings.schedule?.timezone, transcription: runtime.settings.transcription, storedInput, openingContext, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
+      transcriptTimezone: runtime.settings.schedule?.timezone, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, storedInput, openingContext, workspaceDirectory: DEFAULT_WORKSPACE, reasoningEffort: this.store.effectiveChannelReasoningEffort(input.channelId), messageSource: storedInput.source,
       hindsight: runtime.hindsightFor?.(input.channelId), localTools: this.localTools, webTools: runtime.webTools, weatherTools: this.weatherTools,
       googleTools: this.googleTools,
       hledgerTools: runtime.hledgerTools,
