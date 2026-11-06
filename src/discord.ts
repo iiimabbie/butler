@@ -229,7 +229,7 @@ export class DiscordHandler {
             reasoningEffort: this.store.effectiveChannelReasoningEffort(message.channelId),
             onProgress: event => progress?.event(event),
             workspaceDirectory: DEFAULT_WORKSPACE,
-            subagent: runtime.settings.subagent,
+            subagent: this.channelSubagent(message.channelId, runtime.settings.subagent),
             subagentCoordinator: this.subagentCoordinator,
             subagentOrigin: { channelId: message.channelId, outputChannelId: message.channelId, entryKind: 'normal', requesterId: message.authorId, triggerInputId: stored.id } as import('./subagent-coordinator.js').SubagentSnapshot['origin'],
             discordContext: { channelId: message.channelId, messageId: message.messageId, requesterId: message.authorId },
@@ -662,6 +662,10 @@ export class DiscordHandler {
     void this.enqueue(channelId, work).catch(error => logError(`Could not enqueue notification id=${id}`, error, { mention: !isHttp429(error) }));
   }
 
+  private channelSubagent(channelId: string, subagent: import('./config.js').ButlerConfig['subagent']): import('./config.js').ButlerConfig['subagent'] {
+    return this.store.channelSubagentTools(channelId) ? subagent : { toolsEnabled: false };
+  }
+
   private async runChannelInput(storedInput: StoredMessage, input: NonNullable<import('./subagent-coordinator.js').SubagentSnapshot['origin']>,
     target: { send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> }): Promise<void> {
     const runtime = this.getRuntime();
@@ -680,7 +684,7 @@ export class DiscordHandler {
       hledgerTools: runtime.hledgerTools,
       memoryWriteAllowed: () => this.store.memoryWriteAllowed(input.channelId),
       skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(input.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
-      imageTools: this.imageTools(attachmentFiles, input.channelId, runtime.settings.image, config.attachmentDir), subagent: runtime.settings.subagent,
+      imageTools: this.imageTools(attachmentFiles, input.channelId, runtime.settings.image, config.attachmentDir), subagent: this.channelSubagent(input.channelId, runtime.settings.subagent),
       subagentCoordinator: this.subagentCoordinator, subagentOrigin: input, subagentEvent: storedInput.source.sourceKind === 'subagent_event',
       discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: input.outputChannelId, requesterId: input.requesterId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: storedInput.sessionId, memoryOriginChannelId: input.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
       onResponseReady: async text => {

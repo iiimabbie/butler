@@ -812,6 +812,7 @@ export class Store implements SchedulerStore {
   channelReasoningEffort(channelId:string):ReasoningEffort|undefined { return (this.settings.current().channels[channelId]?.effort as ReasoningEffort|null|undefined)??undefined; }
   setChannelReasoningEffort(channelId:string,effort:ReasoningEffort|undefined):void { this.settings.patchChannel(channelId,{effort}); }
   channelImageModel(channelId:string):string|undefined { return (this.settings.current().channels[channelId]?.imageModel as string|null|undefined)??undefined; }
+  channelSubagentTools(channelId:string):boolean { return this.settings.current().channels[channelId]?.subagentTools !== false; }
   channelMemoryBank(channelId:string):string|undefined { return (this.settings.current().channels[channelId]?.memoryBank as string|null|undefined)??undefined; }
   setChannelImageModel(channelId:string,model:string|undefined):void { this.settings.patchChannel(channelId,{imageModel:model}); }
 
