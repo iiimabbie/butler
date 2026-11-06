@@ -212,7 +212,8 @@ export class Store implements SchedulerStore {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       if (source.discordMessageId) {
-        const existing = this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=?').get(source.discordMessageId) as { message_id: string } | undefined;
+        // Butler's own replies keep their Discord IDs on outgoing segments, so a later fetch of one must not store a second copy.
+        const existing = this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(source.discordMessageId, source.discordMessageId) as { message_id: string } | undefined;
         if (existing) { this.db.exec('COMMIT'); return { message: this.messagesWithSourcesForId(existing.message_id), created: false }; }
       }
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
