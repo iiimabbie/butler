@@ -32,7 +32,7 @@ export class LocalProcesses {
     const id = randomUUID();
     const file = join(this.directory, `${id}.jsonl`);
     writeFileSync(file, '', { mode: 0o600 });
-    const child = spawn('/bin/sh', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('/bin/bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     let finish!: () => void;
     const job: Job = { id, cwd, file, child, records: 0, bytes: 0, state: 'running', exit_code: null, signal: null, timed_out: false, output_limited: false, stopped: false, done: new Promise(resolve => { finish = resolve; }) };
     this.jobs.set(id, job);
