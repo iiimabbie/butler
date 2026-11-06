@@ -30,6 +30,7 @@ Apply these guidelines when implementing or reviewing changes, including the sel
 - The project tree holds only source, `.data/` runtime state, `workspace/`, and `backups/`. One-off scripts, scratch output, exports and smoke-check files go to `/tmp` and are deleted when the task ends; do not leave them in the project or `workspace/`.
 - Every backup goes under `backups/<source>/` (for example `backups/hindsight/`, `backups/skills-trash/`, `backups/memory-curation/`). Do not create backup files or `backups/` directories anywhere else.
 - Anything that writes files automatically must bound them (retention count or age) in the same change that introduces it.
+- Check with `node scripts/tidy-check.mjs` after work that generates files; procedures are in `docs/project-tidy.md`.
 
 ### Verification
 

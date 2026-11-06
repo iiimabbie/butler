@@ -66,6 +66,11 @@ export interface ToolRecord {
   finished_at: string | null;
 }
 
+export interface ToolCallRetentionResult { deleted: number; compacted: number; }
+
+const RECALL_TOOLS = ['hindsight_recall', 'memory_recall', 'memory_reflect', 'hindsight_reflect']; // Must match TOOLS in hindsight-curation/bin/recalled.py.
+const RECALL_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
@@ -629,6 +634,49 @@ export class Store implements SchedulerStore {
     const update = this.db.prepare('UPDATE tool_calls SET status=?,result=?,finished_at=? WHERE id=?')
       .run(status, JSON.stringify(result), new Date().toISOString(), id);
     if (Number(update.changes) !== 1) throw new Error(`Could not persist tool result for ${id}`);
+  }
+
+  retainToolCalls(now = new Date()): ToolCallRetentionResult {
+    const fullCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const recallCutoff = new Date(now.getTime() - 100 * 24 * 60 * 60 * 1000).toISOString();
+    let deleted = 0;
+    let compacted = 0;
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const deleteFull = this.db.prepare(`DELETE FROM tool_calls WHERE created_at < ? AND name NOT IN (${RECALL_TOOLS.map(() => '?').join(',')})`);
+      deleted += Number(deleteFull.run(fullCutoff, ...RECALL_TOOLS).changes);
+      deleted += Number(this.db.prepare('DELETE FROM tool_calls WHERE created_at < ?').run(recallCutoff).changes);
+
+      const rows = this.db.prepare(`SELECT id,name,result FROM tool_calls
+        WHERE created_at < ? AND name IN (${RECALL_TOOLS.map(() => '?').join(',')})
+          AND result IS NOT NULL AND result NOT LIKE '{"compacted":true%'`).all(fullCutoff, ...RECALL_TOOLS) as Array<{ id: string; name: string; result: string }>;
+      const update = this.db.prepare('UPDATE tool_calls SET result=? WHERE id=?');
+      for (const row of rows) {
+        let result: string;
+        if (row.name === 'hindsight_recall') {
+          let results: unknown[] = [];
+          try {
+            const parsed = JSON.parse(row.result) as { results?: unknown };
+            if (Array.isArray(parsed?.results)) results = parsed.results;
+          } catch { /* Keep an empty result list when old recall output is malformed. */ }
+          const compactResults = results.map(item => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return {};
+            const source = item as Record<string, unknown>;
+            return {
+              ...(Object.hasOwn(source, 'id') ? { id: source.id } : {}),
+              ...(Object.hasOwn(source, 'source_fact_ids') ? { source_fact_ids: source.source_fact_ids } : {}),
+            };
+          });
+          result = JSON.stringify({ compacted: true, results: compactResults });
+        } else {
+          const ids = row.result.match(RECALL_UUID_PATTERN) ?? [];
+          result = JSON.stringify({ compacted: true, ids });
+        }
+        compacted += Number(update.run(result, row.id).changes);
+      }
+      this.db.exec('COMMIT');
+      return { deleted, compacted };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   // Private diagnostic snapshots: retain at most 500 requests and 24 hours.
