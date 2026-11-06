@@ -25,6 +25,12 @@ Apply these guidelines when implementing or reviewing changes, including the sel
 - Add a lock, hash, identifier, cache, or retry only for an identified need that existing execution, transaction, storage guarantees, or values cannot meet.
 - Preserve necessary authorization, input validation, and recovery behavior while simplifying the implementation.
 
+### Project Hygiene
+
+- The project tree holds only source, `.data/` runtime state, `workspace/`, and `backups/`. One-off scripts, scratch output, exports and smoke-check files go to `/tmp` and are deleted when the task ends; do not leave them in the project or `workspace/`.
+- Every backup goes under `backups/<source>/` (for example `backups/hindsight/`, `backups/skills-trash/`, `backups/memory-curation/`). Do not create backup files or `backups/` directories anywhere else.
+- Anything that writes files automatically must bound them (retention count or age) in the same change that introduces it.
+
 ### Verification
 
 - Run `npm run typecheck` for TypeScript changes and `npm run build` before deployment. Check changed `ui/app.js` with `node --check`.

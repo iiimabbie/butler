@@ -103,6 +103,7 @@ Slash commands：`/status` `/new` `/model` `/img_model` `/mode` `/replymode` `/c
 | `.data/hledger/` | hledger 帳本 |
 | `.data/service/butler.log` | 服務 log |
 | `.data/deploy/deploy.log` | 部署 log |
+| `backups/` | 所有備份，依來源分子資料夾（hindsight、hledger、skills-trash、memory-curation、daily-journal…） |
 
 部署不會安裝依賴，依賴有變更要先 `npm install`。更多操作見[維運小抄](docs/yuu_operations.md)。
 
