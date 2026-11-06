@@ -10,3 +10,8 @@ dist/
 temp.*
 __pycache__/
 *.pyc
+# 規劃與暫存文件只留本機；只追蹤下列維運文件
+/docs/*
+!/docs/agent-reach-tool.md
+!/docs/yuu_operations.md
+!/docs/yuu_hindsight-memory-reset.md
