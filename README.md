@@ -1,243 +1,71 @@
 # Butler
 
-Butler is the owner's personal assistant, available to people and bots in multi-person Discord channels. Conversation memory is shared across channels and sessions. Channels are tracked through `.data/config/channels.yaml`; messages in untracked channels are neither saved nor answered. Butler is a native Node service with persistent sessions and LLM model overrides; it has no public CLI conversation/query interface. Discord tools and slash commands cover conversations, models, channel reply preferences, scheduling, image generation, people profiles, skills, and progress. Discord tool targets use the bot's Discord permissions and are not limited to tracked channels. Existing Google, host, web, weather, and shared-memory integrations remain available when configured.
+跑在 Discord 上的個人 AI 助理。原生 Node 服務，用 OpenAI Responses 相容的 API 呼叫模型，可以在多人頻道裡跟人和其他 bot 對話；各頻道共用同一份長期記憶，session 會持久保存。
 
-## Requirements and setup
+## 功能
 
-- Node.js 24.21.0 (built-in `node:sqlite` and discord.js 14.27.0).
-- `npm install` then `npm run build`.
-- discord.js v14.27.0 is installed locally in this project; this is a native Node application, not a Docker workload.
-- Static settings live only in `.data/config.yaml` (file mode 600), ignored by Git with the rest of `.data/`. The path is resolved from `import.meta.url`, not the process working directory. The application does not create or migrate this private file. No external-path fallback, static environment fallback, environment bridge, or configuration CLI is provided.
-- `/model` in Discord lists IDs exposed by `llm.baseUrl`; choose one as the session model.
+- **對話**：只回應 `.data/config/channels.yaml` 列出的頻道，每個頻道一個 session，可以設定回覆模式（全部回、被提及才回、不回）和 queue／steer。對話接近模型上限時會自動壓縮。
+- **附件**：原檔存在 `.data/attachments/`，以原生圖片或檔案輸入送給模型；音訊用 Groq Whisper 轉成文字。
+- **長期記憶**：選用 [Hindsight](services/hindsight/README.md)，每輪自動 recall，也提供 `memory_recall`、`memory_reflect` 和知識頁工具。
+- **工具**：Discord 訊息與論壇、Google（Gmail、日曆、Tasks、Drive）、網頁搜尋（Tavily／AnySearch／Firecrawl）、天氣（Open-Meteo）、主機檔案與 shell、hledger 記帳、排程與提醒、生圖、背景子代理（Codex CLI），以及在 QuickJS 沙箱裡串接唯讀工具的 `code_execute`。
+- **外部通知**：選用的 HTTP 端點 `POST /notifications`，用來接收手機通知，存進 SQLite 後交給指定頻道處理。
+- **管理 UI**：只負責 Google OAuth，只綁在 `127.0.0.1`，要放在有存取控制的反向代理後面。
 
-Configuration schema (optional sections may be omitted; example values are placeholders):
+主機工具不是沙箱，shell 會繼承服務的環境變數與權限。只把 bot 放在信任的伺服器和頻道。
 
-```yaml
-discord:
-  token: BUTLER_BOT_TOKEN
-  ownerId: OWNER_METADATA_ID
-  # Optional; HTTPS Discord webhook URL for redacted error-only notifications.
-  # errorWebhookUrl: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
-  # errorWebhookMentionUserId: "DISCORD_USER_ID"
-  # Optional existing forum post (thread) destination.
-  # errorWebhookThreadId: "DISCORD_THREAD_ID"
-  # With both errorWebhookUrl and errorWebhookThreadId set, that thread becomes the fixed alert channel.
-  # errorWebhookModel: MODEL_ID  # Alert 頻道專用模型；省略則跟隨 llm.model
-llm:
-  baseUrl: http://127.0.0.1:8317/v1
-  apiKey: LLM_API_KEY
-  model: MODEL_ID
-  maxContextTokens: 150000
-  modelContextTokens:
-    gpt-6.1-sol: 272000
-web:
-  pool:
-    searchOrder: [tavily, anysearch, firecrawl]
-    fetchOrder: [tavily, anysearch, firecrawl]
-    searchTimeoutMs: 30000
-    fetchTimeoutMs: 45000
-    attemptTimeoutMs: 15000
-    maxAttempts: 3
-  tavily:
-    enabled: true
-    apiKey: WEB_API_KEY
-    baseUrl: https://api.tavily.com
-    dailyRequestLimit: 100
-  anysearch:
-    enabled: false
-    baseUrl: https://api.anysearch.com/v1
-    dailyRequestLimit: 20
-  firecrawl:
-    enabled: false
-    baseUrl: https://api.firecrawl.dev/v2
-    dailyRequestLimit: 10
-ui:
-  port: 3210
-  publicOrigin: https://workspace.example.com
-  cookiePath: /proxy/3210/
-paths:
-  database: /home/iiimabbie/workspace/butler/.data/butler.sqlite
-  attachments: /home/iiimabbie/workspace/butler/.data/attachments
-google:
-  clientId: DESKTOP_CLIENT_ID
-  clientSecret: DESKTOP_CLIENT_SECRET
-memory:
-  baseUrl: http://127.0.0.1:18888
-  bankId: Renee
-image:
-  baseUrl: https://your-cpa.example/v1
-  apiKey: IMAGE_API_KEY
-  model: gpt-image-2.5
-  protocol: images
-  timeoutMs: 300000
-  identityReferencePath: /absolute/path/to/butler/workspace/renee/appearance-reference.png
-transcription:
-  provider: groq
-  apiKey: GROQ_API_KEY
-subagent:
-  # toolsEnabled: true
-```
+## 需求
 
-Quote numeric-looking Discord IDs so YAML preserves them as strings. The optional `subagent` section enables background delegated work through Codex CLI, with full host access in the absolute project `cwd` supplied for each new task. Butler chooses a model per task from the configured CPA LLM endpoint's model list, cached for 10 minutes; IDs containing `claude`, `image`, `tts`, `video`, or `voice` are excluded. `toolsEnabled` is the only subagent setting; it defaults to `true` and hot-reloads. Set it to `false` to hide and reject parent management tools. Existing workers continue, and internal handoff events retain `subagent_send` and `subagent_stop`. Omit the section to disable starting or resuming tasks; existing states remain queryable.
+- Node.js 24.21.0（需要內建的 `node:sqlite`）
+- 一個 OpenAI Responses 相容的 LLM 端點（同時要有 `/models`）
+- 選用：Docker（Hindsight、hledger）、Google Desktop OAuth client、各網頁搜尋服務的 API key
 
-`subagent_run` always starts an independent task with required `cwd` and `model` and returns a generated ID immediately; it does not accept `subagent_id`. Continue any existing task only with `subagent_send`; each task window is scoped to its original parent session and keeps its working directory and persistent Codex thread. Completion wakes Butler in the original channel and session, even after a new chat session starts. A worker needing a decision ends its report with a concrete question; Butler answers with `subagent_send` on the same ID. Messages sent during a run are queued for the next turn. Follow-ups resume the same thread and may switch the model for this and later runs. `subagent_stop` terminates the worker process group; work may be partially applied, so use `subagent_send` afterwards to request a status report. Each worker receives a neutral task prompt with CodeGraph instructions and no Butler personality or conversation memory. Workers cannot use Butler tools (Discord, memory, Google, ledger) or start their own sub-agents. Before every worker spawn, Butler runs `codex debug models` and writes a generated model catalog to `.data/subagent/codex-models.json` with `multi_agent_version` removed from every model. Workers use that catalog together with `agents.max_depth=0` and disabled apps/memories; catalog generation or parsing failures stop the run. Events persist across restart and are not retained in Hindsight; the parent's actual Discord replies are retained normally. Interrupted runs can be continued explicitly with `subagent_send`, and events whose parent handling was interrupted remain recorded as `failed_unknown` for recovery.
-
-日常設定變更會由服務自動熱更新：LLM 連線設定、Discord `errorWebhookModel` 與 `notificationModel`、`.data/config/channels.yaml` 的頻道設定、`web`、`image`、`subagent`、memory 的 timeout/budget/token 上限及 `schedule.timezone`。`discord.token`／`ownerId`、`paths`、`ui`、`google`、memory 啟停／`baseUrl`／`bankId` 為冷設定，需重啟；同一候選若混有冷熱變更會整份拒絕。缺檔、YAML 或必要欄位錯誤時保留最後有效版本，修正後再存檔即可恢復。log 只記分類與欄位名稱，不輸出設定值。`discord.errorWebhookUrl`、`errorWebhookMentionUserId` 與 `errorWebhookThreadId` 可熱更新或移除，後續錯誤立即採用新設定。錯誤通知每則錯誤送出一張 Embed 卡片，不含工具參數／結果、聊天內容或 HTTP 回應本文；卡片描述最多 4,096 字元，過長時截斷並附完整錯誤的本機日誌位置，本機 stdout/stderr 保留完整遮罩後錯誤。配置的告警 webhook 卡片文字會由 Butler 讀入。通知失敗只記本機分類／HTTP 狀態，不阻塞聊天；致命程序錯誤不保證 webhook 送達。自動 mention 僅允許指定使用者；既有論壇貼文目的地使用 thread ID，不會建立新貼文。已排隊的工作固定使用其開始時的 runtime；模型 NULL 繼續跟隨新預設，明確模型覆寫不變。
-
-Supplied strings must be nonempty; paths must be absolute, and `ui.port` is an integer from 1 to 65535. `llm.baseUrl` is an HTTP(S) URL without embedded credentials. `ui.publicOrigin` is an explicit HTTP(S) origin without a path or trailing slash, and `ui.cookiePath` is an absolute URL cookie path. A supplied `ui` section requires all three fields; omit it to disable UI. A supplied `google` section requires both client fields; omit it when unconfigured. `llm.apiKey` is an optional nonempty string when supplied. `discord.errorWebhookUrl` is optional and must be an HTTPS Discord webhook URL without credentials, query or fragment. `discord.errorWebhookMentionUserId` and `discord.errorWebhookThreadId` are optional numeric Discord IDs; the latter targets an existing forum post. `discord.errorWebhookModel` is an optional model ID for the alert channel; when omitted the alert channel follows `llm.model`. It is hot-reloaded and cannot be changed by channel commands. The error webhook thread and `discord.notificationChannelId` are fixed channels: always tracked, bot reply on, Hindsight write on, human messages answered without a mention, steer mode. They must not appear in `channels.yaml`, and channel commands cannot change them; the notification channel uses the optional `discord.notificationModel`, falling back to `llm.model`. LLM uses OpenAI Responses-compatible APIs and OpenAI-style `/models`; a compatible endpoint can be changed through configuration. The three web providers are configured equally under `web.tavily`, `web.firecrawl` and `web.anysearch`; all default to disabled, and enabling any provider requires a nonempty API key and an explicit daily request limit from 0 to 10000. Each provider's optional `baseUrl` must be an HTTP(S) URL without embedded credentials; Tavily defaults to `https://api.tavily.com`. The shared `web.pool` section contains only routing order, timeouts and attempt count. The example enables Tavily with a 100-request daily limit; there is no default Tavily quota. Different API contracts require an integration implementation, not just a different key. Legacy `web.provider`, root-level `web.apiKey`/`web.baseUrl`, and `web.pool.tavilyDailyRequestLimit` are rejected; no migration or fallback is provided.
-
-Discord service startup needs `discord.token`, `discord.ownerId`, `llm.baseUrl`, and `llm.model`. Command registration discovers the application ID and all guilds the bot has joined from Discord; no application or guild IDs are configured manually. `memory`, `image`, `transcription`, and `schedule` are optional; Hindsight enables shared memory and people tools, `image` enables text-to-image generation, `transcription` enables Groq `whisper-large-v3` transcription of incoming audio attachments, and `schedule.timezone` defaults to `Asia/Taipei`. Attachments are archived in the eight directories `images`, `audio`, `video`, `documents`, `spreadsheets`, `text`, `archives`, and `other` under `.data/attachments`. When `image.identityReferencePath` is set, both image generation tools use the configured image model and per-channel `/img_model` override; `image_generate_self` automatically attaches the fixed PNG/JPEG/WebP reference to `/images/edits`, while ordinary `image_generate` remains `/images/generations`. Generated images are first saved persistently in the attachment archive, then named and copied into the workspace through `image_save`; the final Discord reply includes both text and the named image attachment. The path is part of the hot-reloaded `image` section. Only channels listed in `.data/config/channels.yaml` and the fixed channels (the error webhook thread and `discord.notificationChannelId`) are tracked; messages in other channels are neither saved nor answered. A thread or forum post is tracked only when its own ID is listed. In a tracked channel every received human, bot and webhook message is saved to the channel's shared session, Hindsight retention follows the channel's `hindsightWrite`, and the channel's reply rules decide whether Butler answers. Slash commands other than `/status` and `/restart` need a tracked channel; Discord tool targets and scheduled output channels are not limited to tracked channels. Owner ID remains session metadata, not an entry ACL. Google/Tavily configuration is optional, and their tools are available only when configured.
-
-## External notifications
-
-An optional `notifications` section in the private `.data/config.yaml` starts an independent HTTP listener. Omit the section to disable it. `notifications` needs `host`, `port`, `bearerToken`, and `discord.notificationChannelId` is required when `notifications` is set. Both are restart-only settings. The UI remains bound to loopback.
-
-```yaml
-notifications:
-  host: 127.0.0.1
-  port: 3212
-  bearerToken: REPLACE_WITH_A_RANDOM_PRIVATE_TOKEN
-discord:
-  notificationChannelId: "YOUR_PRIVATE_DISCORD_CHANNEL_ID"
-```
-
-Bind `host` to an address your gateway can reach. `port` must be an integer from 1 to 65535; `discord.notificationChannelId` is a quoted 17–20 digit Discord channel ID. Keep the token and real private channel configuration out of Git, and use a randomly generated token. The listener itself uses HTTP: protect the network path appropriately when forwarding the credential, and do not expose the management UI as an intake.
-
-Send `POST /notifications` with `Authorization: Bearer <private token>` and `Content-Type: application/json`. Authentication compares the token with `timingSafeEqual`. A gateway must preserve the phone's Authorization header and body; it must not inject a shared Authorization value. Prefer its synchronous proxy mode so the caller receives Butler's receipt result. Permit only the required POST route. This repository does not configure or deploy that gateway.
-
-```json
-{"id":"phone-event-123","source":"example.app","title":"Example notification","body":"Notification text","occurred_at":"2026-11-01T12:00:00Z"}
-```
-
-All five fields are strings; other fields are ignored. `id` is a stable, globally unique event ID of 1–200 ASCII letters, digits, dots, underscores, colons or hyphens. Reuse it for retries. `source` and `title` must be nonblank; `body` may be empty. `occurred_at` must be a parseable timestamp. The request body is capped at 65536 bytes, and the listener imposes a ten-second request/inactivity timeout.
-
-Receipt commits to the existing SQLite database before returning `202 {"accepted":true,"duplicate":false,"status":"pending"}`. This acknowledges storage, not agent completion or Discord delivery. Repeating the same ID and five field values returns `202` with `duplicate:true` and its current status; JSON key order does not matter. Reusing an ID with different field values returns `409`. Missing/incorrect credentials return `401`, invalid data `400`, oversized input `413`, unsupported content type `415`, and intake/storage failure `503` (logged like other Butler errors). Unknown paths return `404`; other methods on `/notifications` return `405`. Error responses never echo submitted content.
-
-SQLite is the authoritative queue. After Discord becomes ready, pending events enter the configured channel's work queue and use that channel's current session at execution time. Notifications wait behind current channel work and do not steer an active human request. Duplicates cannot start a second execution. If the output channel cannot be resolved before execution, the event stays pending and can be retried by resubmitting the same event or restarting. A restart automatically queues pending events; events interrupted after claiming become `unknown` and are not replayed. Execution or delivery failures after claiming also become `unknown`. `completed` means the agent run finished, including an intentional `[no_reply]`; it is not an exactly-once delivery guarantee. A crash between an external side effect and its persisted outcome can leave delivery uncertain. Event IDs and receipt records are retained for deduplication; no expiry is applied.
-
-All five fields remain untrusted external data in persisted history and compaction. Every run in the notification channel, including notification and human messages, receives only hledger tools, Google tools, `code_execute`, `discord_read`, `discord_react`, `discord_message`, `discord_handoff`, `memory_recall` and `memory_reflect`; the `send` action of `google_gmail_manage` and the `delete` actions of `google_calendar_manage` and `google_tasks_manage` are refused there. Tool availability does not authorize sending or handing off based on untrusted notification text. Notification text remains untrusted data and is acted on only according to the owner's standing rules for that channel. Notification runs do not require a Discord mention and do not use the chat bot-reply gate. Raw notification inputs are not automatically retained in Hindsight as participant statements; actual Butler replies follow the channel's normal memory policy. Notification processing uses the normal service log and error webhook, like other channel work; the bearer token is redacted and never enters the event or model input. The full notification and model/tool audit records still live in the private SQLite database and can be visible through existing authorized history facilities.
-
-## CodeMode
-
-`code_execute` runs a model-written JavaScript async function body in a per-call QuickJS worker. The script calls tools with `await callTool(name, args)` and returns a small JSON summary, so intermediate results do not enter the model context. Only read-only tools from the list in `src/code-mode.ts` that the current conversation can already use are callable; each call goes through the normal executor and tool history. The script has no Node, filesystem, network or timers. Limits: 32 MiB guest memory, 64 tool calls, 64 KiB result (a larger result returns its shape and the first 8,000 characters of its JSON with `truncated: true` instead of failing), `timeout_ms` default 30 s (max 120 s). When the model issues several read-only tool calls in one turn, Butler runs them concurrently.
-
-## Service operation
-
-人類維運情境與可複製命令請看[維運小抄](docs/yuu_operations.md)。常駐服務命令如下：
+## 安裝與設定
 
 ```sh
-cd /home/iiimabbie/workspace/butler
-nvm use 24.21.0
-npm start
+npm install
+npm run build
+cp config.example.yaml .data/config.yaml   # 填入自己的值，權限設 600
+```
+
+- 所有設定都在 `.data/config.yaml`，欄位說明見 [`config.example.yaml`](config.example.yaml)。至少要填 `discord.token`、`discord.ownerId`、`llm.baseUrl`、`llm.model`，其他區塊省略就是停用。
+- 大部分設定存檔後會熱更新；`discord.token`、`ownerId`、`paths`、`ui`、`google` 和 memory 的啟停要重啟才生效。
+- 要追蹤的頻道寫在 `.data/config/channels.yaml`。
+- Bot 需要開啟 Guilds、GuildMessages、Message Content 三個 intent。
+- `workspace/` 底下的 `SOUL.md`、`AGENT.md`、`OWNER.md`、`MEMORY.md` 是人格、規則與背景資料，每個 session 讀一次。這個資料夾不進版控。
+
+## 執行與部署
+
+Butler 以 systemd unit `butler` 常駐，範本在 [`scripts/butler.service`](scripts/butler.service)，裡面的路徑要改成自己的。
+
+```sh
+npm start            # sudo systemctl start butler，等 Discord ready 才返回
 npm run status
-npm stop
-npm restart
+npm stop             # 會先把進行中的工作做完
+npm run deploy       # build 後切換；新版沒有 ready 就回到上一版 dist
+npm run discord:register   # slash command 有變更時才需要
 ```
 
-Butler runs as the systemd unit `butler` (`scripts/butler.service`, enabled at boot, restarted on failure). `npm start`/`npm stop`/`npm restart` call `sudo systemctl`; `npm start` returns after Discord reports ready (sd_notify). Stopping sends SIGTERM and Butler drains in-flight work first. The service log is appended at `.data/service/butler.log`. `npm run deploy` builds to `.data/deploy/build`, stops the `butler` unit (it drains in-flight work first), moves the current `dist` to `.data/deploy/previous-dist`, installs the new build and starts it. If the new build does not become ready, it is stopped and the previous `dist` is restored and started. The deployment log is appended at `.data/deploy/deploy.log`. Dependency changes require a separate dependency installation; deployment does not install dependencies. There is no CLI product interface for asking questions or querying sessions; session/history inspection remains available through the UI and the agent's history tools. The UI session list defaults to sessions currently referenced by channel state and can be switched to archived sessions; both views retain message and tool-call details. The `journal_transcript_by_date` agent tool reads Butler-recorded pure Discord conversation text across current and archived sessions for a complete `YYYY-MM-DD` date in `schedule.timezone` (default `Asia/Taipei`), including Butler text actually delivered to Discord; it excludes scheduled inputs and tool results, and supports character-offset pagination. In Discord, you can ask Butler to “修改完成後部署”; `butler_deploy` queues the deployment until the turn and queued work finish, then Butler builds. A build failure is reported in that channel without restarting; otherwise the restarted Butler posts the outcome (completed, or rolled back to the previous build) in that channel. Tool calls are recorded as pending before execution, then their raw arguments and result/error are persisted under a stable ID. A process interruption can leave pending evidence; Butler does not resume or replay it.
+- 部署不會安裝依賴，依賴有變更要自己跑 `npm install`。
+- 在 Discord 叫 Butler 改完程式後部署，結果會回報到原頻道。
+- 服務 log 在 `.data/service/butler.log`，部署 log 在 `.data/deploy/deploy.log`。
 
-## Discord entry
+## Slash commands
 
-Configure the `discord` and `llm` sections above before starting Discord. Data lives at fixed project-relative locations: `.data/butler.sqlite`, `.data/attachments/`, `.data/finance/` (hledger, run in the `butler-hledger` container from `services/hledger`). Channel tracking and per-channel settings live in `.data/config/channels.yaml`, which is hot-reloaded. Use Butler's own bot token. UI, Google, Web, memory, image generation, scheduling, and `llm.apiKey` are optional.
+`/status`、`/new`、`/model`、`/img_model`、`/mode`（queue／steer）、`/replymode`、`/compact`、`/bot_reply`、`/restart`
 
-日常 build-and-switch deployment 使用 `npm run deploy`；回復範圍僅 `dist`，細節見維運小抄。它不自動 slash-register。只有 slash command 有變更並需同步 Discord 時，才明確執行 `npm run discord:register`。此命令會清除本 application 的 global commands 與各 joined guild commands，再註冊完整 guild command set；一般日常維運不需要執行。純 service restart 不註冊或同步 commands。舊的 `npm run discord:deploy` 仍是 build 加 command registration 的入口，不作為一般程式部署命令。 Startup does not register commands; when Butler joins a new guild, `guildCreate` registers the complete current command set for that guild only, without changing global commands. Slash commands other than `/status` and `/restart` need a tracked channel; autocomplete works in any channel in those guilds. `/model` offers cached, filtered candidates from the configured CPA `/models` endpoint (10-minute cache, at most 25 results) and an optional reasoning effort; `default` clears the effort override. `/img_model [id]` uses the independent image endpoint's `/models` catalog and per-channel override; omit `id` to show the current model and choose `default` to use `image.model`. `/replymode all|mention|none|inherit` persists human-message behavior per tracked channel in `channels.yaml`; `inherit` removes the override, falling back to the default `mention`. `/compact` summarizes older messages in the current human channel session while retaining the latest 10 original messages and all SQLite history; it uses the current chat model and effort. Asks automatically compact at 80% of the known model context limit or configured fallback budget, retaining 10 recent messages. The foreground `npm run discord` command remains available for diagnosis; it is not the persistent service entry point. Node must be at least 24.17. This does not log in during build or tests. The bot needs Guilds, GuildMessages, and Message Content intents enabled. Every received human, bot, and webhook conversation message in a tracked channel is saved in its channel session; eligible human messages can trigger asks under the channel reply mode; bot and webhook messages can trigger an ask only when `botReplyEnabled` and they explicitly mention Butler in tracked channels. Error-log webhook messages suppress only the automatic error-notification mention within that message's async handling context to prevent notification loops. Human replies do not require an owner identity check. A persistent, instance-wide bot-reply flag defaults to false; `/bot_reply enabled:true|false` sets it in any channel without an owner identity check, and `/status` reports its current value. `/model id`, `/mode value`, and `/bot_reply enabled` require their options and only set values; omitted options do not query or mutate settings. When enabled, other bots that explicitly mention Butler in a tracked channel can trigger an ask and receive the same history, Discord, connected Google, host, configured web and weather tools as human senders, including attachments. Unmentioned bot messages in a tracked channel are still saved as channel conversation background, but do not trigger an ask. All authors in a channel share that channel's session; this is session routing, not an ACL on history tools. Self-authored messages remain ignored; webhooks can trigger an ask only when bot replies are enabled and the webhook explicitly mentions Butler; the configured error-log webhook's handler context suppresses repeat notification mentions. Slash commands and model autocomplete do not require an owner identity check. Replies are plain text, chunked to 2,000 characters, with automatic mentions disabled. During an ask, one editable `ansi` fenced progress message shows a colored tree headed by `☪ 𝐵𝑢𝑡𝑙𝑒𝑟．𝑉𝑜𝑡𝑟𝑒 𝑚𝑎𝑗𝑜𝑟𝑑𝑜𝑚𝑒 𝑒𝑥𝑐𝑙𝑢𝑠𝑖𝑓`. Hindsight memory steps and other tool activity are shown as separate sections, each keeping its latest three rows. Tool rows place green `✓`, yellow `→`, or red `✗` before the label, show elapsed time in brackets, and nest a sanitized failure reason under failed tools. The progress message shows the verdict and both probabilities. Internal diagnostics remain in logs and audit records, not progress text. An ask that finishes before the progress debounce may complete without sending the transient message. Final replies remain separate; `/status` uses a Chinese embed card. Session, model, and queue/steer mode persist per channel; `/status` shows the mode as `queue` or `steer` while other status labels remain Chinese. Queue mode serializes messages; steer mode silently merges new text into an active ask at the safe boundary between model requests, while queued commands such as `/new` and `/model` remain ordering barriers. Direct Discord replies include one referenced message’s ID, author, original text (or an unavailable status), and its original attachments when precisely fetched as sourced historical-evidence input; received messages save available reply context, with unavailable original text explicitly marked. `discord_read` with `action=message` also provides native attachment input. Referenced and current-message original attachments follow the 20 MiB limit. Queue messages reserve their channel position before reference resolution; steer reserves an ordered pending slot immediately and the model waits for it at the safe consumption point. Slow or out-of-order reference fetches therefore cannot reorder messages across `/new`, `/model`, or `/mode` barriers. Steer messages retain the same reply context and are persisted once when consumed; a later ask failure is safe-logged without a chat error reply, and the consumed supplement remains saved. Attachments are saved as original files and sent through the existing CPA Responses request as native image or file inputs for the current input, steers and the latest 3 history messages; older history attachments are referenced by filename and message ID and fetched with `discord_read` (`action=message`) when needed; audio attachments are provided to the model as Groq Whisper transcript text with an untrusted-attachment label. This does not guarantee every model or endpoint can read every other format. Each original attachment is limited to 20 MiB; there is no cumulative batch or history attachment-byte limit. Oversized or unavailable downloads are marked failed and are not truncated. Before each Responses request, Butler estimates the full text, developer/system instructions, tool schemas and current function-call/results using CPA `/messages/count_tokens`; this is a preflight estimate, not exact multimodal accounting. If counting fails, Unicode character estimation is used and labeled. At 80% of the configured known model context limit, or the fallback `llm.maxContextTokens` budget (default 150000), Butler attempts automatic compaction while keeping 10 recent messages; reaching 100% after compaction stops the ask rather than silently trimming. Set `llm.modelContextTokens` by exact model ID; the configured `gpt-6.1-sol` limit is 272000. Successful Responses `usage.input_tokens` and `usage.output_tokens` are reported in `/status` with their sample model, limit and timestamp. That measured usage is distinct from the current preflight prediction; no sample is reported as current when the model, endpoint or limit changes. Failed downloads are described to the model as untrusted input text; unreadable stored originals are likewise identified as unread without aborting the ask, while other readable originals remain intact. A preflight estimate at or above the configured budget after compaction, or a rejected native-file request, stops the ask and is written to safe logs; ordinary chat does not receive a generated error reply or a second text-only request. Passive messages retain attachment metadata without triggering an ask. New attachments are imported through Hindsight's separate files/retain flow with their content and linked to their conversation attachment document IDs; unsupported formats end as failed jobs while the original files remain archived. Conversion and child-retain operation IDs are persisted and followed across restarts. Historical attachments are not batch-imported. Other bots' messages containing ANSI fenced code blocks or starting with an arrow are ignored in full, including text and attachments; human messages are unchanged. Tool progress messages are deleted after a successful or failed ask; no progress event means no progress message is sent. Outbound Discord text messages suppress link previews with the native SUPPRESS_EMBEDS message flag (4), including replies, scheduled/background output, progress updates, message tools and forum starter messages. Message content and Markdown links are sent unchanged; URL rewriting is not used. Queues and active work are not resumed after process crash.
-Discord has five tools: `discord_read` (`message`, `channel_messages`, `pins`, `channel`), `discord_message` (`send`, `edit`, `delete`, `pin`, `unpin`), `discord_thread` (`create_forum_post`, `archive`, `delete`, `rename_post`, `rename_forum`), `discord_react` and `discord_attach_to_reply`. General text-channel thread creation is not offered. Forum posting requires the sender-supplied forum ID, title and first-message content; `appliedTagIds` are optional and validated against that forum’s available tags. When Discord requires a tag and none was specified, Butler returns available choices without selecting one. Discord tool targets are not restricted by the message-entry channel subscription. Thread operations verify Discord-returned channel IDs, types and the specified parent; a thread delete never targets its parent. Attachments accept a local `file` and optional `filename`, restricted to paths under `.data/attachments`, and are included in the final reply. The original tool result remains intact; a separate delivery status records `delivered`, `failed_or_unknown`, or `not_sent`.
+## 資料位置
 
-`/restart` works only under systemd (it exits with status 75 and systemd starts Butler again), and only when there is no active or queued work in any channel. Butler replies with an ephemeral “重啟中”, stores the interaction token, then closes Discord and SQLite cleanly and exits 75. After `clientReady`, the new process edits that reply to “重啟完成” (interaction tokens expire after 15 minutes); a failed edit is reported in safe logs. New Store tables are created with `CREATE TABLE IF NOT EXISTS`; back up the database before starting the updated application, with no manual SQL migration required.
+全部在 `.data/`，不進版控：
 
-### 設定告警頻道（errlog）
+- `butler.sqlite`：對話、工具紀錄、排程
+- `attachments/`：附件原檔
+- `finance/`：hledger 帳本
+- `google/`：OAuth token
+- `config/`：頻道設定
 
-可將錯誤通知送到一般文字頻道，或論壇中的既有 errlog 貼文。建立 webhook 時，若目的地是論壇，請選論壇父頻道；再用 `errorWebhookThreadId` 指定既有貼文，不要設定 `thread_name`，以免建立新貼文。
-
-以下是合併到 `.data/config.yaml` 既有 `discord:` 區塊的示意設定，不要覆蓋原有欄位；placeholder 不能直接用來啟動。一般文字頻道省略 `errorWebhookThreadId`。
-
-```yaml
-discord:
-  errorWebhookUrl: https://discord.com/api/webhooks/WEBHOOK_ID/WEBHOOK_TOKEN
-  # Butler 機器人自己的 Discord 使用者 ID，不是 owner ID 或 webhook ID。
-  errorWebhookMentionUserId: "BUTLER_BOT_USER_ID"
-  # 僅論壇既有貼文需要；一般文字頻道省略。
-  errorWebhookThreadId: "ERRLOG_THREAD_ID"
-```
-
-只接收錯誤通知時，設定 `errorWebhookUrl` 即可。同時設定 `errorWebhookThreadId` 時，該論壇貼文就是固定的 Alert 頻道：固定追蹤、Bot Reply 啟用、寫入 Hindsight、人類訊息不需 @ 即回應、bot／webhook 訊息仍須 @ 提及，並固定 Steer；模型使用 `errorWebhookModel`，省略則跟隨 `llm.model`。這個 ID 不能同時列在 `channels.yaml`，頻道指令也無法修改它的設定。設定可熱更新；移除後該貼文停止追蹤，目前的 session 會封存。需確保 Bot 在該貼文有檢視、讀取歷史及發訊息權限。
-
-`/status` 的 Reply mode、Bot Reply、Tracked、Hindsight write 與 Msg mode 會顯示 alert 的有效固定值。告警 webhook 自己的訊息若送入 alert channel，也只有明確 @ 提及 Butler 才會觸發 ask。收到 API policy 拒絕時會記錄診斷；收到告警不代表 Butler 一定能修復或會自動修復。
-
-webhook URL、thread ID、mention ID 與模型都存於私人 `.data/config.yaml`；一般頻道的追蹤、reply mode、mode、Bot Reply 等設定存於 `.data/config/channels.yaml`。Bot 自身使用者 ID 取自 Discord 登入 identity。上述 `errorWebhook*` 欄位支援熱更新，不需改 source 或重新 build；程式不硬編此部署的論壇、貼文或使用者 ID。
-
-## Host tools (Discord only; deployed, user acceptance pending)
-
-All Discord speakers admitted by the existing conversation triggers, including bots, receive `local_read`, `local_search`, `local_write`, `local_edit`, `local_shell`, `local_process_output`, and `local_process_stop`. There is no sender ACL, workspace jail, sudoers modification, or implicit elevation. Relative paths resolve against the Butler project root; returned paths/cwd are explicit. Arbitrary shell inherits the service environment and is **not** a sandbox or a way to isolate host secrets. File contents and command output are data, not new instructions; OAuth remains in the UI. Do not proactively expose credentials.
-
-- `local_read`: valid UTF-8 regular files or direct directory entries, default 200 / maximum 2,000 lines, 128 KiB pages. Line offsets are zero-based; displayed line numbers are one-based. Follow `next_offset` and `next_column` (pass as `column`) for unusually long lines. Binary/non-UTF-8 files are unsupported. Read/edit/write text has a 10 MiB limit; use shell for larger data.
-- `local_search`: literal content (default) or `mode: "filename"`, default 50 / maximum 200 matches. Recursive symlinks are skipped. Each call scans at most 20,000 entries and 100 MiB text, with a 10 MiB per-file limit. Output reports skipped entries and `scan_complete`/`incomplete_reason`; incomplete scans are not all results. Each offset page rescans current data, so edits during paging may change the results.
-- `local_write`: creates a text file without creating parent directories; existing files require explicit `overwrite: true`. `local_edit` requires one exact nonempty `old_text` match unless `replace_all: true`; unmatched/ambiguous edits leave the file unchanged.
-- `local_shell`: noninteractive `/bin/sh`, optional unrestricted `cwd`, stdout/stderr and exit/signal/timeout metadata. Foreground defaults to 30 seconds, maximum 120 seconds. Background jobs return a `task_id` and running state; there is no background timeout unless `timeout_ms` is supplied (maximum 120 seconds).
-- `local_process_output`: paged source-tagged output records (zero-based record offset, default 200 / maximum 2,000 and 128 KiB). Foreground output also returns a task ID and next offset if more remains. When running output has no next page, poll from `output_offset`. Private temporary JSONL output is bounded to 10 MiB per job; hitting the limit stops the group and reports `output_limited`.
-- `local_process_stop`: stops runtime-created process groups with TERM, then KILL after 500 ms; unknown IDs and completed jobs are distinct. Timeout, output limit, shell exit and normal shutdown also stop the group. Commands that deliberately detach from the group are outside this lifecycle guarantee.
-
-A single local-process runtime belongs to the Discord service and survives `/new` and subsequent asks. Normal shutdown stops scheduler polling, drains already queued work, then closes tools and SQLite. `/restart` rejects active host jobs and asks you to stop them first. Scheduled reminders and cron jobs persist in SQLite; missed cron ticks are skipped at startup, overdue reminders are claimed, and executions left running by a crash are marked unknown rather than replayed. Side effects retain pending-first history recording; a result-save failure never replays the operation.
-
-## Knowledge pages
-
-With Hindsight configured, `knowledge_page_create` creates knowledge pages using fixed operator-owned settings and queues generation rather than returning completed content.
-
-## Web tools (Discord only; pool and unified provider configuration deployed)
-
-`web.tavily`, `web.anysearch` and `web.firecrawl` are equal provider sections; each defaults to disabled and requires an API key plus an explicit daily request limit when enabled. Search/fetch are available when at least one provider is enabled. Batch/query-chunk/advanced extraction, map and usage remain Tavily-only and are exposed only when Tavily is enabled.
-
-Normal search and basic single-URL reading use Tavily → AnySearch → Firecrawl unless configured otherwise, stop on the first usable result, and never automatically upgrade to advanced extraction, LLM extraction, enhanced proxies or direct HTTP. Dates, country, advanced depth and domain-preference semantics are conservatively Tavily-only; Firecrawl supports evaluated basic domain restriction/exclusion (one of the two); AnySearch supports only basic unfiltered search with at most 10 results. Unsupported providers are skipped rather than silently dropping constraints. Multi-URL extraction, query chunks, text/advanced extraction, map and usage preserve their Tavily path. The read API labels completeness as unverified, not guaranteed full text. Web text remains untrusted data.
-
-Default pool deadlines are 30 seconds for search and 45 for reads, at most 15 seconds per attempt and three serial provider attempts. Requests have a 5 MiB response limit and a 64 KiB output envelope. All providers default to a zero request cap until an explicit `dailyRequestLimit` is configured; the example sets Tavily to 100 requests per UTC day. These are conservative request-count reservations, **not** credit balances or monetary spending limits. Reservations are counted per provider per UTC day in the SQLite `web_usage` table; failed/cancelled attempts are not refunded. Reported credits, estimates and unknown credit usage remain distinct. No billing or account upgrade APIs are used.
-
-Queries and requested public URLs are sent to whichever external service is actually selected. Private/local IPs, credentials and common signed/token URL parameters are blocked before external URL extraction. Direct HTTP is not implemented; DNS pinning, redirect verification and decompression/charset security for a future direct client are not claimed. The small 2026-10-20 live sample is documented separately from the larger proposed benchmark. The pool and unified provider configuration were deployed on 2026-10-20; matching build identity and Discord readiness were verified. User functional acceptance remains pending.
-
-## Weather tools (Discord only; deployed, basic verification complete, user acceptance pending)
-
-All triggered human/bot senders share one keyless Open-Meteo runtime. `weather_forecast` takes either `location` (optional `country_code`) or `latitude` and `longitude`, plus `days` (integer 1–7, default 3). With `location` it geocodes up to five candidates, forecasts for the first one and returns it as `location` with the rest as `other_candidates`, so a wrong match can be retried with coordinates or a more specific name; no match is a usage error. Coordinates accept latitude −90–90 and longitude −180–180. It returns model-based current conditions and daily forecasts with their data times, timezone, UTC offset and units. These are forecasts, not measured observations; weather codes remain WMO numeric codes, and `null` values mean unavailable.
-
-Requests use fixed Open-Meteo endpoints, encoded queries, a 15-second deadline and a 1 MiB response limit, without retries or provider-error body exposure. Locations and coordinates are sent to Open-Meteo. Final replies do not need to routinely name or cite the data providers. The public API is free for personal noncommercial use, subject to 600 calls/minute, 5,000/hour, 10,000/day and 300,000/month, without a service guarantee. No key, SDK, CLI tools or sender identity tier is added. Existing pending-first history and model request recording remain intact. Weather review and deployment are complete. LLM and Web credentials are stored in `llm.apiKey` and provider-specific `web.*.apiKey` fields; weather needs no API key. Live geocoding returned three candidates and a live three-day forecast passed runtime validation; dimensionless units may be empty strings. The managed Node launcher uses a 2,000 ms network-family connection-attempt timeout without adding retries. After restart, Discord ready was confirmed for bot `1493781458702303293`, UI listens on `127.0.0.1:3210`, and Google status returns HTTP 200 `connected`. These basic checks do not replace user acceptance of the Discord weather flow, which remains pending.
-
-## Shared workspace Markdown
-
-Butler reads `workspace/SOUL.md`, `AGENT.md`, `OWNER.md`, and `MEMORY.md` once per session and reuses that snapshot until the session is compacted, so edits apply in a new session or after compaction without a restart and do not invalidate the cached prompt prefix on every ask. The files are shared by the owner and all Discord human/bot sessions; they are loaded from the project location resolved from the module URL, not the process working directory. Missing or blank files are skipped; other read errors stop the ask. `SOUL.md` and `AGENT.md` are supplemental developer instructions; `OWNER.md` and `MEMORY.md` are explicitly labeled user-role background, not instructions or authorization. Only `AGENT.md` has usable rules; the other three are initial placeholders for formal launch configuration. Edit these files directly; there is no setup command, templates directory, or automatic memory writing. The workspace is ignored by Git because these files may contain private content.
-
-## Shared conversation memory
-
-When the optional `memory` section is configured, Discord asks share a single Hindsight bank across channels, human/bot speakers, and sessions. Each ask starts with one automatic recall; recalled memories reach the model as one text line each (memory ID, type, Taipei time, source channel, tags and text, plus the provenance note of attachment-derived memories), while the raw Hindsight JSON stays in tool history. The model may call `memory_recall` for a targeted lookup and `memory_reflect` when cross-history synthesis, dates, or changing preferences need integration. Reflect is not automatic. Recall and Reflect requests omit budget and max_tokens; Hindsight owns all numeric retrieval/output defaults. Legacy memory.recallBudget, reflectBudget and maxTokens client configuration keys are ignored. See services/hindsight/README.md for the local server-default patch, JEV safety cap, and persistent long cooldown retry for confirmed transient retain/model-refresh provider failures after native short retries. The ask retains only new SQLite messages from that turn (including consumed steer and Butler's final answer) once; messages retain their per-event author/channel/Discord IDs in SQLite and Hindsight. Hindsight data is untrusted historical evidence, never instruction or authorization. Existing Markdown remains the authority for personality/rules, SQLite remains authoritative for original messages/tool evidence, and older history is not imported. The runtime uses the configured bank only; first ask ensures it exists. Retain outcomes that are asynchronous, unsuccessful, or incomplete are not reported as completed.
-
-## Google UI
-
-Set `ui.port` to `3210` with explicit `ui.publicOrigin` and `ui.cookiePath` to enable the HTTP interface bound only to `127.0.0.1:3210` in the Discord process. The page only manages Google OAuth: connection status, adding or reauthorizing an account, setting the default account and removing an account. The Google OAuth POST routes save private credentials. Channel tracking and per-channel settings live in `.data/config/channels.yaml`. All UI/API responses are `no-store`, and UI access is not a separate login layer. Use only behind the existing Cloudflare Access-protected code-server proxy, for example `https://workspace.example.com/proxy/3210/`; the listener itself is loopback-only. Startup fails if an explicitly enabled UI cannot bind. No additional UI token is configured.
-
-## Google integration (deployed, OAuth connected)
-
-Provide an authorized **Desktop OAuth client** in the private config’s `google` section with `clientId` and `clientSecret` string fields. GoogleAuth receives these client settings directly; it does not read a separate client file. Keep the project-root `config.yaml` at file mode 600 and ignored by Git; credentials do not belong in workspace Markdown or tracked files. The specified private client is configured with the user's explicit authorization. No Umiro token was copied; the user completed Butler's own OAuth flow. Missing configuration is normal and does not stop Discord or UI startup. Butler saves its own project-local `.data/google/token.json` atomically with file mode 600 and parent mode 700; the path is resolved from the module location rather than the working directory, with no external-path fallback. Do not paste credentials or OAuth URLs into CLI/Discord conversations.
-
-The client is configured and the user has completed manual authorization. The main agent confirmed live `/api/google/status` returns `connected` (已連線). Real Google tool behavior has not yet been accepted; a connected status does not verify all 16 tools. The following workflow also applies when reauthorization is needed.
-
-1. Open the existing Access-protected UI at `https://workspace.example.com/proxy/3210/` and start Google authorization.
-2. Open the consent link. After Google redirects to `http://127.0.0.1`, the browser may show a connection error; copy that complete URL and paste it into the original Google section within five minutes.
-3. Complete authorization. This validates state, PKCE S256, browser cookie and CSRF before exchanging the code; the transaction is consumed before exchange and cannot be replayed. Restart, expiry or unknown exchange outcome requires a new start. No loopback URL is fetched and no callback listener/OOB flow is added. Manual pasting is a project workflow, not claimed to be Google-endorsed.
-4. The next triggered Discord human/bot message discovers the 17 tools dynamically, without sender identity filtering. Refresh tokens are re-read from disk and renewed single-flight within each process. A new authorization-code login must supply its own non-empty refresh token; otherwise no new credentials are saved. Only renewal of an existing token preserves its original refresh token when the refresh response omits a replacement. `invalid_grant` or API 401 requires reauthorization; write operations are never automatically resent.
-
-Requested scopes: `gmail.readonly`, `gmail.compose`, `calendar.events`, `tasks`, `drive.readonly`, and `drive.file`. Gmail supports search/read/send/create-draft, Calendar list/create/update/delete, Tasks task-list listing plus task list/create/update/complete/delete, and Drive search/read/upload. Writes require an explicit current Discord human/bot sender; fetched emails/documents are untrusted data, not permission.
-
-Limits: Gmail is one-recipient plain text without attachments; only attachment metadata is read. Reading decodes each selected MIME part using its Content-Type charset (MIME default US-ASCII if absent); unsupported charsets or invalid bytes fail explicitly rather than silently corrupting text. Calendar timed values require RFC3339 timezone offsets; all-day end dates are exclusive. Switching all-day/timed mode requires both start/end and explicitly clears the opposite dateTime/date field in the PATCH. Tasks are undated todos: create/update accept title and notes only, and task results omit due dates. Existing Google due dates are left unchanged. Drive is filename search plus text files and Docs/Slides plain-text exports; Sheets CSV contains **only the first sheet**. Folders, shortcuts and other binary formats are unsupported. Reads and uploads have a **10 MiB** limit (10 × 1024 × 1024 bytes); exceeding it errors, never silently truncates. Uploads only create new files, using inline text or a regular local file under `.data/attachments` with realpath/symlink-escape checks.
-
-OAuth POSTs accept JSON only and require the configured public Origin, not arbitrary Host. The cookie is short-lived, HttpOnly, SameSite=Lax and Secure for HTTPS with the proxy Path above; CSRF/consent/callback data remain transient, never browser storage or CPA/history/log output. Session/RQ data remain private under the existing Access protection; no separate login, CORS or Access bypass is added. Reusing the same Google client/account does not imply Google-side grant isolation. Basic checks passed with Node 24.21.0: build, frontend JS syntax and diff formatting. One isolated temporary-workspace/token/SQLite fake OAuth→Gmail-draft smoke confirmed PKCE, dynamic availability, pending-first/result persistence, token600/parent700 and no OAuth secrets in messages/history/RQ. No test files/dependencies or full test suite were added/run. Main-agent review and deployment are complete: Discord ready was confirmed for bot `1493781458702303293`, with UI listening on `127.0.0.1:3210`. Loopback and code-server proxy homepage/Google status return HTTP 200 with `no-store`; live Google status is `connected` after the user completed OAuth with the configured client. The anonymous public Google status endpoint returns HTTP 302 to `example.cloudflareaccess.com`. Real Google tool behavior remains pending user acceptance; OAuth completion does not verify all 16 tools.
-
-## Scope status
-
-The main agent completed configuration/CLI/Discord wiring review and deployment. Startup supplies only `BUTLER_NODE` to the existing managed launcher, without reading Umiro settings or injecting static environment values. UI listens on `127.0.0.1:3210`; Discord ready is confirmed for bot `1493781458702303293`. Loopback and code-server proxy homepages return HTTP 200 with `no-store`, and Google status returns HTTP 200 `connected`; Google tokens remain in place. Host/Discord behavior still needs user acceptance.
-
-The 17-tool Discord build, Google code and Session/RQ/OAuth UI are deployed to the isolated test bot. The private client is configured and the user has completed OAuth; live Google status is `connected`, with real Google tool behavior still pending user acceptance. Discord readiness is confirmed for bot `1493781458702303293`. Existing session, message, and tool-call contents remain intact; bot replies remain disabled by default. New tool side effects have not all been exercised live, and user visual/functional acceptance of the UI is still pending.
-
-Completed: CPA `/models` listing and `/responses` loop, time and history tools, SQLite persistence and history queries, plus the isolated Discord text entry, the current Discord tools, and the slash commands `/status`, `/model`, `/img_model`, `/mode`, `/replymode`, `/compact`, `/restart`, `/new`, and `/bot_reply`, including the managed restart launcher. Other-bot replies are disabled by default and can be enabled through `/bot_reply` or the toggle tool; when enabled, explicit mentions in tracked channels can trigger asks with the same tools as human senders; bot and human messages share each channel session. Google 16 tools and manual-paste UI OAuth have passed main-agent review and are deployed; the private client is configured, the user has completed OAuth, and live status is `connected`. Real Google tool behavior remains pending user acceptance. The seven host-management tools, two Tavily web tools, and typed independent configuration are deployed; host/Discord functional acceptance remains pending, and host/web wiring is Discord-only. Automatic process recovery is not implemented. Simple self-deployment with build and dist rollback is implemented; see [維運小抄](docs/yuu_operations.md) for its behavior and recovery boundary. The UI only handles Google OAuth; its loopback, code-server proxy, and anonymous Access redirects have been verified. Build does not log in or register slash commands. `npm run deploy` performs build-and-switch deployment and does not register slash commands; see [維運小抄](docs/yuu_operations.md) for its recovery boundaries and result/log paths. `npm run discord:deploy` remains the explicit build-and-registration path when commands need updating, and resets the application's command set as described above. Automatic chat replies depend on channel tracking plus the bot/human reply rules; tool targets do not depend on tracking. CPA text and forced function-call round trip were manually probed against the local endpoint previously.
-
-## Project documents
+## 文件
 
 - [維運小抄：啟停、部署與看 log](docs/yuu_operations.md)
 - [Hindsight 記憶清空小抄](docs/yuu_hindsight-memory-reset.md)
 - [Agent Reach 唯讀工具](docs/agent-reach-tool.md)
+- [Hindsight 服務](services/hindsight/README.md)
