@@ -9,7 +9,7 @@ Local Hindsight service for Butler shared memory. Butler uses the configured for
 
 ## Managed PostgreSQL
 
-The Hindsight AP uses the dedicated `hindsight` database on the home-infra managed PostgreSQL endpoint supplied by the infrastructure owners. Ani and 烤雞堡 own PostgreSQL versions, extensions, access, backup/restore, capacity and monitoring. Renee owns the Hindsight application, connection configuration, schema compatibility and application-level verification; coordinate schema-changing upgrades with the DB owners.
+The Hindsight AP uses a dedicated `hindsight` database on an externally managed PostgreSQL endpoint. The infrastructure administrators own PostgreSQL versions, extensions, access, backup/restore, capacity and monitoring. The Butler side owns the Hindsight application, connection configuration, schema compatibility and application-level verification; coordinate schema-changing upgrades with the DB administrators.
 
 `HINDSIGHT_API_DATABASE_URL` is held only in the ignored mode-0600 `.env`, with `sslmode=require`. The AP mounts no local database directory, runs no local PostgreSQL process and publishes no PostgreSQL port.
 
