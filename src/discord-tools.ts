@@ -16,7 +16,7 @@ const snowflake = { type: 'string', pattern: '^[0-9]{2,32}$' };
 const channelMessage = { channelId: snowflake, messageId: snowflake };
 const emojisSchema = { type: 'array', minItems: 1, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 64 } };
 const specs: ToolSpec[] = [
-  { name: 'send', description: 'Send a message to a Discord channel. Mentions in content do not notify anyone.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
+  { name: 'send', description: 'Send a message to a Discord channel. User and role mentions in content notify them.', properties: { channelId: snowflake, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'content'] },
   { name: 'message', description: 'Fetch a Discord message and prepare its original attachments as image/file input for this conversation.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'channel_messages', description: 'Fetch channel messages; before continues toward older messages.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 100 }, before: snowflake }, required: ['channelId'] },
   { name: 'pins', description: 'List pinned messages in a channel, newest pin first; before (a pinned_at timestamp) continues toward older pins.', properties: { channelId: snowflake, limit: { type: 'integer', minimum: 1, maximum: 50 }, before: { type: 'string', minLength: 1, maxLength: 40 } }, required: ['channelId'] },
@@ -41,7 +41,7 @@ const discordGroups: Record<string, Record<string, string>> = {
 };
 const groupDescriptions: Record<string, string> = {
   discord_read: 'Read Discord messages, pins and channel details.\nmessage — Fetch a message and prepare its original attachments; required channelId, messageId.\nchannel_messages — Fetch channel messages; required channelId; optional limit and before (older messages).\npins — List pinned messages, newest first; required channelId; optional limit and before (pinned_at timestamp for older pins).\nchannel — Fetch channel details, forum tags and whether a tag is required; required channelId.',
-  discord_message: 'Send, edit, delete or pin Discord messages.\nsend — Send a channel message; required channelId, content; mentions do not notify anyone.\nedit — Edit a message authored by this bot; required channelId, messageId, content.\ndelete — Delete a channel message; required channelId, messageId.\npin — Pin a message; required channelId, messageId.\nunpin — Unpin a message; required channelId, messageId.',
+  discord_message: 'Send, edit, delete or pin Discord messages.\nsend — Send a channel message; required channelId, content; user and role mentions notify them.\nedit — Edit a message authored by this bot; required channelId, messageId, content.\ndelete — Delete a channel message; required channelId, messageId.\npin — Pin a message; required channelId, messageId.\nunpin — Unpin a message; required channelId, messageId.',
   discord_thread: 'Create and manage Discord forum posts and threads.\ncreate_forum_post — Create a Forum or Media post; required channelId, title, content; appliedTagIds must come from that forum’s available tags.\narchive — Archive a thread; required channelId (parent), messageId (thread).\ndelete — Delete a thread; required channelId (parent), messageId (thread).\nrename_post — Rename a forum post thread; required threadId, name.\nrename_forum — Rename a forum channel; required channelId, name.',
 };
 const discordGroupsByOperation = new Map(Object.entries(discordGroups).flatMap(([tool, actions]) => Object.values(actions).map(operation => [operation, tool] as const)));
@@ -233,7 +233,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {
-        case 'send':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
+        case 'send':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:['users','roles']}};break;
         case 'message':path=`${base}/messages/${messageId}`;break;
         case 'channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
         case 'pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
