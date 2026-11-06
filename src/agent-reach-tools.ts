@@ -58,7 +58,8 @@ export async function executeAgentReach(args: Record<string, unknown>, parentSig
     if (result?.ok === true) return result;
     // Never include raw stderr/environment in errors; only the CLI's structured error.
     const error = result?.error;
-    if (error?.code === 'BAD_INPUT') throw new ToolUsageError(`Agent Reach BAD_INPUT: ${String(error.message ?? '').slice(0, 500)}`);
+    // Bad input and missing platform login are for the caller to fix, not program faults.
+    if (error?.code === 'BAD_INPUT' || error?.code === 'NEED_LOGIN') throw new ToolUsageError(`Agent Reach ${error.code}: ${String(error.message ?? '').slice(0, 500)}`);
     if (typeof error?.code === 'string') throw new Error(`Agent Reach ${error.code}: ${String(error.message ?? '').slice(0, 500)}`);
     throw new Error('Agent Reach failed (missing executable, invalid output, output limit or process failure); inspect local installation');
   };

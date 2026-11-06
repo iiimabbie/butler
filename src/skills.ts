@@ -74,8 +74,6 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
             lock.skills[skillName] = { source: { type: 'git', url: sourceInfo.url, path: relative(resolve(stage, 'repo'), candidateReal).split(sep).join('/') }, revision: sourceInfo.commit, hash: await contentHash(destination), updatedAt: new Date().toISOString() };
             await writeLock(lockPath, lock);
           }
-          // The staged clone is only needed until one of its candidates is installed.
-          await rm(stage, { recursive: true, force: true });
           return { installed: skillName, path: relative(workspace, destination) };
         }
         if (action === 'update' || action === 'check') {
@@ -119,8 +117,20 @@ function validateSkillArgs(properties: Record<string, unknown>, required: string
   for (const [key, value] of Object.entries(args)) if (!(key in properties)) throw new ToolUsageError(`Invalid skill argument: ${key}`);
 }
 
+const STAGE_TTL_MS = 24 * 60 * 60 * 1000;
+
+// One prepare can offer several candidates, so a stage stays until it is a day old.
+async function pruneStages(staging: string) {
+  for (const entry of await readdir(staging, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('candidate-')) continue;
+    const path = resolve(staging, entry.name);
+    if (Date.now() - (await stat(path)).mtimeMs > STAGE_TTL_MS) await rm(path, { recursive: true, force: true });
+  }
+}
+
 async function prepare(source: string, staging: string) {
   await mkdir(staging, { recursive: true });
+  await pruneStages(staging);
   const stage = await mkdtemp(resolve(staging, 'candidate-'));
   try {
     let root: string;
