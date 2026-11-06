@@ -81,8 +81,18 @@ export class DiscordHandler {
     }, this.store.allSubagentRuns() as unknown as import('./subagent-coordinator.js').SubagentSnapshot[], this.store.pendingSubagentEvents() as unknown as SubagentEvent[]);
     this.localTools?.setDeployHooks({
       idle: () => this.queues.size === 0 && this.backgroundQueues.size === 0 && this.subagentCoordinator.prepareQueuedDeploy(),
-      notify: async (channelId, text) => { const channel = await this.outputChannel(channelId); if (!channel) throw new Error('Deployment notice channel unavailable'); await channel.send(text); },
+      notify: async (channelId, text) => { this.recordRuntimeNotice(channelId, text); const channel = await this.outputChannel(channelId); if (!channel) throw new Error('Deployment notice channel unavailable'); await channel.send(text); },
     });
+  }
+
+  // Deploy and restart outcomes are posted by Butler itself, which never reads its own Discord messages; this puts them in the channel session.
+  recordRuntimeNotice(channelId: string, text: string): void {
+    try {
+      const config = this.getRuntime().discord;
+      const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+      const { message } = this.store.addMessageOnce(state.sessionId, 'user', `[Butler runtime notice] ${text}`, { sourceKind: 'deployment_result', channelId }, []);
+      this.store.updateAttachments(message.id, []);
+    } catch (error) { logError(`Runtime notice was not recorded channel=${channelId}`, error, { mention: !isHttp429(error) }); }
   }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
@@ -399,7 +409,7 @@ export class DiscordHandler {
       try {
         if (!context.applicationId || !context.interactionToken) throw new Error('restart interaction token is unavailable');
         await context.reply('重啟中');
-        this.store.setRestartNotice({ applicationId: context.applicationId, interactionToken: context.interactionToken });
+        this.store.setRestartNotice({ applicationId: context.applicationId, interactionToken: context.interactionToken, channelId: context.channelId });
       } catch (error) {
         this.stopping = false;
         try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError, { mention: !isHttp429(noticeError) }); }
@@ -1114,6 +1124,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     logInfo('Discord ready', { botId: readyClient.user.id });
     void syncGuildCommands([...readyClient.guilds.cache.keys()], 'startup').catch(error => reportCommandSyncFailure('startup', error));
     const notice = store.takeRestartNotice();
+    if (notice?.channelId) handler.recordRuntimeNotice(notice.channelId, 'Butler was restarted with /restart and the new process is running.');
     if (notice) {
       // Interaction tokens stay valid for 15 minutes, which covers a restart; ephemeral replies are only editable through them.
       void client.rest.patch(Routes.webhookMessage(notice.applicationId, notice.interactionToken, '@original'), { body: { content: '重啟完成' }, auth: false })
@@ -1122,6 +1133,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     const deployNotice = store.takeDeployNotice();
     if (deployNotice) {
       void (async () => {
+        handler.recordRuntimeNotice(deployNotice.channelId, deployNotice.text);
         const channel = await client.channels.fetch(deployNotice.channelId);
         if (!channel?.isTextBased() || !('send' in channel)) throw new Error('deployment notice channel unavailable');
         await channel.send({ content: deployNotice.text, flags: MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });

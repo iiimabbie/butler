@@ -106,7 +106,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, input_message_id TEXT REFERENCES messages(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','completed','unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, model TEXT);
-      CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL, channel_id TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_sources(session_id TEXT NOT NULL, channel_id TEXT NOT NULL, source_type TEXT NOT NULL CHECK(source_type IN ('owner','bot')), owner_id TEXT NOT NULL, bot_id TEXT NOT NULL DEFAULT '', PRIMARY KEY(session_id,channel_id,source_type,owner_id,bot_id));
       CREATE TABLE IF NOT EXISTS ask_context(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, items_json TEXT NOT NULL);
@@ -123,6 +123,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
+    if (!(this.db.prepare('PRAGMA table_info(restart_notice)').all() as Array<{ name: string }>).some(column => column.name === 'channel_id')) this.db.exec('ALTER TABLE restart_notice ADD COLUMN channel_id TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
@@ -219,7 +220,7 @@ export class Store implements SchedulerStore {
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name,forwarded_message_json,is_bot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
         .run(message.id, source.authorId ?? null, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null, source.replyToMessageId ?? null, source.replyToChannelId ?? null, source.webhookId ?? null, source.sourceKind ?? null, source.authorName ?? null, source.forwardedMessage ? JSON.stringify(source.forwardedMessage) : null, source.isBot === undefined ? null : source.isBot ? 1 : 0);
-      if (source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input' && source.sourceKind !== 'notification' && source.sourceKind !== 'session_handoff') {
+      if (source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input' && source.sourceKind !== 'notification' && source.sourceKind !== 'session_handoff' && source.sourceKind !== 'deployment_result') {
         this.db.prepare("INSERT INTO hindsight_pending(message_id,status,updated_at,error) VALUES(?,?,?,?)").run(message.id,canWrite?'pending':'suppressed',message.createdAt,canWrite?null:'Memory writing is disabled for this channel');
       }
       this.db.prepare("INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,'preparing',?)").run(message.id, message.createdAt);
@@ -766,9 +767,9 @@ export class Store implements SchedulerStore {
   setChannelMode(channelId: string, mode: 'queue' | 'steer' | undefined): void { this.settings.patchChannel(channelId,{mode}); }
 
   // The /restart interaction whose ephemeral reply is edited once Butler is back.
-  setRestartNotice(notice: { applicationId: string; interactionToken: string } | null): void {
+  setRestartNotice(notice: { applicationId: string; interactionToken: string; channelId: string } | null): void {
     if (notice === null) this.db.prepare('DELETE FROM restart_notice WHERE id=1').run();
-    else this.db.prepare('INSERT INTO restart_notice(id,application_id,interaction_token) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET application_id=excluded.application_id,interaction_token=excluded.interaction_token').run(notice.applicationId, notice.interactionToken);
+    else this.db.prepare('INSERT INTO restart_notice(id,application_id,interaction_token,channel_id) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET application_id=excluded.application_id,interaction_token=excluded.interaction_token,channel_id=excluded.channel_id').run(notice.applicationId, notice.interactionToken, notice.channelId);
   }
 
   // Written by scripts/butler-deploy.mjs before it starts a build; the started Butler posts and clears it.
@@ -791,9 +792,9 @@ export class Store implements SchedulerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  takeRestartNotice(): { applicationId: string; interactionToken: string } | undefined {
-    const row = this.db.prepare('DELETE FROM restart_notice WHERE id=1 RETURNING application_id,interaction_token').get() as { application_id: string; interaction_token: string } | undefined;
-    return row && { applicationId: row.application_id, interactionToken: row.interaction_token };
+  takeRestartNotice(): { applicationId: string; interactionToken: string; channelId?: string } | undefined {
+    const row = this.db.prepare('DELETE FROM restart_notice WHERE id=1 RETURNING application_id,interaction_token,channel_id').get() as { application_id: string; interaction_token: string; channel_id: string | null } | undefined;
+    return row && { applicationId: row.application_id, interactionToken: row.interaction_token, ...(row.channel_id ? { channelId: row.channel_id } : {}) };
   }
 
   attachmentDelivery(toolCallId: string): unknown {
