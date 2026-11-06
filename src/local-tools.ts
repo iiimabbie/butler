@@ -69,7 +69,7 @@ export class LocalToolRuntime {
     if (code !== 0) {
       await rm(build, { recursive: true, force: true });
       this.deployRunning = false;
-      await this.deployNotify(channelId, `部署失敗：建置錯誤，未重啟。\n\`\`\`\n${output.trim().slice(-1500)}\n\`\`\``);
+      await this.deployNotify(channelId, `部署失敗：建置錯誤，未重啟。\n\`\`\`\n${output.trim().slice(-1500)}\n\`\`\``).catch(() => undefined);
       return;
     }
     // The runner gets its own transient unit: stopping butler.service ends every process in Butler's cgroup.
