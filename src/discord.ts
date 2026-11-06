@@ -32,7 +32,7 @@ import { logTrace, traceTextMetadata } from './model-request.js';
 
 export const DISCORD_MESSAGE_LIMIT = 2000;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
-const ALLOWED_MENTIONS = { parse: [] as [], repliedUser: false };
+const ALLOWED_MENTIONS = { parse: ['users', 'roles'] as ['users', 'roles'], repliedUser: true };
 export type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number>; requestTimeoutMs: number };
 export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; webTools: WebToolRuntime; hledgerTools: import('./hledger-tools.js').HledgerRuntime; hindsightFor?: (channelId: string | undefined) => import('./hindsight.js').Hindsight };
 export type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
