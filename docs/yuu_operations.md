@@ -85,7 +85,7 @@ tail -n 80 .data/service/butler.log
 tail -f .data/service/butler.log
 ```
 
-第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。部署 log 位於 `.data/deploy/deploy.log`（每次部署附加在後）：
+第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。部署 log 位於 `.data/deploy/deploy.log`（每次部署附加在後）。兩份 log 由 logrotate 每天輪替（[`scripts/butler.logrotate`](../scripts/butler.logrotate)，裝在 `/etc/logrotate.d/butler`），舊檔加日期後綴、保留 30 天：
 
 ```sh
 tail -n 80 .data/deploy/deploy.log

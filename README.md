@@ -85,7 +85,7 @@ Bot 要開 Guilds、GuildMessages、Message Content 三個 intent。
 
 ## 維運
 
-Butler 以 systemd unit `butler` 常駐，範本在 [`scripts/butler.service`](scripts/butler.service)，路徑要改成自己的。
+Butler 以 systemd unit `butler` 常駐，範本在 [`scripts/butler.service`](scripts/butler.service)；log 每天輪替，範本在 [`scripts/butler.logrotate`](scripts/butler.logrotate)，複製到 `/etc/logrotate.d/butler`。兩份都要把路徑改成自己的。
 
 ```sh
 npm start              # 等 Discord ready 才返回
