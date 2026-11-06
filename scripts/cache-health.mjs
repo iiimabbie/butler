@@ -2,7 +2,7 @@
 // Read-only prompt-cache report from model_requests: hit rate per channel/schedule, then each cache break with its likely cause.
 // A break is a request whose cached tokens fall short of the previous request in the same session by more than MISS_TOKENS.
 // Causes: expired (gap > EXPIRE_MIN), model or tools changed, compaction (input shrank), otherwise the first input item that differs.
-// model_requests keeps at most the latest 1000 rows, so long windows may be truncated; the report prints the oldest row it saw.
+// model_requests keeps at most the latest 500 rows, so long windows may be truncated; the report prints the oldest row it saw.
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 
