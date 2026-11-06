@@ -631,13 +631,13 @@ export class Store implements SchedulerStore {
     if (Number(update.changes) !== 1) throw new Error(`Could not persist tool result for ${id}`);
   }
 
-  // Private diagnostic snapshots: retain at most 1,000 requests and 24 hours.
+  // Private diagnostic snapshots: retain at most 500 requests and 24 hours.
   saveModelRequest(record: { requestId: string; sessionId: string; askId?: string; traceId?: string; turn: number; bodyJson: string; bodySha256: string }, attemptedAt = new Date().toISOString()): void {
     this.db.exec('BEGIN');
     try {
       this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
         .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
-      this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 1000)')
+      this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 500)')
         .run(new Date(Date.parse(attemptedAt) - 24 * 60 * 60 * 1000).toISOString());
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
