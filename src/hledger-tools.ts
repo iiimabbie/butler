@@ -43,8 +43,8 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
   }
   async function check(path: string): Promise<void> { await run(['-f', path, 'check']); }
   async function run(args: string[]): Promise<string> {
-    // hledger runs in the butler-hledger container (services/hledger), which mounts the ledger directory at /finance.
-    const containerArgs = args.map(arg => arg.startsWith(`${directory}/`) ? `/finance/${arg.slice(directory.length + 1)}` : arg);
+    // hledger runs in the butler-hledger container (services/hledger), which mounts the ledger directory at /hledger.
+    const containerArgs = args.map(arg => arg.startsWith(`${directory}/`) ? `/hledger/${arg.slice(directory.length + 1)}` : arg);
     const child = spawn('docker', ['exec', 'butler-hledger', 'hledger', ...containerArgs], { stdio: ['ignore','pipe','pipe'] });
     let out = '', err = '', size = 0;
     child.stdout.setEncoding('utf8').on('data', chunk => { size += Buffer.byteLength(chunk); if (size <= SAFE_OUTPUT) out += chunk; else child.kill('SIGTERM'); });

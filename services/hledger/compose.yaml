@@ -1,4 +1,4 @@
-# Butler runs hledger with `docker exec butler-hledger hledger ...`; the ledger stays in .data/finance.
+# Butler runs hledger with `docker exec butler-hledger hledger ...`; the ledger stays in .data/hledger.
 services:
   hledger:
     build: .
@@ -9,4 +9,4 @@ services:
     init: true
     network_mode: none
     volumes:
-      - ../../.data/finance:/finance
+      - ../../.data/hledger:/hledger

@@ -100,7 +100,7 @@ Slash commands：`/status` `/new` `/model` `/img_model` `/mode` `/replymode` `/c
 |---|---|
 | `.data/butler.sqlite` | 對話、工具紀錄、排程 |
 | `.data/attachments/` | 附件原檔 |
-| `.data/finance/` | hledger 帳本 |
+| `.data/hledger/` | hledger 帳本 |
 | `.data/service/butler.log` | 服務 log |
 | `.data/deploy/deploy.log` | 部署 log |
 
