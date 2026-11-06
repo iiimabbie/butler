@@ -4,12 +4,13 @@
 // Causes: expired (gap > EXPIRE_MIN), model or tools changed, compaction (input shrank), otherwise the first input item that differs.
 // model_requests keeps at most the latest 1000 rows, so long windows may be truncated; the report prints the oldest row it saw.
 import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
 
 const MISS_TOKENS = 5000, EXPIRE_MIN = 60;
 const hours = Number(process.argv[2] ?? 24);
 const db = new DatabaseSync(process.argv[3] ?? new URL('../.data/butler.sqlite', import.meta.url).pathname, { readOnly: true });
 const since = new Date(Date.now() - hours * 3600e3).toISOString();
-const NAMES = { '100000000000000011': '小角落', '100000000000000012': '交誼廳', '100000000000000013': 'Phone Notify', '100000000000000014': 'Butler-errors', '100000000000000015': 'moltbook', '100000000000000016': '拾憶' };
+const NAMES = (() => { try { return JSON.parse(readFileSync(new URL('../.data/channel-names.json', import.meta.url), 'utf8')); } catch { return {}; } })(); // optional { channelId: label }
 
 const channelOf = new Map(db.prepare("SELECT session_id, channel_id FROM session_sources WHERE source_type='owner'").all().map(r => [r.session_id, r.channel_id]));
 const rows = db.prepare('SELECT session_id, turn, attempted_at, body_json, usage_json FROM model_requests WHERE usage_json IS NOT NULL ORDER BY rowid').all();
