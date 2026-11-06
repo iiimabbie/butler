@@ -104,7 +104,6 @@ const transcriptPageSchema = {
   additionalProperties: false,
 };
 
-const WRAP_UP_REMINDER_TURN = 45;
 const MAX_REASONING_ONLY_CONTINUATIONS = 2;
 
 export const tools = [
@@ -306,7 +305,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
       const toolChoice: 'none' | { type: 'function'; name: string } | undefined = forceImageSave ? { type: 'function', name: 'image_save' } : recoveryFinalTextOnly ? 'none' : undefined;
       if (forceImageSave) imageSaveRequiredAttempted = true;
       forceImageSave = false;
-      if (turn + 1 === WRAP_UP_REMINDER_TURN) { const reminder = { role: 'user', content: '[Butler runtime notice] 已接近本輪工作上限，請準備回覆。先完成幾步內就能做完的部分；只有確實來不及或需要主人決定的部分才列為未完成，並列出已確認的內容；不要聲稱已完成。' }; runtimeReminders.push(reminder); input.push(reminder); }
       let localCountEstimate = 0;
       let localCountSource: string = 'local-count-estimate';
       let priorUsage = store.contextUsage(session);
