@@ -1,7 +1,8 @@
 import { configuredFixedChannels, readConfig, watchConfig, type ButlerConfig } from './config.js';
 import type { RuntimeBundle } from './discord.js';
-import { databasePath, journalPath } from './paths.js';
+import { attachmentsPath, databasePath, journalPath } from './paths.js';
 import { Store } from './store.js';
+import { runRetention } from './retention.js';
 import { readDiscordConfig, registerDiscordCommands, startDiscord } from './discord.js';
 import { Hindsight } from './hindsight.js';
 import { MemoryCoordinator } from './memory-coordinator.js';
@@ -27,10 +28,14 @@ try {
     const getRuntime = () => current;
     const memoryCoordinator = current.hindsightFor ? new MemoryCoordinator(store, channelId => { const resolve = current.hindsightFor; if (!resolve) throw new Error('Memory is disabled in the current runtime'); return resolve(channelId); }, () => current.settings.schedule?.timezone ?? 'Asia/Taipei') : undefined;
     const watcher = watchConfig({ initial: config, log: { logInfo, logWarn, logError }, prepareCandidate: candidate => { const next = buildBundle(candidate); return () => { store.setSettingsTimezone(candidate.schedule?.timezone ?? 'Asia/Taipei'); store.setFixedChannels(configuredFixedChannels(candidate)); current = next; configureLogging(candidate); }; } });
+    setImmediate(() => runRetention(store, attachmentsPath));
+    const retentionTimer = setInterval(() => runRetention(store, attachmentsPath), 24 * 60 * 60 * 1000);
+    retentionTimer.unref();
     try {
       await memoryCoordinator?.start();
       await startDiscord(getRuntime, store, databasePath, undefined, memoryCoordinator, () => { watcher.close(); closeSettingsWatch(); });
     } finally {
+      clearInterval(retentionTimer);
       watcher.close();
       closeSettingsWatch();
       await memoryCoordinator?.close();
