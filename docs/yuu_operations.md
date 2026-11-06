@@ -70,7 +70,7 @@ Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進�
 
 ## 部署與回復
 
-部署流程先 build 到 `.data/deploy/build`；build 失敗就不重啟。build 成功後正常停止舊版（SIGTERM，舊版會等進行中的工作收尾，最多 15 分鐘），把目前 `dist` 移到 `.data/deploy/previous-dist`、換上新 build，再啟動並等待 Discord ready。新版未 ready 時停止它、換回舊 `dist` 再啟動一次；舊版也起不來時會發錯誤通知。
+部署流程先 build 到 `.data/deploy/build`；build 失敗就不重啟。build 成功後正常停止舊版（SIGTERM，舊版會等進行中的工作收尾，最多 15 分鐘），把目前 `dist` 移到 `.data/deploy/previous-dist`、換上新 build，再啟動並等待 Discord ready；新版起來後刪掉 `previous-dist`。新版未 ready 時停止它、換回舊 `dist` 再啟動一次；舊版也起不來時會發錯誤通知。
 
 回復範圍僅是 `dist`。不會回復來源碼、UI 檔案、資料庫、workspace、設定、附件或 OAuth token。`package.json`／lockfile／依賴變更不由 dist 回復處理；部署不安裝或回復依賴，依賴更新需另行處理。UI 或 schema 變更也需另外人工確認。部署不自動改 Discord slash commands。
 
