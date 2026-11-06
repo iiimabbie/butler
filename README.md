@@ -85,7 +85,7 @@ Bot 要開 Guilds、GuildMessages、Message Content 三個 intent。
 
 ## 維運
 
-Butler 以 systemd unit `butler` 常駐，範本在 [`scripts/butler.service`](scripts/butler.service)，路徑要改成自己的。
+Butler 以 systemd unit `butler` 常駐，範本在 [`scripts/butler.service`](scripts/butler.service)；log 每天輪替，範本在 [`scripts/butler.logrotate`](scripts/butler.logrotate)，複製到 `/etc/logrotate.d/butler`。兩份都要把路徑改成自己的。
 
 ```sh
 npm start              # 等 Discord ready 才返回
@@ -100,9 +100,10 @@ Slash commands：`/status` `/new` `/model` `/img_model` `/mode` `/replymode` `/c
 |---|---|
 | `.data/butler.sqlite` | 對話、工具紀錄、排程 |
 | `.data/attachments/` | 附件原檔 |
-| `.data/finance/` | hledger 帳本 |
+| `.data/hledger/` | hledger 帳本 |
 | `.data/service/butler.log` | 服務 log |
 | `.data/deploy/deploy.log` | 部署 log |
+| `backups/` | 所有備份，依來源分子資料夾（hindsight、hledger、skills-trash、memory-curation、daily-journal…） |
 
 部署不會安裝依賴，依賴有變更要先 `npm install`。更多操作見[維運小抄](docs/yuu_operations.md)。
 

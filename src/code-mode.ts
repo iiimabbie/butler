@@ -10,7 +10,7 @@ export const readOnlyTools: ReadonlySet<string> = new Set([
   'google_tasks_read', 'google_drive_search', 'google_drive_read',
   'agent_reach', 'local_read', 'local_search', 'web_search', 'web_fetch', 'web_extract', 'web_usage',
   'weather_forecast', 'skills_read', 'schedule_list',
-  'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget', 'hledger_backup_list',
+  'hledger_accounts', 'hledger_schedules_list', 'hledger_forecast', 'hledger_budget',
 ]);
 
 // memory_reflect's own deadline exceeds the longest script, so scripts cannot call it.

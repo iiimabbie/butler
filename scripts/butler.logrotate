@@ -1,0 +1,13 @@
+# Daily rotation for Butler's own logs; install as /etc/logrotate.d/butler with paths adjusted.
+# copytruncate keeps the file systemd appends to (StandardOutput=append:) and the one Alloy tails.
+/home/iiimabbie/workspace/butler/.data/service/butler.log /home/iiimabbie/workspace/butler/.data/deploy/deploy.log {
+  su iiimabbie iiimabbie
+  daily
+  rotate 30
+  dateext
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}

@@ -5,13 +5,14 @@ import { promisify } from 'node:util';
 import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { parse } from 'yaml';
+import { projectPath } from './paths.js';
 
 const execFile = promisify(execFileCallback);
 const string = { type: 'string' };
 const definition = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 const definitions = [
   definition('skills_read', 'List installed skills and their metadata when name is omitted; read a file in an installed skill directory when name is supplied. path defaults to SKILL.md and requires name.', { name: string, path: string }, []),
-  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to workspace/.trash and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
+  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
 ];
 
 export type SkillsToolRuntime = { definitions: typeof definitions; execute(name: string, args: Record<string, unknown>): Promise<unknown>; catalog(): Promise<string> };
@@ -98,18 +99,30 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         }
         if (action === 'remove') {
           const skill = await installedSkill(stringArg(args.name, 'name'), skillsDirectory);
-          const trash = resolve(workspace, '.trash');
-          await mkdir(trash, { recursive: true });
+          const trash = await trashDirectory();
           const destination = resolve(trash, `${skill.name}-${Date.now()}`);
           await rename(skill.path, destination);
           const lock = await readLock(lockPath);
           if (skill.name in lock.skills) { delete lock.skills[skill.name]; await writeLock(lockPath, lock); }
-          return { removed: skill.name, path: relative(workspace, destination) };
+          return { removed: skill.name, path: relative(projectPath('.'), destination) };
         }
       }
       throw new ToolUsageError(`Unknown skills tool: ${name}`);
     },
   };
+}
+
+async function trashDirectory(): Promise<string> {
+  const trash = projectPath('backups/skills-trash');
+  await mkdir(trash, { recursive: true });
+  const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+  for (const entry of await readdir(trash, { withFileTypes: true })) {
+    const timestamp = /-(\d+)$/.exec(entry.name)?.[1];
+    if (timestamp !== undefined && Number(timestamp) < cutoff) {
+      await rm(resolve(trash, entry.name), { recursive: true, force: true });
+    }
+  }
+  return trash;
 }
 
 function validateSkillArgs(properties: Record<string, unknown>, required: string[], args: Record<string, unknown>): void {
@@ -322,8 +335,7 @@ async function updateOne(name: string, entry: SkillLockEntry, skills: string, st
       const replacement = resolve(ready, 'skill');
       await cp(fetched.directory, replacement, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: src => basename(src) !== '.git' });
       const hash = await contentHash(replacement);
-      const trash = resolve(workspace, '.trash');
-      await mkdir(trash, { recursive: true });
+      const trash = await trashDirectory();
       const previous = resolve(trash, `${name}-${Date.now()}`);
       await rename(installed, previous);
       try { await rename(replacement, installed); }

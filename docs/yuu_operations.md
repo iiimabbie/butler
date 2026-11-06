@@ -61,7 +61,7 @@ channels:
 外來 skill 保持上游原樣，來源記在 `workspace/skills/.lock.json`：Git 來源記 repo 網址與 skill 所在子路徑，網址來源記每個檔案的下載網址，另記目前版本（commit 或內容雜湊）與內容雜湊。`skills_manage install` 從 Git 安裝時自動寫入；網址來源的 skill 手動在 lock 新增一筆 `source` 後跑一次 `update`。
 
 - 看有沒有新版：叫 Renee 用 `skills_manage` 的 `check`，不會改任何檔案。
-- 更新：`update`（不帶 name 就是全部）。本機改過的 skill 會被跳過，確定要蓋掉才加 `force: true`。舊版移到 `workspace/.trash/`。
+- 更新：`update`（不帶 name 就是全部）。本機改過的 skill 會被跳過，確定要蓋掉才加 `force: true`。舊版移到 `backups/skills-trash/`，保留 30 天。
 - 自己寫的 skill（例如 `hf-ssh-chat`）不在 lock 裡，`check` 會列在 `untracked`。
 
 ## Discord 的 `/restart` 與 `npm restart`
@@ -70,7 +70,7 @@ Discord `/restart` 是聊天中的受控重啟請求：只有全頻道沒有進�
 
 ## 部署與回復
 
-部署流程先 build 到 `.data/deploy/build`；build 失敗就不重啟。build 成功後正常停止舊版（SIGTERM，舊版會等進行中的工作收尾，最多 15 分鐘），把目前 `dist` 移到 `.data/deploy/previous-dist`、換上新 build，再啟動並等待 Discord ready。新版未 ready 時停止它、換回舊 `dist` 再啟動一次；舊版也起不來時會發錯誤通知。
+部署流程先 build 到 `.data/deploy/build`；build 失敗就不重啟。build 成功後正常停止舊版（SIGTERM，舊版會等進行中的工作收尾，最多 15 分鐘），把目前 `dist` 移到 `.data/deploy/previous-dist`、換上新 build，再啟動並等待 Discord ready；新版起來後刪掉 `previous-dist`。新版未 ready 時停止它、換回舊 `dist` 再啟動一次；舊版也起不來時會發錯誤通知。
 
 回復範圍僅是 `dist`。不會回復來源碼、UI 檔案、資料庫、workspace、設定、附件或 OAuth token。`package.json`／lockfile／依賴變更不由 dist 回復處理；部署不安裝或回復依賴，依賴更新需另行處理。UI 或 schema 變更也需另外人工確認。部署不自動改 Discord slash commands。
 
@@ -85,7 +85,7 @@ tail -n 80 .data/service/butler.log
 tail -f .data/service/butler.log
 ```
 
-第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。部署 log 位於 `.data/deploy/deploy.log`（每次部署附加在後）：
+第一個命令看最近 80 行；第二個持續追蹤新訊息。看完按 `Ctrl+C` 只會停止觀看 log，不會停止 Butler。設定 reload 訊息也記在 `.data/service/butler.log`：`Config reload applied` 表示已套用；`Config reload rejected` 表示仍使用前一版；`restart required` 表示候選整份未套用，需重啟。部署 log 位於 `.data/deploy/deploy.log`（每次部署附加在後）。兩份 log 由 logrotate 每天輪替（[`scripts/butler.logrotate`](../scripts/butler.logrotate)，裝在 `/etc/logrotate.d/butler`），舊檔加日期後綴、保留 30 天：
 
 ```sh
 tail -n 80 .data/deploy/deploy.log

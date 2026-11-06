@@ -7,5 +7,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 FROM debian:bookworm-slim
 COPY --from=download /usr/local/bin/hledger /usr/local/bin/hledger
 ENV LANG=C.UTF-8
-WORKDIR /finance
+WORKDIR /hledger
 CMD ["sleep", "infinity"]

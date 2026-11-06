@@ -8,4 +8,4 @@ export function projectPath(path: string): string { return resolve(projectRoot, 
 
 export const databasePath = projectPath('.data/butler.sqlite');
 export const attachmentsPath = projectPath('.data/attachments');
-export const journalPath = projectPath('.data/finance/main.journal');
+export const journalPath = projectPath('.data/hledger/main.journal');
