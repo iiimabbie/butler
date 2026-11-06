@@ -36,7 +36,7 @@ Apply these guidelines when implementing or reviewing changes, including the sel
 
 - Run `npm run typecheck` for TypeScript changes and `npm run build` before deployment. Check changed `ui/app.js` with `node --check`.
 - Do not add test files, test dependencies, or a test suite. Use one-off smoke checks in a temporary directory and remove them afterwards.
-- Deployment uses `npm run deploy`. Run `npm run discord:register` only when slash command definitions change; it replaces every registered command.
+- Deployment uses `npm run deploy`; afterwards run `node scripts/deploy-check.mjs` (service state, deploy result, errors since start, running subagents). Run `npm run discord:register` only when slash command definitions change; it replaces every registered command.
 - Check affected callers and relevant failure paths, and confirm that replaced behavior leaves no stale references.
 - During self-review, simplify redundant mechanisms and remove obsolete code before delivery. Report which checks actually ran and any remaining verification gaps.
 
