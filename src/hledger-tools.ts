@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ToolUsageError } from './tool-errors.js';
@@ -18,8 +18,6 @@ export const hledgerDefinitions = [
   tool('hledger_reconciliation_reopen', '移除指定帳戶/幣別自 from_date 起由本工具建立的校正分錄，供重新對帳。', {account:str,currency:{type:'string',pattern:'^[A-Z][A-Z0-9]{2,11}$'},from_date:date,reason:{type:'string',minLength:1,maxLength:300}}, ['account','currency','from_date','reason']),
   tool('hledger_forecast', '以 hledger periodic rules 查詢預測；結果是虛擬 forecast，不會寫成實際帳務。', { begin: date, end: date }, ['begin','end']),
   tool('hledger_budget', '依 periodic rules 查詢預算與實際執行；規則本身不會被當成已發生交易。', { begin: date, end: date, account: str }, ['begin','end']),
-  tool('hledger_backup_list', '列出私有帳本的版本化本機備份。', {}, []),
-  tool('hledger_backup_restore', '以指定備份取代現行帳本（先備份現行版本並通過 hledger check）。', { backup_id: { type: 'string', pattern: '^[A-Za-z0-9-]{1,80}$' } }, ['backup_id']),
 ] as const;
 
 type Posting = { account: string; amount: string; currency: string; cost_amount?: string; cost_currency?: string; cost_type?: 'unit' | 'total' };
@@ -35,7 +33,7 @@ type SourceRef = { account: string; currency: string };
 
 export type HledgerRuntime = { definitions: Array<(typeof hledgerDefinitions)[number]>; execute(name: string, args: Args): Promise<unknown> };
 export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime {
-  const journal = resolve(config.journalPath), directory = dirname(journal), backups = resolve(directory, 'backups');
+  const journal = resolve(config.journalPath), directory = dirname(journal);
   const definitions = config.enabled ? [...hledgerDefinitions] : [];
   let queue: Promise<unknown> = Promise.resolve();
   function serial<T>(work: () => Promise<T>): Promise<T> {
@@ -132,8 +130,6 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     const candidate = `${journal}.candidate`;
     await writeFile(candidate, nextText, { mode: 0o600 });
     try { await check(candidate); } catch (error) { await rm(candidate, { force: true }); throw error; }
-    await mkdir(backups, { recursive: true });
-    await copyFile(journal, resolve(backups, `${new Date().toISOString().replace(/[:.]/g, '-')}.bak`));
     await rename(candidate, journal);
   }
   function transactionBlocks(text: string): Array<{ id: string; date: string; header: string; index: number; length: number; postings: SourceRef[] }> {
@@ -162,15 +158,6 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     return serial(() => dispatch(name, args));
   }
   async function dispatch(name: string, args: Args): Promise<unknown> {
-    if (name === 'hledger_backup_list') {
-      let files: string[]; try { files = await readdir(backups); } catch (e) { if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { backups: [] }; throw e; }
-      return { backups: files.filter(x => x.endsWith('.bak') && !x.endsWith('.operations.bak')).sort().map(file => ({ id: file.slice(0,-4) })) };
-    }
-    if (name === 'hledger_backup_restore') {
-      const id = requiredString(args.backup_id, 'backup_id'); if (!/^[A-Za-z0-9-]{1,80}$/.test(id)) throw new ToolUsageError('Invalid backup ID');
-      await commit(await readFile(resolve(backups, `${id}.bak`), 'utf8'));
-      return { restored: id };
-    }
     if (name === 'hledger_accounts') {
       const argsList = ['-f', journal, 'balance', '--flat']; if (args.as_of !== undefined) { const d = requiredString(args.as_of,'as_of'); if (!validDate(d)) throw new ToolUsageError('Invalid date'); argsList.push('--end', nextDate(d)); }
       if (args.account !== undefined) { const account=requiredString(args.account,'account'); if(!ACCOUNT.test(account)) throw new ToolUsageError('Invalid account name'); argsList.push(account); }
