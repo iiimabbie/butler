@@ -71,6 +71,7 @@ export interface ToolCallRetentionResult { deleted: number; compacted: number; }
 const RECALL_TOOLS = ['hindsight_recall', 'memory_recall', 'memory_reflect', 'hindsight_reflect']; // Must match TOOLS in hindsight-curation/bin/recalled.py.
 const RECALL_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
+export type DiscordPresence = { status: 'online' | 'idle' | 'dnd'; state: string | null };
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
@@ -124,6 +125,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS session_workspace(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, context_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS session_opening_context(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, message_id TEXT NOT NULL, author_id TEXT NOT NULL, created_at TEXT NOT NULL, content TEXT NOT NULL, attachments_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS deploy_notice(id INTEGER PRIMARY KEY CHECK(id=1), channel_id TEXT NOT NULL, text TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS discord_presence(id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL, state TEXT);
       CREATE TABLE IF NOT EXISTS hledger_schedules(id TEXT PRIMARY KEY, schedule_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
@@ -818,6 +820,20 @@ export class Store implements SchedulerStore {
   setRestartNotice(notice: { applicationId: string; interactionToken: string; channelId: string } | null): void {
     if (notice === null) this.db.prepare('DELETE FROM restart_notice WHERE id=1').run();
     else this.db.prepare('INSERT INTO restart_notice(id,application_id,interaction_token,channel_id) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET application_id=excluded.application_id,interaction_token=excluded.interaction_token,channel_id=excluded.channel_id').run(notice.applicationId, notice.interactionToken, notice.channelId);
+  }
+
+  // The bot's Discord status, reapplied whenever the gateway identifies.
+  discordPresence(): DiscordPresence | undefined {
+    const row = this.db.prepare('SELECT status,state FROM discord_presence WHERE id=1').get() as { status: DiscordPresence['status']; state: string | null } | undefined;
+    return row && { status: row.status, state: row.state };
+  }
+
+  // Omitted fields keep their stored value; an empty state clears the text.
+  setDiscordPresence(input: { status?: DiscordPresence['status']; state?: string }): DiscordPresence {
+    const current = this.discordPresence();
+    const presence: DiscordPresence = { status: input.status ?? current?.status ?? 'online', state: input.state === undefined ? current?.state ?? null : input.state || null };
+    this.db.prepare('INSERT INTO discord_presence(id,status,state) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,state=excluded.state').run(presence.status, presence.state);
+    return presence;
   }
 
   // Written by scripts/butler-deploy.mjs before it starts a build; the started Butler posts and clears it.

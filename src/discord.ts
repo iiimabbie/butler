@@ -1,9 +1,9 @@
-import { ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
+import { ActivityType, ChannelType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, REST, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from './store.js';
 import { ask } from './agent.js';
 import { startNotificationListener } from './notifications.js';
-import { createDiscordToolRuntime, type HandoffInput } from './discord-tools.js';
+import { createDiscordToolRuntime, type DiscordToolContext, type HandoffInput } from './discord-tools.js';
 import { requireSetting, type ButlerConfig } from './config.js';
 import { attachmentsPath } from './paths.js';
 import type { WebToolRuntime } from './web-tools.js';
@@ -65,12 +65,14 @@ export class DiscordHandler {
   private readonly outputChannel: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>;
   private readonly readOpeningMessage: (channelId: string) => Promise<SessionOpeningContext | undefined>;
   private readonly memoryCoordinator?: MemoryCoordinator;
+  private readonly setPresence?: DiscordToolContext['setPresence'];
   private readonly subagentCoordinator: SubagentCoordinator;
   private stopping = false;
-  constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator } = {}) {
+  constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<{ send(content: string, options?: { files?: Array<{ attachment: string; name: string }> }): Promise<unknown> } | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator; setPresence?: DiscordToolContext['setPresence'] } = {}) {
     this.outputChannel = options.outputChannel ?? (async () => undefined);
     this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
     this.memoryCoordinator = options.memoryCoordinator;
+    this.setPresence = options.setPresence;
     this.subagentCoordinator = new SubagentCoordinator(snapshot => this.store.saveSubagentRun(snapshot), {
       onEvent: event => this.handleSubagentEvent(event),
       persistEvent: event => this.store.saveSubagentEvent(event),
@@ -213,7 +215,7 @@ export class DiscordHandler {
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); this.refreshTyping(message.channelId); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
           this.activeProgress.set(message.channelId, progress);
-          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, requesterId: message.authorId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
+          const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, requesterId: message.authorId, handoff: input => this.handoff(input), setPresence: this.setPresence, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { logInfo('tool_call', { tool: 'discord_read', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_read', { action: 'message', channelId: message.reference.channelId, messageId: message.reference.messageId }); }
             catch (error) { logWarn('Discord referenced message could not be retrieved', error); }
@@ -540,7 +542,7 @@ export class DiscordHandler {
           token: config.token,
           attachmentDir: config.attachmentDir,
           transcription: commandRuntime.settings.transcription,
-          context: { channelId: request.outputChannelId, requesterId: request.job.creatorId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, memoryOriginChannelId: request.outputChannelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } },
+          context: { channelId: request.outputChannelId, requesterId: request.job.creatorId, handoff: input => this.handoff(input), setPresence: this.setPresence, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: session, memoryOriginChannelId: request.outputChannelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } },
         }),
         googleTools: this.googleTools,
         localTools: this.localTools,
@@ -702,7 +704,7 @@ export class DiscordHandler {
       skillsTools: createSkillsToolRuntime(DEFAULT_WORKSPACE), scheduleTools: this.scheduleTools(input.requesterId ?? config.ownerId, runtime.settings.schedule?.timezone ?? 'Asia/Taipei'),
       imageTools: this.imageTools(attachmentFiles, input.channelId, runtime.settings.image, config.attachmentDir), subagent: this.channelSubagent(input.channelId, runtime.settings.subagent),
       subagentCoordinator: this.subagentCoordinator, subagentOrigin: input, subagentEvent: storedInput.source.sourceKind === 'subagent_event',
-      discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: input.outputChannelId, requesterId: input.requesterId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: storedInput.sessionId, memoryOriginChannelId: input.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
+      discordTools: createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: input.outputChannelId, requesterId: input.requesterId, handoff: input => this.handoff(input), setPresence: this.setPresence, botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: storedInput.sessionId, memoryOriginChannelId: input.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => this.memoryCoordinator?.notifyReady() } }),
       onResponseReady: async text => {
         if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') || (!text && !attachmentFiles.length)) {
           if (text) logInfo('no_reply', { ...traceTextMetadata(text), replyTo: { channelId: input.outputChannelId, inputId: storedInput.id } });
@@ -1078,8 +1080,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   client = clientOverride ?? new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent], rest: { retries: 0 } });
   const localTools = new LocalToolRuntime();
   const weatherTools = createWeatherToolRuntime();
+  // Re-identifying resets presence to the login value, so the stored status is applied on every shardReady.
+  const applyPresence = () => {
+    const presence = store.discordPresence();
+    if (presence && client.user) client.user.setPresence({ status: presence.status, activities: presence.state ? [{ type: ActivityType.Custom, name: 'Custom Status', state: presence.state }] : [] });
+  };
+  client.on('shardReady', applyPresence);
   const handler = new DiscordHandler(store, getRuntime, ask, requestRestart, googleTools, localTools, weatherTools, {
     memoryCoordinator,
+    setPresence: input => { const presence = store.setDiscordPresence(input); applyPresence(); return presence; },
     readOpeningMessage: async channelId => {
       const channel = await client.channels.fetch(channelId);
       if (!channel?.isTextBased() || !('messages' in channel)) return undefined;
