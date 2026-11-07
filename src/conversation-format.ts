@@ -23,7 +23,7 @@ export function buildConversationPayload(operationId: string, channelId: string,
   });
   const combined = mergeBotTurns(turns);
   const clean = combined.map(({ _authorId, _actualChannelId, _replyTarget, _bot, _mergeable, ...turn }) => turn);
-  return { async: true, operation_id: operationId, items: [{ document_id: `butler:discord:${channelId}:${sessionId}`, update_mode: 'append', timestamp: 'unset', context: CONVERSATION_CONTEXT, metadata: { document_type: 'discord_conversation', default_channel_id: channelId, session_id: sessionId, format_version: '4', timezone: 'Asia/Taipei' }, tags: ['butler', 'discord'], content: JSON.stringify(clean) }] };
+  return { async: true, operation_id: operationId, items: [{ document_id: `butler:discord:${channelId}:${sessionId}`, update_mode: 'append', timestamp: 'unset', context: CONVERSATION_CONTEXT, metadata: { document_type: 'discord_conversation', default_channel_id: channelId, session_id: sessionId, format_version: '4', timezone: 'Asia/Taipei' }, tags: ['butler', 'discord'], observation_scopes: 'shared', content: JSON.stringify(clean) }] };
 }
 
 function externalTurn(message: StoredMessage, defaultChannelId: string): Turn {
