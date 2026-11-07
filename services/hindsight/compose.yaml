@@ -11,6 +11,8 @@ services:
     environment:
       HINDSIGHT_API_LOG_LEVEL: info
       HINDSIGHT_API_LOG_FORMAT: json
+      # Keeps the worker id across container recreation so startup recovery can reclaim its own in-flight tasks.
+      HINDSIGHT_API_WORKER_ID: butler-hindsight
       # Multilingual keyword search; indexes managed by the AP on the external DB.
       HINDSIGHT_API_TEXT_SEARCH_EXTENSION: pgroonga
       # Shared reasoning default; stages inherit unless explicitly overridden.
