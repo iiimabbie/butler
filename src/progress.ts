@@ -4,7 +4,9 @@ export type ProgressEvent =
   | { type: 'tool_start'; callId: string; toolName: string; args?: Record<string, unknown>; description?: string }
   | { type: 'tool_update'; callId: string; toolName: string; message: string }
   | { type: 'tool_end'; callId: string; toolName: string; status: 'completed' | 'failed'; error?: string }
-  | { type: 'status'; message: string };
+  | { type: 'status'; message: string }
+  | { type: 'steer'; speaker?: string; message: string }
+  | { type: 'steer_read' };
 
 export interface ProgressMessage {
   edit(content: string): Promise<unknown>;
@@ -21,6 +23,7 @@ export interface ProgressRendererOptions extends ProgressTransport {
   maxLength?: number;
 }
 
+type Steer = { text: string; read: boolean };
 type Step = { callId?: string; memory?: boolean; text: string; status: 'running' | 'completed' | 'failed'; startedAt?: number; elapsedMs?: number; error?: string };
 
 const ANSI = {
@@ -29,11 +32,12 @@ const ANSI = {
 } as const;
 // Tools backed by Hindsight render in their own section.
 const MEMORY_TOOLS: ReadonlySet<string> = new Set(['hindsight_bank_setup', 'hindsight_recall', 'memory_recall', 'memory_reflect', 'memory_tags_list', 'knowledge_page_create']);
-const TITLE = '☪ 𝐵𝑢𝑡𝑙𝑒𝑟．𝑉𝑜𝑡𝑟𝑒 𝑚𝑎𝑗𝑜𝑟𝑑𝑜𝑚𝑒 𝑒𝑥𝑐𝑙𝑢𝑠𝑖𝑓';
+const TITLE = '⸜♡⸝ 𝑅𝑒𝑛𝑒𝑒．𝑉𝑜𝑡𝑟𝑒 𝑚𝑎𝑗𝑜𝑟𝑑𝑜𝑚𝑒 𝑒𝑥𝑐𝑙𝑢𝑠𝑖𝑓';
 
 /** Single-message progress UI. Transport failures are logged and never affect the ask or tool execution. */
 export class ProgressRenderer {
   private readonly steps: Step[] = [];
+  private readonly steers: Steer[] = [];
   private readonly omitted = { memory: 0, tool: 0 };
   private message: ProgressMessage | undefined;
   private sendAttempted = false;
@@ -50,6 +54,18 @@ export class ProgressRenderer {
 
   event(event: ProgressEvent): void {
     if (this.closed) return;
+    if (event.type === 'steer') {
+      const chars = Array.from(safeText(event.message, 180));
+      const speaker = safeText(event.speaker ?? '', 40);
+      if (chars.length) { this.steers.push({ text: `${speaker ? `${speaker}: ` : ''}${chars.length > STEER_PREVIEW ? `${chars.slice(0, STEER_PREVIEW).join('')}...` : chars.join('')}`, read: false }); this.scheduleFlush(); }
+      return;
+    }
+    if (event.type === 'steer_read') {
+      // Steers are consumed in arrival order, so the earliest unread row is the one just read.
+      const steer = this.steers.find(item => !item.read);
+      if (steer) { steer.read = true; this.scheduleFlush(); }
+      return;
+    }
     if (event.type === 'status') {
       const text = safeText(event.message, 180);
       if (text) this.steps.push({ text, status: 'running', startedAt: performance.now() });
@@ -93,10 +109,10 @@ export class ProgressRenderer {
 
   private flush(): Promise<void> {
     this.flushing = this.flushing.then(async () => {
-      const body = renderProgress(this.steps, this.omitted, this.maxLength);
+      const body = renderProgress(this.steps, this.steers, this.omitted, this.maxLength);
       try {
         if (this.message) await this.message.edit(body);
-        else if (!this.sendAttempted && this.steps.length) {
+        else if (!this.sendAttempted && (this.steps.length || this.steers.length)) {
           // A rejected send may nevertheless have succeeded remotely; never retry the initial send.
           this.sendAttempted = true;
           try { this.message = await this.options.send(body); }
@@ -111,21 +127,32 @@ export class ProgressRenderer {
 type Omitted = { memory: number; tool: number };
 
 const VISIBLE_STEPS = 3;
+const STEER_PREVIEW = 10;
 
-function renderProgress(steps: Step[], omitted: Omitted, maxLength: number): string {
-  // Every text field is cut to textLimit, so a limit of 1 adds exactly one character per text row.
-  const overhead = renderFrame(steps, omitted, 0).length;
-  const textRows = renderFrame(steps, omitted, 1).length - overhead;
-  return renderFrame(steps, omitted, Math.min(180, Math.floor((maxLength - overhead) / Math.max(1, textRows))));
+function renderProgress(steps: Step[], steers: Steer[], omitted: Omitted, maxLength: number): string {
+  // Step text is cut to textLimit, so a limit of 1 adds exactly one character per step row; steer rows are fixed-length previews.
+  const overhead = renderFrame(steps, steers, omitted, 0).length;
+  const textRows = renderFrame(steps, steers, omitted, 1).length - overhead;
+  return renderFrame(steps, steers, omitted, Math.min(180, Math.floor((maxLength - overhead) / Math.max(1, textRows))));
 }
 
-function renderFrame(steps: Step[], omitted: Omitted, textLimit: number): string {
+function renderFrame(steps: Step[], steers: Steer[], omitted: Omitted, textLimit: number): string {
   const sections: string[] = [span(ANSI.boldMagenta, TITLE)];
   const memorySteps = steps.filter(step => step.memory);
   const toolSteps = steps.filter(step => !step.memory);
-  if (memorySteps.length || omitted.memory) sections.push(`${span(ANSI.boldBlue, '❖ Hindsight 記憶')}\n${renderSteps(memorySteps, omitted.memory, textLimit)}`);
-  if (toolSteps.length || omitted.tool) sections.push(`${span(ANSI.boldBlue, '❖ 執行軌跡')}\n${renderSteps(toolSteps, omitted.tool, textLimit)}`);
+  if (memorySteps.length || omitted.memory) sections.push(`${span(ANSI.boldBlue, '❖ Hindsight')}\n${renderSteps(memorySteps, omitted.memory, textLimit)}`);
+  if (toolSteps.length || omitted.tool) sections.push(`${span(ANSI.boldBlue, '❖ Process')}\n${renderSteps(toolSteps, omitted.tool, textLimit)}`);
+  if (steers.length) sections.push(`${span(ANSI.boldBlue, '❖ Steer')}\n${renderSteers(steers)}`);
   return `\`\`\`ansi\n${sections.join('\n\n')}\n\`\`\``;
+}
+
+function renderSteers(steers: Steer[]): string {
+  const visible = steers.slice(-VISIBLE_STEPS);
+  const skipped = steers.length - visible.length;
+  return [
+    ...(skipped > 0 ? [`${span(ANSI.lightGray, '├─')} ${span(ANSI.lightGray, `…略過 ${skipped} 則`)}`] : []),
+    ...visible.map((steer, index) => `${span(ANSI.lightGray, index === visible.length - 1 ? '╰─' : '├─')} ${steer.read ? span(ANSI.green, '✓') : span(ANSI.yellow, '→')} ${span(ANSI.cyan, steer.text)}`),
+  ].join('\n');
 }
 
 function renderSteps(visible: Step[], omitted: number, textLimit: number): string {
