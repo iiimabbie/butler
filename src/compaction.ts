@@ -9,6 +9,7 @@ export interface CompactOptions {
   timeoutMs?: number;
   keepRecent?: number;
   throughMessageId?: string;
+  onStart?: () => void;
 }
 
 export interface LiveCompactOptions extends CompactOptions { groups: unknown[][]; protectedGroups?: boolean[]; keepRecent?: number; existingSummary?: string; }
@@ -36,6 +37,7 @@ export async function compactSession(store: Store, sessionId: string, options: C
   const compressible = uncompressed.slice(0, Math.max(0, uncompressed.length - keepRecent));
   if (!compressible.length) return { compressedMessages: 0, retainedMessages: uncompressed.length, throughMessageId: checkpoint?.throughMessageId ?? '' };
 
+  options.onStart?.();
   const history = compressible.map(formatMessage).join('\n\n');
   const summary = await requestSummary(options, history, checkpoint?.summary);
   if (!summary) throw new Error('Compaction response was empty; existing context was preserved');
@@ -49,6 +51,7 @@ export async function compactLiveGroups(options: Omit<LiveCompactOptions, 'baseU
   const protectedGroups = options.protectedGroups ?? [];
   const compactedIndexes = options.groups.slice(0, recentStart).flatMap((_, index) => protectedGroups[index] ? [] : [index]);
   if (!compactedIndexes.length) return { summary: '', retained: options.groups };
+  options.onStart?.();
   const history = JSON.stringify(compactedIndexes.map(index => stripNativeAttachments(options.groups[index])));
   const summary = await requestSummary(options, history, options.existingSummary);
   if (!summary) throw new Error('Live compaction response was empty; existing request context was preserved');

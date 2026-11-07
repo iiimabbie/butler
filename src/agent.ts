@@ -326,9 +326,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (percent >= 80 && turn === 0) {
         const safeBoundary = currentIndex > 0 ? storedHistory[currentIndex - 1]?.id : undefined;
         if (safeBoundary) {
+          const progress = compactionProgress(config, 'compact_session');
           try {
             const previousCheckpoint = store.compactCheckpoint(session)?.throughMessageId;
-            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, keepRecent: recentCount, throughMessageId: safeBoundary });
+            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, keepRecent: recentCount, throughMessageId: safeBoundary, onStart: progress.start });
             const checkpoint = store.compactCheckpoint(session);
             if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
               store.clearContextUsage(session);
@@ -348,7 +349,11 @@ export async function ask(store: Store, session: string, prompt: string, config:
               prediction = await countAndCalibrate();
               percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
             }
-          } catch (error) { logWarn(`Automatic persistent compaction failed session=${session}`, error); }
+            progress.end('completed');
+          } catch (error) {
+            logWarn(`Automatic persistent compaction failed session=${session}`, error);
+            progress.end('failed');
+          }
         }
       }
       if (percent >= 80) {
@@ -362,8 +367,9 @@ export async function ask(store: Store, session: string, prompt: string, config:
             if (keepRecent !== recentCount && percent < 100) break;
             const beforeTokens = prediction.inputTokens;
             const beforeGroups = liveGroups.length;
+            const progress = compactionProgress(config, 'compact_live_groups');
             try {
-              const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content });
+              const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content, onStart: progress.start });
               if (compacted.summary) {
                 store.clearContextUsage(session);
                 priorUsage = undefined;
@@ -376,8 +382,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
                 percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
               }
               logTrace('context_live_compaction', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, keepRecent, beforeTokens, afterTokens: prediction.inputTokens, beforeGroups, afterGroups: liveGroups.length, pressure: percent, budget: limit, summarized: Boolean(compacted.summary) });
+              progress.end('completed');
             } catch (error) {
               logWarn(`Automatic live compaction failed session=${session}`, error);
+              progress.end('failed');
               // An unknown summary outcome must not trigger an automatic retry.
               break;
             }
@@ -707,6 +715,14 @@ function assertMemoryWriteAllowed(writeAllowed?: () => boolean): void { if (writ
 function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   try { config.onProgress?.(event); }
   catch (error) { logWarn('Agent progress callback failed', error); }
+}
+
+function compactionProgress(config: AgentConfig, toolName: string): { start: () => void; end: (status: 'completed' | 'failed') => void } {
+  const callId = randomUUID();
+  let started = false;
+  // Starts only once the compactor has something to summarize, so a no-op pass leaves no row.
+  const start = () => { started = true; emitProgress(config, { type: 'tool_start', callId, toolName }); };
+  return { start, end: status => { if (started) emitProgress(config, { type: 'tool_end', callId, toolName, status }); } };
 }
 
 function runTool(store: Store, session: string, name: string, args: Record<string, unknown>, transcriptTimezone: string): unknown {

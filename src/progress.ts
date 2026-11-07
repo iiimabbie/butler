@@ -174,6 +174,7 @@ function renderSteps(visible: Step[], omitted: number, textLimit: number): strin
 
 function describeTool(name: string): string {
   const labels: Record<string, string> = {
+    compact_session: '壓縮對話', compact_live_groups: '壓縮工具紀錄',
     code_execute: '編排查詢與整理資料', web_search: '搜尋網頁', web_fetch: '讀取網頁', local_read: '讀取檔案', local_search: '搜尋檔案', local_write: '寫入檔案', local_edit: '修改檔案', local_shell: '執行指令', local_process_output: '查看工作輸出', local_process_stop: '停止背景工作', butler_deploy: '部署更新',
     google_accounts_list: '列出 Google 帳號', google_gmail_manage: '處理郵件', google_gmail_search: '搜尋郵件', google_gmail_read: '讀取郵件', google_drive_search: '搜尋雲端檔案', google_drive_read: '讀取雲端檔案', google_drive_upload: '上傳雲端檔案',
     google_calendar_list_events: '查看行程', google_calendar_manage: '處理行程', google_tasks_read: '查看待辦事項', google_tasks_manage: '處理待辦事項',
