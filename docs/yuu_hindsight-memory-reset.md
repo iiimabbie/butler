@@ -84,7 +84,7 @@ backups/hindsight/<UTC 時間>/<bank-id>-before-reset.json
 node scripts/clear-memory-and-chats.mjs
 ```
 
-預設讀取 .data/config.yaml 的 `memory.bankId`、`memory.baseUrl` 與絕對路徑 `paths.database`，檢查目標並列出本地清除表筆數、Hindsight 範圍及保留資料；不建立備份或修改 SQLite/Hindsight。可以用 `--bank-id`、`--base-url`、`--database <絕對路徑>` 指定目標。
+預設讀取 .data/config.yaml 的 `memory.bankId`、`memory.baseUrl`，SQLite 使用專案的 `.data/butler.sqlite`，檢查目標並列出本地清除表筆數、Hindsight 範圍及保留資料；不建立備份或修改 SQLite/Hindsight。可以用 `--bank-id`、`--base-url`、`--database <絕對路徑>` 指定目標。
 
 ### 執行清除
 
