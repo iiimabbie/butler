@@ -130,7 +130,7 @@ const VISIBLE_STEPS = 3;
 const STEER_PREVIEW = 10;
 
 function renderProgress(steps: Step[], steers: Steer[], omitted: Omitted, maxLength: number): string {
-  // Every text field is cut to textLimit, so a limit of 1 adds exactly one character per text row.
+  // Step text is cut to textLimit, so a limit of 1 adds exactly one character per step row; steer rows are fixed-length previews.
   const overhead = renderFrame(steps, steers, omitted, 0).length;
   const textRows = renderFrame(steps, steers, omitted, 1).length - overhead;
   return renderFrame(steps, steers, omitted, Math.min(180, Math.floor((maxLength - overhead) / Math.max(1, textRows))));
@@ -142,8 +142,17 @@ function renderFrame(steps: Step[], steers: Steer[], omitted: Omitted, textLimit
   const toolSteps = steps.filter(step => !step.memory);
   if (memorySteps.length || omitted.memory) sections.push(`${span(ANSI.boldBlue, '❖ Hindsight')}\n${renderSteps(memorySteps, omitted.memory, textLimit)}`);
   if (toolSteps.length || omitted.tool) sections.push(`${span(ANSI.boldBlue, '❖ Process')}\n${renderSteps(toolSteps, omitted.tool, textLimit)}`);
-  if (steers.length) sections.push(`${span(ANSI.boldBlue, '❖ Steer')}\n${steers.map((steer, index) => `${span(ANSI.lightGray, index === steers.length - 1 ? '╰─' : '├─')} ${steer.read ? span(ANSI.green, '✓') : span(ANSI.yellow, '→')} ${span(ANSI.cyan, steer.text)}`).join('\n')}`);
+  if (steers.length) sections.push(`${span(ANSI.boldBlue, '❖ Steer')}\n${renderSteers(steers)}`);
   return `\`\`\`ansi\n${sections.join('\n\n')}\n\`\`\``;
+}
+
+function renderSteers(steers: Steer[]): string {
+  const visible = steers.slice(-VISIBLE_STEPS);
+  const skipped = steers.length - visible.length;
+  return [
+    ...(skipped > 0 ? [`${span(ANSI.lightGray, '├─')} ${span(ANSI.lightGray, `…略過 ${skipped} 則`)}`] : []),
+    ...visible.map((steer, index) => `${span(ANSI.lightGray, index === visible.length - 1 ? '╰─' : '├─')} ${steer.read ? span(ANSI.green, '✓') : span(ANSI.yellow, '→')} ${span(ANSI.cyan, steer.text)}`),
+  ].join('\n');
 }
 
 function renderSteps(visible: Step[], omitted: number, textLimit: number): string {
