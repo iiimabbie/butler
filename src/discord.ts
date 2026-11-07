@@ -56,6 +56,7 @@ export class DiscordHandler {
   private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number; send: () => void }>();
   private readonly activeAsk = new Set<string>();
   private readonly activeAskIds = new Map<string, string>();
+  private readonly activeProgress = new Map<string, ProgressRenderer>();
   private readonly pendingSteer = new Map<string, Array<Promise<{ content: string; source: import('./store.js').MessageSource; attachments?: import('./store.js').MessageInputAttachment[]; stored: import('./store.js').StoredMessage }>>>();
   private readonly consumedSteerMessageIds = new Map<string, Set<string>>();
   private readonly workCounts = new Map<string, number>();
@@ -184,6 +185,7 @@ export class DiscordHandler {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
+        this.activeProgress.get(message.channelId)?.event({ type: 'steer', message: content || '[附件]' });
         logTrace('steer_enqueue', { traceId, parentAskId: this.activeAskIds.get(message.channelId), inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, queueLength: pending.length, queueIndex: pending.length - 1 });
         releaseIngress();
         return;
@@ -210,6 +212,7 @@ export class DiscordHandler {
           this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: state.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); this.refreshTyping(message.channelId); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; }, log: { logInfo, logWarn, logError } });
+          this.activeProgress.set(message.channelId, progress);
           const toolRuntime = createDiscordToolRuntime({ token: config.token, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, context: { channelId: message.channelId, messageId: message.messageId, requesterId: message.authorId, handoff: input => this.handoff(input), botId: this.botIdentity?.id, botName: this.botIdentity?.name, sessionId: state.sessionId, memoryOriginChannelId: message.channelId, store: this.store, attachmentFiles, attachmentToolCallIds, onMessageDelivered: () => { this.memoryCoordinator?.notifyReady(); } } });
           if (message.reference?.messageId) {
             try { logInfo('tool_call', { tool: 'discord_read', source: 'internal', sessionId: state.sessionId }); await toolRuntime.execute('discord_read', { action: 'message', channelId: message.reference.channelId, messageId: message.reference.messageId }); }
@@ -249,6 +252,7 @@ export class DiscordHandler {
               let consumed = this.consumedSteerMessageIds.get(stored.sessionId);
               if (!consumed) this.consumedSteerMessageIds.set(stored.sessionId, consumed = new Set());
               consumed.add(storedMessageId);
+              progress?.event({ type: 'steer_read' });
               const pending = this.pendingSteer.get(message.channelId);
               if (pending?.length) pending.shift();
               logTrace('steer_dequeue', { askId, traceId, sessionId: stored.sessionId, storedMessageId, remaining: pending?.length ?? 0 });
@@ -308,6 +312,7 @@ export class DiscordHandler {
         } finally {
           this.activeAsk.delete(message.channelId);
           this.activeAskIds.delete(message.channelId);
+          this.activeProgress.delete(message.channelId);
           logTrace('discord_ask_end', { askId, traceId, sessionId: stored.sessionId, succeeded: askSucceeded, pendingSteer: this.pendingSteer.get(message.channelId)?.length ?? 0 });
           if (!this.pendingSteer.get(message.channelId)?.length) this.pendingSteer.delete(message.channelId);
         }
