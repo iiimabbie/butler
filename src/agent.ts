@@ -115,7 +115,7 @@ export const tools = [
     parameters: { type: 'object', properties: { ...historyPageSchema.properties, session_id: { type: 'string' } }, required: [], additionalProperties: false },
   },
   {
-    type: 'function', name: 'history_get', description: 'Read a stored tool-call record by id, including its arguments, execution status, timestamps and paginated result text. offset counts result characters (default 0); limit defaults to 4000, maximum 100000. Continue with result.next_offset. discord_attach_to_reply, image_generate, image_generate_self and image_save records also include delivery status. A historical operation result records the outcome at that time, not the current state of the external resource.',
+    type: 'function', name: 'history_get', description: 'Read a stored tool-call record by id, including its arguments, execution status, timestamps and paginated result text. offset counts result characters (default 0); limit defaults to 4000, maximum 100000. Continue with result.next_offset. discord_attach_to_reply, image_generate and image_save records also include delivery status. A historical operation result records the outcome at that time, not the current state of the external resource.',
     parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['id'], additionalProperties: false },
   },
   {
@@ -730,7 +730,7 @@ function runTool(store: Store, session: string, name: string, args: Record<strin
     const record = store.toolById(id);
     if (!record) throw new ToolUsageError(`No tool history record ${id}`);
     const { offset, limit } = pageArgs(args, 4000, 100_000);
-    return { ...record, result: resultPage(record.result, offset, limit), ...(['discord_attach_to_reply', 'image_generate', 'image_generate_self', 'image_save'].includes(record.name) ? { delivery: store.attachmentDelivery(id) } : {}) };
+    return { ...record, result: resultPage(record.result, offset, limit), ...(['discord_attach_to_reply', 'image_generate', 'image_save'].includes(record.name) ? { delivery: store.attachmentDelivery(id) } : {}) };
   }
   throw new ToolUsageError(`Unknown tool: ${name}`);
 }
