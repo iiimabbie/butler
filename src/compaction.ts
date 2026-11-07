@@ -1,5 +1,8 @@
 import type { Store, ReasoningEffort, StoredMessage } from './store.js';
 
+/** Messages kept verbatim after a session is compacted. */
+export const KEEP_RECENT_MESSAGES = 5;
+
 export interface CompactOptions {
   baseUrl: string;
   apiKey?: string;
@@ -33,7 +36,7 @@ export async function compactSession(store: Store, sessionId: string, options: C
   if (checkpoint && eligibleBoundary < 0) return { compressedMessages: 0, retainedMessages: eligibleMessages.length, throughMessageId: checkpoint.throughMessageId };
   const uncompressedMessages = checkpoint ? eligibleMessages.slice(eligibleBoundary + 1) : eligibleMessages;
   const uncompressed = opening ? uncompressedMessages.filter(message => message.source.discordMessageId !== opening.messageId) : uncompressedMessages;
-  const keepRecent = options.keepRecent ?? 10;
+  const keepRecent = options.keepRecent ?? KEEP_RECENT_MESSAGES;
   const compressible = uncompressed.slice(0, Math.max(0, uncompressed.length - keepRecent));
   if (!compressible.length) return { compressedMessages: 0, retainedMessages: uncompressed.length, throughMessageId: checkpoint?.throughMessageId ?? '' };
 
