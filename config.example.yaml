@@ -88,7 +88,7 @@ image:
   model: gpt-image-2.5
   protocol: images
   timeoutMs: 300000
-  # Optional path (relative to the project root); when set, image_generate_self always includes this reference.
+  # Optional path (relative to the project root); when set, image_generate with self=true always includes this reference.
   identityReferencePath: workspace/renee/appearance-reference.png
 
 # Optional background subagent (Codex CLI). Butler picks the model per task from the LLM endpoint's model list.

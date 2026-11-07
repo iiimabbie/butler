@@ -151,7 +151,7 @@ function describeTool(name: string): string {
     google_accounts_list: '列出 Google 帳號', google_gmail_manage: '處理郵件', google_gmail_search: '搜尋郵件', google_gmail_read: '讀取郵件', google_drive_search: '搜尋雲端檔案', google_drive_read: '讀取雲端檔案', google_drive_upload: '上傳雲端檔案',
     google_calendar_list_events: '查看行程', google_calendar_manage: '處理行程', google_tasks_read: '查看待辦事項', google_tasks_manage: '處理待辦事項',
     weather_forecast: '查看天氣預報', discord_read: '讀取 Discord', discord_message: '處理 Discord 訊息', discord_thread: '處理討論串', discord_react: '新增表情回應', discord_attach_to_reply: '附加檔案至回覆', discord_handoff: '交接到其他頻道',
-    schedule_manage: '管理排程', schedule_list: '查看排程', skills_read: '讀取技能', skills_manage: '管理技能', image_generate: '生成圖片', image_generate_self: '生成本人形象圖片', image_save: '命名保存圖片', history_get: '查看過往操作紀錄', history_list: '查看過往操作紀錄', history_search: '查找過往操作紀錄', memory_recall: '查找相關的過往對話', memory_reflect: '整理過往對話中的資訊',
+    schedule_manage: '管理排程', schedule_list: '查看排程', skills_read: '讀取技能', skills_manage: '管理技能', image_generate: '生成圖片', image_save: '命名保存圖片', history_get: '查看過往操作紀錄', history_list: '查看過往操作紀錄', history_search: '查找過往操作紀錄', memory_recall: '查找相關的過往對話', memory_reflect: '整理過往對話中的資訊',
   };
   return labels[name] ?? '處理資料';
 }
