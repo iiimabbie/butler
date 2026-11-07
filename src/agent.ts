@@ -329,7 +329,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
           const progress = compactionProgress(config, 'compact_session');
           try {
             const previousCheckpoint = store.compactCheckpoint(session)?.throughMessageId;
-            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, keepRecent: recentCount, throughMessageId: safeBoundary, onStart: progress.start });
+            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, throughMessageId: safeBoundary, onStart: progress.start });
             const checkpoint = store.compactCheckpoint(session);
             if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
               store.clearContextUsage(session);

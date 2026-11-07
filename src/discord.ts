@@ -20,7 +20,7 @@ import { createSkillsToolRuntime } from './skills.js';
 import { createImageToolRuntime } from './image-tools.js';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { compactSession } from './compaction.js';
+import { compactSession, KEEP_RECENT_MESSAGES } from './compaction.js';
 import { archiveOutgoingAttachment, AttachmentInputError, prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import { hasAnsiProgress } from './discord-ansi.js';
 import type { SessionOpeningContext } from './store.js';
@@ -399,8 +399,8 @@ export class DiscordHandler {
           if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，未執行壓縮。'); return; }
           this.store.saveSessionOpeningContext(current.sessionId, opening);
           this.store.clearContextUsage(current.sessionId);
-          const result = await compactSession(this.store, current.sessionId, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: current.model, reasoningEffort: this.store.effectiveChannelReasoningEffort(context.channelId), keepRecent: 10 });
-          if (!result.compressedMessages) await context.reply('沒有足夠的較早訊息可壓縮；最近 10 則訊息會保留。');
+          const result = await compactSession(this.store, current.sessionId, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: current.model, reasoningEffort: this.store.effectiveChannelReasoningEffort(context.channelId) });
+          if (!result.compressedMessages) await context.reply(`沒有足夠的較早訊息可壓縮；最近 ${KEEP_RECENT_MESSAGES} 則訊息會保留。`);
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
         } catch (error) {
           logError(`Discord conversation compaction failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
