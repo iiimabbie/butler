@@ -100,7 +100,8 @@ export class Hindsight {
   }
 
   async recall(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/memories/recall`, { query });
+    // An observation supersedes the raw facts it was consolidated from, so the same event is not recalled twice.
+    const result = await this.post(`${this.bankUrl()}/memories/recall`, { query, prefer_observations: true });
     if (!Array.isArray(asRecord(result)?.results) || (asRecord(result)!.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
     return result;
   }
