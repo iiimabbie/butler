@@ -5,7 +5,7 @@ export type ProgressEvent =
   | { type: 'tool_update'; callId: string; toolName: string; message: string }
   | { type: 'tool_end'; callId: string; toolName: string; status: 'completed' | 'failed'; error?: string }
   | { type: 'status'; message: string }
-  | { type: 'steer'; message: string }
+  | { type: 'steer'; speaker?: string; message: string }
   | { type: 'steer_read' };
 
 export interface ProgressMessage {
@@ -56,7 +56,8 @@ export class ProgressRenderer {
     if (this.closed) return;
     if (event.type === 'steer') {
       const chars = Array.from(safeText(event.message, 180));
-      if (chars.length) { this.steers.push({ text: chars.length > STEER_PREVIEW ? `${chars.slice(0, STEER_PREVIEW).join('')}...` : chars.join(''), read: false }); this.scheduleFlush(); }
+      const speaker = safeText(event.speaker ?? '', 40);
+      if (chars.length) { this.steers.push({ text: `${speaker ? `${speaker}: ` : ''}${chars.length > STEER_PREVIEW ? `${chars.slice(0, STEER_PREVIEW).join('')}...` : chars.join('')}`, read: false }); this.scheduleFlush(); }
       return;
     }
     if (event.type === 'steer_read') {

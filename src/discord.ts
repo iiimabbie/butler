@@ -185,7 +185,7 @@ export class DiscordHandler {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
-        this.activeProgress.get(message.channelId)?.event({ type: 'steer', message: content || '[附件]' });
+        this.activeProgress.get(message.channelId)?.event({ type: 'steer', speaker: message.authorName, message: content || '[附件]' });
         logTrace('steer_enqueue', { traceId, parentAskId: this.activeAskIds.get(message.channelId), inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, queueLength: pending.length, queueIndex: pending.length - 1 });
         releaseIngress();
         return;
