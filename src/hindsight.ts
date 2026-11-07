@@ -22,6 +22,8 @@ export type ConversationRetainPayload = Readonly<{
     context: string;
     metadata: Readonly<Record<string, string>>;
     tags: readonly ['butler', 'discord'];
+    // One observation scope for the whole bank, so person/project tags do not split observations apart.
+    observation_scopes: 'shared';
     content: string;
   }>];
 }>;
