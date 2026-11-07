@@ -179,6 +179,24 @@ export async function promptPrefix(config: AgentConfig, workspace: WorkspaceCont
   return { input: [...workspaceInput, ...runtimeInput, ...skillsInput], tools: fullAvailableTools, googleRuntime };
 }
 
+const REPLAY_OUTPUT_LIMIT = 2000;
+const REPLAY_OUTPUT_HEAD = 1500;
+const REPLAY_OUTPUT_TAIL = 500;
+
+// Trims long tool outputs once when an ask is saved; later asks replay this copy unchanged so the cached prefix stays stable.
+function replayItems(items: unknown[]): unknown[] {
+  const toolNames = new Map(items.filter(isRecord).filter(item => item.type === 'function_call').map(item => [item.call_id, item.name]));
+  return items.map(item => {
+    if (!isRecord(item) || item.type !== 'function_call_output' || typeof item.output !== 'string' || item.output.length <= REPLAY_OUTPUT_LIMIT) return item;
+    if (['memory_recall', 'memory_reflect', 'skills_read'].includes(toolNames.get(item.call_id) as string)) return item;
+    const output = item.output;
+    // Cut on code point boundaries; a lone surrogate would make the request invalid.
+    const headEnd = REPLAY_OUTPUT_HEAD - (/[\uD800-\uDBFF]/.test(output[REPLAY_OUTPUT_HEAD - 1]!) ? 1 : 0);
+    const tailStart = output.length - REPLAY_OUTPUT_TAIL + (/[\uDC00-\uDFFF]/.test(output[output.length - REPLAY_OUTPUT_TAIL]!) ? 1 : 0);
+    return { ...item, output: `${output.slice(0, headEnd)}…[回放時省略 ${tailStart - headEnd} 字；完整結果用 history_get 查 tool_history_id]…${output.slice(tailStart)}` };
+  });
+}
+
 export async function ask(store: Store, session: string, prompt: string, config: AgentConfig): Promise<string> {
   if (!store.hasSession(session)) throw new Error(`Unknown session: ${session}`);
   if (!config.storedInput) throw new Error('ask requires an already persisted input message');
@@ -519,7 +537,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
         const noReply = text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]');
         // The LLM draft is not a delivered conversation turn; outgoing delivery owns persistence.
         logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: noReply ? 'not_delivered' : 'selected', reason: noReply ? 'no_reply_marker' : 'final_text' });
-        for (const [messageId, items] of toolWork) if (messageId !== fresh[0]!.id || items !== initialAskContext) store.saveAskContext(messageId, items);
+        for (const [messageId, items] of toolWork) if (messageId !== fresh[0]!.id || items !== initialAskContext) store.saveAskContext(messageId, replayItems(items));
         config.onAskFinishing?.();
         await config.onResponseReady?.(text);
         return text;
