@@ -25,7 +25,7 @@ const HELP = `用法：node scripts/clear-memory-and-chats.mjs [--help] [--bank-
 預設為唯讀 preview，不建立備份、不修改聊天或記憶。
 --bank-id <id>                  精確 Hindsight bank ID
 --base-url <url>                Hindsight base URL
---database <absolute-path>      覆寫 .data/config.yaml paths.database
+--database <absolute-path>      覆寫預設的 .data/butler.sqlite
 --execute                      清除 Hindsight 記憶與 SQLite 聊天資料
 --confirm-bank <id>             必須與 bank ID 完全相同
 --confirm-database <path>       必須與解析後絕對 SQLite 路徑完全相同
@@ -219,7 +219,7 @@ async function main() {
   const base = string(options.baseUrl ?? config?.memory?.baseUrl, 'memory.baseUrl').replace(/\/$/, '');
   const url = new URL(base);
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error('base URL 必須為無憑證的 http(s) URL');
-  const rawDatabase = string(options.database ?? config?.paths?.database, 'paths.database');
+  const rawDatabase = options.database ?? path.join(ROOT, '.data/butler.sqlite');
   if (!path.isAbsolute(rawDatabase)) throw new Error('SQLite 路徑必須是絕對路徑');
   const database = path.resolve(rawDatabase);
   if (options.execute && (options.confirmBank !== bankId || options.confirmDatabase !== database)) throw new Error('確認值必須與目標 bank ID、絕對 SQLite 路徑完全相同');
