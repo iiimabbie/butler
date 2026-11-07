@@ -2,13 +2,13 @@ import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve, basename } from 'node:path';
-import type { Store, StoredMessage } from './store.js';
+import type { DiscordPresence, Store, StoredMessage } from './store.js';
 import { MessageFlags } from 'discord.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
 export type HandoffInput = { targetChannelId: string; content: string; cardMessageId: string; cardTime: string; originChannelId: string; originMessageId?: string; requesterId?: string };
-export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; setPresence?: (input: { status?: DiscordPresence['status']; state?: string }) => DiscordPresence; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -23,6 +23,7 @@ const specs: ToolSpec[] = [
   { name: 'edit', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'delete', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
+  { name: 'discord_presence', description: 'Set this bot\'s Discord custom status text and online status. Applies everywhere the bot appears and persists across restarts. Omitted fields keep their current value; an empty state clears the text.', properties: { status: { type: 'string', enum: ['online', 'idle', 'dnd'] }, state: { type: 'string', maxLength: 128 } }, required: [] },
   { name: 'pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
@@ -178,6 +179,12 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         }
       }
       return { ok: true, channelId, messageId, emojis: added };
+    }
+    if (name === 'discord_presence') {
+      const setPresence = options.context.setPresence;
+      if (!setPresence) throw new ToolUsageError('Presence is not available here');
+      if (args.status === undefined && args.state === undefined) throw new ToolUsageError('status or state is required');
+      return { ok: true, ...setPresence({ status: args.status as DiscordPresence['status'] | undefined, state: args.state as string | undefined }) };
     }
     if (name === 'message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
