@@ -1,14 +1,16 @@
 import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { allowedReferencePath, detectImage } from './image-tools.js';
 import { resolve, basename } from 'node:path';
-import type { DiscordPresence, Store, StoredMessage } from './store.js';
+import type { DiscordPresence, DiscordPresenceInput, Store, StoredMessage } from './store.js';
 import { MessageFlags } from 'discord.js';
 import { prepareAttachments, type DiscordAttachmentInput } from './input-attachments.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
 export type HandoffInput = { targetChannelId: string; content: string; cardMessageId: string; cardTime: string; originChannelId: string; originMessageId?: string; requesterId?: string };
-export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; setPresence?: (input: { status?: DiscordPresence['status']; state?: string }) => DiscordPresence; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; setPresence?: (input: DiscordPresenceInput) => DiscordPresence; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -23,7 +25,7 @@ const specs: ToolSpec[] = [
   { name: 'edit', description: 'Edit a message authored by this bot.', properties: { ...channelMessage, content: { type: 'string', minLength: 1, maxLength: 2000 } }, required: ['channelId', 'messageId', 'content'] },
   { name: 'delete', description: 'Delete a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'discord_react', description: 'Add one or more reactions to a message. Stops on failure without automatically retrying.', properties: { ...channelMessage, emojis: emojisSchema }, required: ['channelId', 'messageId', 'emojis'] },
-  { name: 'discord_presence', description: 'Set this bot\'s Discord custom status text and online status. Applies everywhere the bot appears and persists across restarts. Omitted fields keep their current value; an empty state clears the text.', properties: { status: { type: 'string', enum: ['online', 'idle', 'dnd'] }, state: { type: 'string', maxLength: 128 } }, required: [] },
+  { name: 'discord_profile', description: 'Edit the bot profile globally, visible in every server. Avatar and banner changes are rate-limited.', properties: { status: { type: 'string', enum: ['online', 'idle', 'dnd'] }, activity: { type: ['object', 'null'], properties: { type: { type: 'string', enum: ['custom', 'playing', 'listening', 'watching', 'competing'] }, text: { type: 'string', minLength: 1, maxLength: 128 } }, required: ['type', 'text'], additionalProperties: false, description: 'Activity to display, or null to clear.' }, avatar: { type: 'string', description: 'PNG, JPEG, GIF or WebP path in workspace or attachments; empty removes.' }, banner: { type: 'string', description: 'PNG, JPEG, GIF or WebP path in workspace or attachments; empty removes.' }, bio: { type: 'string', maxLength: 400, description: 'About Me; empty clears.' } }, required: [] },
   { name: 'pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
@@ -180,11 +182,30 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       }
       return { ok: true, channelId, messageId, emojis: added };
     }
-    if (name === 'discord_presence') {
-      const setPresence = options.context.setPresence;
-      if (!setPresence) throw new ToolUsageError('Presence is not available here');
-      if (args.status === undefined && args.state === undefined) throw new ToolUsageError('status or state is required');
-      return { ok: true, ...setPresence({ status: args.status as DiscordPresence['status'] | undefined, state: args.state as string | undefined }) };
+    if (name === 'discord_profile') {
+      if (!Object.keys(args).length) throw new ToolUsageError('At least one profile field is required');
+      const result: Record<string, unknown> = { ok: true };
+      if (args.status !== undefined || args.activity !== undefined) {
+        if (!options.context.setPresence) throw new ToolUsageError('Presence is not available here');
+        Object.assign(result, options.context.setPresence({ status: args.status as DiscordPresence['status'] | undefined, activity: args.activity as DiscordPresence['activity'] | undefined }));
+      }
+      if (args.bio !== undefined) result.bio = asRecord(await api('PATCH', '/applications/@me', { description: args.bio })).description;
+      const images: Record<string, string | null> = {};
+      for (const field of ['avatar', 'banner'] as const) {
+        const path = args[field] as string | undefined;
+        if (path === undefined) continue;
+        if (!path) { images[field] = null; continue; }
+        if (!options.attachmentDir) throw new ToolUsageError('Attachment storage is unavailable');
+        const bytes = await readFile(await allowedReferencePath(path, options.attachmentDir));
+        const mime = detectImage(bytes)?.mime ?? (/^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6)) ? 'image/gif' : undefined);
+        if (!mime) throw new ToolUsageError(`${field} must be a PNG, JPEG, GIF or WebP image`);
+        images[field] = `data:${mime};base64,${bytes.toString('base64')}`;
+      }
+      if (Object.keys(images).length) {
+        const user = asRecord(await api('PATCH', '/users/@me', images));
+        for (const field of Object.keys(images)) result[field] = user[field];
+      }
+      return result;
     }
     if (name === 'message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
@@ -291,6 +312,10 @@ function validateArgs(spec: ToolSpec,args:Record<string,unknown>):void {
   validateValue({type:'object',properties:spec.properties,required:spec.required,additionalProperties:false},args,'arguments');
 }
 function validateValue(rule:Record<string,unknown>,value:unknown,path:string):void {
+  if (Array.isArray(rule.type)) {
+    if (value === null && rule.type.includes('null')) return;
+    rule = { ...rule, type: rule.type.find(type => type !== 'null') };
+  }
   if (rule.type === 'boolean') { if (typeof value !== 'boolean') throw new ToolUsageError(`${path} is invalid`); return; }
   if(rule.type==='string') {
     if(typeof value!=='string'||value.length<Number(rule.minLength??0)||value.length>Number(rule.maxLength??Infinity)||(rule.pattern&&!new RegExp(String(rule.pattern)).test(value))||(Array.isArray(rule.enum)&&!rule.enum.includes(value))) throw new ToolUsageError(`${path} is invalid`);

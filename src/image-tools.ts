@@ -197,7 +197,7 @@ function isInside(root: string, target: string): boolean {
 }
 
 // Resolve a caller-supplied reference path and keep it inside workspace or the attachment directory.
-async function allowedReferencePath(path: string, attachmentDir: string): Promise<string> {
+export async function allowedReferencePath(path: string, attachmentDir: string): Promise<string> {
   let real: string;
   try { real = await realpath(isAbsolute(path) ? path : join(PROJECT_ROOT, path)); }
   catch { throw new ToolUsageError(`Reference image not found: ${path}`); }
@@ -246,7 +246,7 @@ async function readGeneratedImage(response: Response, sensitive: Array<string | 
   }
 }
 
-function detectImage(bytes: Buffer): { extension: 'png' | 'jpg' | 'webp'; mime: string } | undefined {
+export function detectImage(bytes: Buffer): { extension: 'png' | 'jpg' | 'webp'; mime: string } | undefined {
   if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { extension: 'png', mime: 'image/png' };
   if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return { extension: 'jpg', mime: 'image/jpeg' };
   if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return { extension: 'webp', mime: 'image/webp' };
