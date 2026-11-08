@@ -626,12 +626,15 @@ export class DiscordHandler {
   }
 
   // Channel inputs go to a fresh session once the prompt cache has expired.
-  private channelSessionForWrite(channelId: string): { sessionId: string; model: string } {
+  // ownWork is the caller's own queued work: a notification is claimed inside its enqueue.
+  private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
     const config = this.getRuntime().discord;
     const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
     const last = this.store.lastModelRequestTime(state.sessionId);
     // A session that has not called the model yet is already fresh.
     if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    // Work running or queued in this channel still belongs to the current session.
+    if ((this.workCounts.get(channelId) ?? 0) > ownWork) return state;
     // A running subagent reports back to this session, so keep it until the result arrives.
     if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
     return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle') };
@@ -678,7 +681,7 @@ export class DiscordHandler {
         const target = await this.outputChannel(channelId);
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
-        const state = this.channelSessionForWrite(channelId);
+        const state = this.channelSessionForWrite(channelId, 1);
         const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
         if (!storedInput) return;
         started = true;
