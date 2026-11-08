@@ -813,12 +813,20 @@ export class Store implements SchedulerStore {
     return { sessionId, model: this.effectiveChannelModel(channelId, defaultModel) };
   }
 
-  setChannelSession(channelId: string, sessionId: string, ownerId = 'unknown'): void {
+  setChannelSession(channelId: string, sessionId: string, ownerId: string, carryFromSession?: string): number {
     this.db.exec('BEGIN');
     try {
+      // Carry the unanswered user inputs that arrived after the last model turn and have not been sent to memory.
+      // Moving the rows keeps their IDs, so each message is still retained to memory exactly once.
+      const carried = carryFromSession ? Number(this.db.prepare(`UPDATE messages SET session_id=?
+        WHERE session_id=? AND role='user'
+          AND rowid > COALESCE((SELECT MAX(rowid) FROM messages WHERE session_id=? AND role!='user'), 0)
+          AND rowid > COALESCE((SELECT MAX(m.rowid) FROM messages m JOIN memory_batch_sources b ON b.message_id=m.id WHERE m.session_id=?), 0)`)
+        .run(sessionId, carryFromSession, carryFromSession, carryFromSession).changes) : 0;
       this.db.prepare('UPDATE channel_state SET session_id=? WHERE channel_id=?').run(sessionId, channelId);
       this.db.prepare("INSERT OR IGNORE INTO session_sources VALUES(?,?,'owner',?,'')").run(sessionId, channelId, ownerId);
       this.db.exec('COMMIT');
+      return carried;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
