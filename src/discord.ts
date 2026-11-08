@@ -43,6 +43,8 @@ const modelInflight = new Map<string, Promise<string[]>>();
 const imageModelCache = new Map<string, { expiresAt: number; models: string[] }>();
 const imageModelInflight = new Map<string, Promise<string[]>>();
 const MODEL_TTL = 10 * 60_000;
+// Anthropic prompt cache lasts at most one hour; after idle expiry, a new session is cheaper than recomputing the old one.
+const IDLE_SESSION_RESET_MS = 55 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
@@ -159,9 +161,24 @@ export class DiscordHandler {
       };
       const policy = this.store.effectiveChannelPolicy(message.channelId);
       if (!policy.tracked) { releaseIngress(); return; }
-      const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
+      let stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
-      const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
+      let ingestion!: ReturnType<Store['addMessageOnce']>;
+      const lastMessageAt = this.store.lastMessageTime(stateAtIngestion.sessionId);
+      const isSteer = mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1;
+      if (!botInput && !isSteer && lastMessageAt && Date.now() - Date.parse(lastMessageAt) >= IDLE_SESSION_RESET_MS) {
+        await this.enqueue(message.channelId, async () => {
+          stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
+          const last = this.store.lastMessageTime(stateAtIngestion.sessionId);
+          const idleMs = last ? Date.now() - Date.parse(last) : 0;
+          if (idleMs >= IDLE_SESSION_RESET_MS && (!message.messageId || !this.store.discordMessageId(message.messageId))) {
+            const oldSessionId = stateAtIngestion.sessionId;
+            const sessionId = await this.switchChannelSession(message.channelId, oldSessionId, ingressRuntime.discord.ownerId);
+            if (sessionId) { stateAtIngestion = { ...stateAtIngestion, sessionId }; logInfo('discord_idle_session_reset', { channelId: message.channelId, oldSessionId, sessionId, idleMinutes: idleMs / 60_000 }); }
+          }
+          ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
+        });
+      } else ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       const traceId = message.messageId ?? ingestion.message.id;
       logTrace('discord_ingress', { traceId, inputMessageId: message.messageId ?? ingestion.message.id, sessionId: stateAtIngestion.sessionId, channelId: message.channelId, persisted: ingestion.created, contentLength: effectiveContent.length });
       if (!ingestion.created) { releaseIngress(); return; }
@@ -443,13 +460,8 @@ export class DiscordHandler {
           const runtime = this.getRuntime();
           const config = runtime.discord;
           const oldState = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
-          const opening = await this.readOpeningMessage(context.channelId);
-          if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
-          this.memoryCoordinator?.flushSession(context.channelId, oldState.sessionId);
-          const sessionId = this.store.newSession();
-          this.store.saveSessionOpeningContext(sessionId, opening);
-          this.store.setChannelSession(context.channelId, sessionId, config.ownerId);
-          this.consumedSteerMessageIds.delete(oldState.sessionId);
+          const sessionId = await this.switchChannelSession(context.channelId, oldState.sessionId, config.ownerId);
+          if (!sessionId) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
           await context.reply(`新 session：${sessionId}`);
         });
       } finally {
@@ -628,6 +640,19 @@ export class DiscordHandler {
     };
     const queued = this.enqueue(origin.channelId, work);
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
+  }
+
+  private async switchChannelSession(channelId: string, oldSessionId: string, ownerId: string): Promise<string | undefined> {
+    let opening: SessionOpeningContext | undefined;
+    try { opening = await this.readOpeningMessage(channelId); }
+    catch (error) { logWarn('Discord opening message lookup failed', error); return undefined; }
+    if (!opening) { logWarn(`Discord opening message unavailable channel=${channelId}`); return undefined; }
+    this.memoryCoordinator?.flushSession(channelId, oldSessionId);
+    const sessionId = this.store.newSession();
+    this.store.saveSessionOpeningContext(sessionId, opening);
+    this.store.setChannelSession(channelId, sessionId, ownerId);
+    this.consumedSteerMessageIds.delete(oldSessionId);
+    return sessionId;
   }
 
   // Every channel input (message, notification, handoff, subagent event) carries the channel's opening message as standing context.

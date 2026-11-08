@@ -214,6 +214,10 @@ export class Store implements SchedulerStore {
     return this.addMessageOnce(session, role, content, source, attachments, memoryWrite).message;
   }
 
+  discordMessageId(discordMessageId: string): string | undefined {
+    return (this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(discordMessageId, discordMessageId) as { message_id: string } | undefined)?.message_id;
+  }
+
   addMessageOnce(session: string, role: string, content: string, source: MessageSource = {}, attachments: MessageInputAttachment[] = [], memoryWrite?:boolean): AddMessageResult {
     const canWrite = memoryWrite ?? this.memoryWriteAllowed(source.channelId);
     const message: StoredMessage = { id: randomUUID(), sessionId: session, role, content, createdAt: source.eventTime ?? new Date().toISOString(), source, attachments, preparationStatus: 'preparing', discordSegments: [] };
@@ -221,8 +225,8 @@ export class Store implements SchedulerStore {
     try {
       if (source.discordMessageId) {
         // Butler's own replies keep their Discord IDs on outgoing segments, so a later fetch of one must not store a second copy.
-        const existing = this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(source.discordMessageId, source.discordMessageId) as { message_id: string } | undefined;
-        if (existing) { this.db.exec('COMMIT'); return { message: this.messagesWithSourcesForId(existing.message_id), created: false }; }
+        const existing = this.discordMessageId(source.discordMessageId);
+        if (existing) { this.db.exec('COMMIT'); return { message: this.messagesWithSourcesForId(existing), created: false }; }
       }
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name,forwarded_message_json,is_bot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -394,6 +398,10 @@ export class Store implements SchedulerStore {
     this.updateMemoryBatch(operationId, resolution, { error: note });
   }
 
+
+  lastMessageTime(session: string): string | undefined {
+    return (this.db.prepare('SELECT created_at FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(session) as { created_at: string } | undefined)?.created_at;
+  }
 
   messages(session: string): Message[] {
     return this.db.prepare('SELECT role,content FROM messages WHERE session_id=? ORDER BY rowid').all(session) as unknown as Message[];
