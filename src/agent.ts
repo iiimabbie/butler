@@ -323,7 +323,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
       };
       let prediction = await countAndCalibrate();
       let percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
-      if (percent >= 80 && turn === 0) {
+      // Compact history at 65% before the first request, leaving room for this ask's tool output so live compaction stays rare.
+      if (percent >= 65 && turn === 0) {
         const safeBoundary = currentIndex > 0 ? storedHistory[currentIndex - 1]?.id : undefined;
         if (safeBoundary) {
           const progress = compactionProgress(config, 'compact_session');
