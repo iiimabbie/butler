@@ -10,7 +10,7 @@ import { prepareAttachments, type DiscordAttachmentInput } from './input-attachm
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 
 export type HandoffInput = { targetChannelId: string; content: string; cardMessageId: string; cardTime: string; originChannelId: string; originMessageId?: string; requesterId?: string };
-export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; setPresence?: (input: DiscordPresenceInput) => DiscordPresence; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
+export type DiscordToolContext = { channelId: string; messageId?: string; requesterId?: string; handoff?: (input: HandoffInput) => Promise<void>; setPresence?: (input: DiscordPresenceInput) => DiscordPresence; readPresence?: (channelId: string, userId?: string) => Promise<unknown>; botId?: string; botName?: string; sessionId?: string; memoryOriginChannelId?: string; store?: Store; onMessageDelivered?: (channelId: string, sessionId: string) => void; attachmentFiles: Array<{ attachment: string; name: string }>; attachmentToolCallIds?: string[] };
 type DiscordToolDefinition = { type: 'function'; name: string; description: string; parameters: Record<string, unknown> };
 type ToolSpec = { name: string; description: string; properties: Record<string, unknown>; required: string[] };
 const projectRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -29,6 +29,7 @@ const specs: ToolSpec[] = [
   { name: 'pin', description: 'Pin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'unpin', description: 'Unpin a message in a channel.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'channel', description: 'Fetch channel details, including forum available tags and whether a tag is required.', properties: { channelId: snowflake }, required: ['channelId'] },
+  { name: 'presence', description: 'Read cached guild member presences.', properties: { channelId: snowflake, userId: snowflake }, required: [] },
   { name: 'create_forum_post', description: 'Create a Forum or Media post; channelId is the forum ID and content is the first post body. appliedTagIds must come from that forum’s available tags.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 2000 }, appliedTagIds: { type: 'array', items: snowflake, maxItems: 5, uniqueItems: true } }, required: ['channelId', 'title', 'content'] },
   { name: 'archive', description: 'Archive a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
   { name: 'delete_thread', description: 'Delete a thread; channelId is its parent and messageId is the thread ID.', properties: channelMessage, required: ['channelId', 'messageId'] },
@@ -38,12 +39,12 @@ const specs: ToolSpec[] = [
   { name: 'discord_handoff', description: 'Hand work over to another tracked channel\'s Butler session. Posts a handoff card there and starts that session on it right away. That session sees only title and content, so include the goal, what is already known or done, relevant links/IDs and what remains. The target channel owns the work afterwards. Do not hand back work you just received.', properties: { channelId: snowflake, title: { type: 'string', minLength: 1, maxLength: 100 }, content: { type: 'string', minLength: 1, maxLength: 4000 } }, required: ['channelId', 'title', 'content'] },
 ];
 const discordGroups: Record<string, Record<string, string>> = {
-  discord_read: { message: 'message', channel_messages: 'channel_messages', pins: 'pins', channel: 'channel' },
+  discord_read: { message: 'message', channel_messages: 'channel_messages', pins: 'pins', channel: 'channel', presence: 'presence' },
   discord_message: { send: 'send', edit: 'edit', delete: 'delete', pin: 'pin', unpin: 'unpin' },
   discord_thread: { create_forum_post: 'create_forum_post', archive: 'archive', delete: 'delete_thread', rename_post: 'rename_post', rename_forum: 'rename_forum' },
 };
 const groupDescriptions: Record<string, string> = {
-  discord_read: 'Read Discord messages, pins and channel details.\nmessage — Fetch a message and prepare its original attachments; required channelId, messageId.\nchannel_messages — Fetch channel messages; required channelId; optional limit and before (older messages).\npins — List pinned messages, newest first; required channelId; optional limit and before (pinned_at timestamp for older pins).\nchannel — Fetch channel details, forum tags and whether a tag is required; required channelId.',
+  discord_read: 'Read Discord messages, pins, channel details and member presences.\nmessage — Fetch a message and prepare its original attachments; required channelId, messageId.\nchannel_messages — Fetch channel messages; required channelId; optional limit and before (older messages).\npins — List pinned messages, newest first; required channelId; optional limit and before (pinned_at timestamp for older pins).\nchannel — Fetch channel details, forum tags and whether a tag is required; required channelId.\npresence — Read cached guild presences; supply channelId or userId, or both. userId alone uses the current channel’s guild; without userId, returns up to 50 non-offline cached presences. Missing cached presence is reported as offline.',
   discord_message: 'Send, edit, delete or pin Discord messages.\nsend — Send a channel message; required channelId, content; user and role mentions notify them.\nedit — Edit a message authored by this bot; required channelId, messageId, content.\ndelete — Delete a channel message; required channelId, messageId.\npin — Pin a message; required channelId, messageId.\nunpin — Unpin a message; required channelId, messageId.',
   discord_thread: 'Create and manage Discord forum posts and threads.\ncreate_forum_post — Create a Forum or Media post; required channelId, title, content; appliedTagIds must come from that forum’s available tags.\narchive — Archive a thread; required channelId (parent), messageId (thread).\ndelete — Delete a thread; required channelId (parent), messageId (thread).\nrename_post — Rename a forum post thread; required threadId, name.\nrename_forum — Rename a forum channel; required channelId, name.',
 };
@@ -167,6 +168,11 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
     const content = args.content === undefined ? undefined : stringArg(args.content, 'content');
     if (content !== undefined && name !== 'discord_handoff' && content.length > 2000) throw new ToolUsageError('Discord message exceeds 2000 characters');
+    if (name === 'presence') {
+      if (!channelId && !args.userId) throw new ToolUsageError('channelId or userId is required');
+      if (!options.context.readPresence) throw new ToolUsageError('Presence is not available here');
+      return options.context.readPresence(channelId ?? options.context.channelId, args.userId as string | undefined);
+    }
     if (name === 'discord_react') {
       const emojis = args.emojis as string[];
       const added: string[] = [];
