@@ -131,6 +131,10 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
     if (!(this.db.prepare('PRAGMA table_info(restart_notice)').all() as Array<{ name: string }>).some(column => column.name === 'channel_id')) this.db.exec('ALTER TABLE restart_notice ADD COLUMN channel_id TEXT');
+    if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).some(column => column.name === 'last_model_request_at')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN last_model_request_at TEXT');
+      this.db.exec('UPDATE sessions SET last_model_request_at = (SELECT sampled_at FROM session_context_usage WHERE session_id = sessions.id) WHERE last_model_request_at IS NULL');
+    }
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
@@ -194,7 +198,7 @@ export class Store implements SchedulerStore {
 
   newSession(): string {
     const id = randomUUID();
-    this.db.prepare('INSERT INTO sessions VALUES(?,?)').run(id, new Date().toISOString());
+    this.db.prepare('INSERT INTO sessions(id,created_at) VALUES(?,?)').run(id, new Date().toISOString());
     return id;
   }
 
@@ -399,8 +403,8 @@ export class Store implements SchedulerStore {
   }
 
 
-  lastMessageTime(session: string): string | undefined {
-    return (this.db.prepare('SELECT created_at FROM messages WHERE session_id=? ORDER BY rowid DESC LIMIT 1').get(session) as { created_at: string } | undefined)?.created_at;
+  lastModelRequestTime(session: string): string | null {
+    return (this.db.prepare('SELECT last_model_request_at FROM sessions WHERE id=?').get(session) as { last_model_request_at: string | null } | undefined)?.last_model_request_at ?? null;
   }
 
   messages(session: string): Message[] {
@@ -695,6 +699,7 @@ export class Store implements SchedulerStore {
     try {
       this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
         .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
+      this.db.prepare('UPDATE sessions SET last_model_request_at=? WHERE id=?').run(attemptedAt, record.sessionId);
       this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 500)')
         .run(new Date(Date.parse(attemptedAt) - 24 * 60 * 60 * 1000).toISOString());
       this.db.exec('COMMIT');

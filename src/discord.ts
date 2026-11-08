@@ -94,8 +94,7 @@ export class DiscordHandler {
   recordRuntimeNotice(channelId: string, text: string): void {
     if (!this.store.isTrackedChannel(channelId)) return;
     try {
-      const config = this.getRuntime().discord;
-      const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+      const state = this.channelSessionForWrite(channelId);
       const { message } = this.store.addMessageOnce(state.sessionId, 'user', `[Butler runtime notice] ${text}`, { sourceKind: 'deployment_result', channelId }, []);
       this.store.updateAttachments(message.id, []);
     } catch (error) { logError(`Runtime notice was not recorded channel=${channelId}`, error, { mention: !isHttp429(error) }); }
@@ -161,18 +160,11 @@ export class DiscordHandler {
       };
       const policy = this.store.effectiveChannelPolicy(message.channelId);
       if (!policy.tracked) { releaseIngress(); return; }
-      let stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
-      let ingestion!: ReturnType<Store['addMessageOnce']>;
-      const lastMessageAt = this.store.lastMessageTime(stateAtIngestion.sessionId);
-      const isSteer = mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1;
-      if (!isSteer && lastMessageAt && Date.now() - Date.parse(lastMessageAt) >= IDLE_SESSION_RESET_MS) {
-        await this.enqueue(message.channelId, async () => {
-          stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
-          if (!message.messageId || !this.store.discordMessageId(message.messageId)) stateAtIngestion = await this.resetIdleSession(message.channelId, stateAtIngestion, ingressRuntime.discord.ownerId);
-          ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
-        });
-      } else ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
+      const stateAtIngestion = message.messageId && this.store.discordMessageId(message.messageId)
+        ? this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId)
+        : this.channelSessionForWrite(message.channelId);
+      const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       const traceId = message.messageId ?? ingestion.message.id;
       logTrace('discord_ingress', { traceId, inputMessageId: message.messageId ?? ingestion.message.id, sessionId: stateAtIngestion.sessionId, channelId: message.channelId, persisted: ingestion.created, contentLength: effectiveContent.length });
       if (!ingestion.created) { releaseIngress(); return; }
@@ -454,8 +446,7 @@ export class DiscordHandler {
           const runtime = this.getRuntime();
           const config = runtime.discord;
           const oldState = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
-          const sessionId = await this.switchChannelSession(context.channelId, oldState.sessionId, config.ownerId);
-          if (!sessionId) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
+          const sessionId = this.switchChannelSession(context.channelId, oldState.sessionId, config.ownerId, 'command');
           await context.reply(`新 session：${sessionId}`);
         });
       } finally {
@@ -636,27 +627,28 @@ export class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
-  // Any input that starts work in a channel session (message, bot, handoff, notification) moves to a fresh session after the cache has expired.
-  private async resetIdleSession<T extends { sessionId: string }>(channelId: string, state: T, ownerId: string): Promise<T> {
-    const last = this.store.lastMessageTime(state.sessionId);
-    const idleMs = last ? Date.now() - Date.parse(last) : 0;
-    if (idleMs < IDLE_SESSION_RESET_MS) return state;
-    const sessionId = await this.switchChannelSession(channelId, state.sessionId, ownerId);
-    if (!sessionId) return state;
+  // Channel inputs use a fresh session after the cache expires when no work or subagent is active.
+  // ownWork counts the caller's own queued work, so a notification claimed inside enqueue can still reset an idle session.
+  private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
+    const config = this.getRuntime().discord;
+    const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+    const last = this.store.lastModelRequestTime(state.sessionId);
+    // A new session has no request yet; this also prevents consecutive resets after idle.
+    if (!last) return state;
+    const idleMs = Date.now() - Date.parse(last);
+    if (idleMs < IDLE_SESSION_RESET_MS || (this.workCounts.get(channelId) ?? 0) > ownWork) return state;
+    if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
+    const sessionId = this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle');
     logInfo('discord_idle_session_reset', { channelId, oldSessionId: state.sessionId, sessionId, idleMinutes: Math.round(idleMs / 60_000) });
     return { ...state, sessionId };
   }
 
-  private async switchChannelSession(channelId: string, oldSessionId: string, ownerId: string): Promise<string | undefined> {
-    let opening: SessionOpeningContext | undefined;
-    try { opening = await this.readOpeningMessage(channelId); }
-    catch (error) { logWarn('Discord opening message lookup failed', error); return undefined; }
-    if (!opening) { logWarn(`Discord opening message unavailable channel=${channelId}`); return undefined; }
+  private switchChannelSession(channelId: string, oldSessionId: string, ownerId: string, reason: 'command' | 'idle'): string {
     this.memoryCoordinator?.flushSession(channelId, oldSessionId);
     const sessionId = this.store.newSession();
-    this.store.saveSessionOpeningContext(sessionId, opening);
     this.store.setChannelSession(channelId, sessionId, ownerId);
     this.consumedSteerMessageIds.delete(oldSessionId);
+    logInfo('discord_session_switch', { channelId, oldSessionId, sessionId, reason });
     return sessionId;
   }
 
@@ -672,10 +664,9 @@ export class DiscordHandler {
   }
 
   private async handoff(input: HandoffInput): Promise<void> {
-    const config = this.getRuntime().discord;
     const target = await this.outputChannel(input.targetChannelId);
     if (!target) throw new ToolUsageError('Target channel is unavailable');
-    const state = await this.resetIdleSession(input.targetChannelId, this.store.channelState(input.targetChannelId, config.defaultModel, config.ownerId), config.ownerId);
+    const state = this.channelSessionForWrite(input.targetChannelId);
     const { message } = this.store.addMessageOnce(state.sessionId, 'user', input.content, { sourceKind: 'session_handoff', authorId: input.requesterId, channelId: input.targetChannelId, discordMessageId: input.cardMessageId, eventTime: input.cardTime, ...(input.originMessageId ? { replyToMessageId: input.originMessageId, replyToChannelId: input.originChannelId } : {}) }, []);
     this.store.updateAttachments(message.id, []);
     this.memoryCoordinator?.notifyReady();
@@ -693,8 +684,7 @@ export class DiscordHandler {
         const target = await this.outputChannel(channelId);
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
-        const config = this.getRuntime().discord;
-        const state = await this.resetIdleSession(channelId, this.store.channelState(channelId, config.defaultModel, config.ownerId), config.ownerId);
+        const state = this.channelSessionForWrite(channelId, 1);
         const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
         if (!storedInput) return;
         started = true;
