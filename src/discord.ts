@@ -1100,7 +1100,11 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   // Re-identifying resets presence to the login value, so the stored status is applied on every shardReady.
   const applyPresence = () => {
     const presence = store.discordPresence();
-    if (presence && client.user) client.user.setPresence({ status: presence.status, activities: presence.state ? [{ type: ActivityType.Custom, name: 'Custom Status', state: presence.state }] : [] });
+    if (presence && client.user) {
+      const activity = presence.activity;
+      const types = { playing: ActivityType.Playing, listening: ActivityType.Listening, watching: ActivityType.Watching, competing: ActivityType.Competing };
+      client.user.setPresence({ status: presence.status, activities: !activity ? [] : activity.type === 'custom' ? [{ type: ActivityType.Custom, name: 'Custom Status', state: activity.text }] : [{ type: types[activity.type], name: activity.text }] });
+    }
   };
   client.on('shardReady', applyPresence);
   const handler = new DiscordHandler(store, getRuntime, ask, requestRestart, googleTools, localTools, weatherTools, {

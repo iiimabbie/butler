@@ -71,7 +71,8 @@ export interface ToolCallRetentionResult { deleted: number; compacted: number; }
 const RECALL_TOOLS = ['hindsight_recall', 'memory_recall', 'memory_reflect', 'hindsight_reflect']; // Must match TOOLS in hindsight-curation/bin/recalled.py.
 const RECALL_UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
-export type DiscordPresence = { status: 'online' | 'idle' | 'dnd'; state: string | null };
+export type DiscordPresence = { status: 'online' | 'idle' | 'dnd'; activity: { type: 'custom' | 'playing' | 'listening' | 'watching' | 'competing'; text: string } | null };
+export type DiscordPresenceInput = { status?: DiscordPresence['status']; activity?: DiscordPresence['activity'] };
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
@@ -130,6 +131,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
+    if (!(this.db.prepare('PRAGMA table_info(discord_presence)').all() as Array<{ name: string }>).some(column => column.name === 'activity_type')) this.db.exec("ALTER TABLE discord_presence ADD COLUMN activity_type TEXT NOT NULL DEFAULT 'custom'");
     if (!(this.db.prepare('PRAGMA table_info(restart_notice)').all() as Array<{ name: string }>).some(column => column.name === 'channel_id')) this.db.exec('ALTER TABLE restart_notice ADD COLUMN channel_id TEXT');
     if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).some(column => column.name === 'last_model_request_at')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN last_model_request_at TEXT');
@@ -843,17 +845,16 @@ export class Store implements SchedulerStore {
     else this.db.prepare('INSERT INTO restart_notice(id,application_id,interaction_token,channel_id) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET application_id=excluded.application_id,interaction_token=excluded.interaction_token,channel_id=excluded.channel_id').run(notice.applicationId, notice.interactionToken, notice.channelId);
   }
 
-  // The bot's Discord status, reapplied whenever the gateway identifies.
+  // The bot's Discord presence, reapplied whenever the gateway identifies.
   discordPresence(): DiscordPresence | undefined {
-    const row = this.db.prepare('SELECT status,state FROM discord_presence WHERE id=1').get() as { status: DiscordPresence['status']; state: string | null } | undefined;
-    return row && { status: row.status, state: row.state };
+    const row = this.db.prepare('SELECT status,state,activity_type FROM discord_presence WHERE id=1').get() as { status: DiscordPresence['status']; state: string | null; activity_type: NonNullable<DiscordPresence['activity']>['type'] } | undefined;
+    return row && { status: row.status, activity: row.state === null ? null : { type: row.activity_type, text: row.state } };
   }
 
-  // Omitted fields keep their stored value; an empty state clears the text.
-  setDiscordPresence(input: { status?: DiscordPresence['status']; state?: string }): DiscordPresence {
+  setDiscordPresence(input: DiscordPresenceInput): DiscordPresence {
     const current = this.discordPresence();
-    const presence: DiscordPresence = { status: input.status ?? current?.status ?? 'online', state: input.state === undefined ? current?.state ?? null : input.state || null };
-    this.db.prepare('INSERT INTO discord_presence(id,status,state) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,state=excluded.state').run(presence.status, presence.state);
+    const presence: DiscordPresence = { status: input.status ?? current?.status ?? 'online', activity: input.activity === undefined ? current?.activity ?? null : input.activity };
+    this.db.prepare('INSERT INTO discord_presence(id,status,state,activity_type) VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,state=excluded.state,activity_type=excluded.activity_type').run(presence.status, presence.activity?.text ?? null, presence.activity?.type ?? 'custom');
     return presence;
   }
 
