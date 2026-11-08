@@ -28,7 +28,7 @@ export interface Message {
 
 export interface ForwardedMessage { authorId?: string; authorName?: string; channelId?: string; discordMessageId?: string; eventTime?: string; content?: string; }
 export interface MessageSource {
-  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'notification' | 'session_handoff' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
+  authorId?: string; authorName?: string; isBot?: boolean; webhookId?: string; sourceKind?: 'discord_external' | 'discord_fetched' | 'butler_reply' | 'butler_tool_message' | 'scheduled_input' | 'subagent_event' | 'deployment_result' | 'notification' | 'session_handoff' | 'unknown'; channelId?: string; discordMessageId?: string; eventTime?: string; replyToMessageId?: string; replyToChannelId?: string; forwardedMessage?: ForwardedMessage;
 }
 
 export type NotificationStatus = 'pending' | 'processing' | 'completed' | 'unknown';
@@ -418,7 +418,7 @@ export class Store implements SchedulerStore {
         COALESCE(s.author_name,s.author_id,'未知作者') AS authorName,
         COALESCE(s.event_time,m.created_at) AS timestamp,m.content,s.reply_to_message_id AS replyToMessageId
       FROM messages m JOIN message_sources s ON s.message_id=m.id
-      WHERE m.role='user' AND s.source_kind='discord_external'
+      WHERE m.role='user' AND s.source_kind IN ('discord_external','discord_fetched')
         AND julianday(COALESCE(s.event_time,m.created_at)) >= julianday(?)
         AND julianday(COALESCE(s.event_time,m.created_at)) < julianday(?)
         AND s.discord_message_id IS NOT NULL

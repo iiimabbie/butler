@@ -188,7 +188,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const currentIndex = storedHistory.findIndex(message => message.id === fresh[0]!.id);
     if (currentIndex < 0 || fresh[0]!.sessionId !== session) throw new Error('ask storedInput is missing from the requested session history');
     const consumedSteerMessageIds = config.consumedSteerMessageIds ?? new Set<string>();
-    const allMessages = storedHistory.filter((message, index) => index <= currentIndex || message.role !== 'user' || message.source.sourceKind === 'butler_reply' || message.source.sourceKind === 'butler_tool_message' || consumedSteerMessageIds.has(message.id));
+    const allMessages = storedHistory.filter((message, index) => message.source.sourceKind !== 'discord_fetched' && (index <= currentIndex || message.role !== 'user' || message.source.sourceKind === 'butler_reply' || message.source.sourceKind === 'butler_tool_message' || consumedSteerMessageIds.has(message.id)));
     const savedCheckpoint = store.compactCheckpoint(session);
     let sessionMessages = allMessages;
     let compactInput: unknown[] = [];
