@@ -161,9 +161,7 @@ export class DiscordHandler {
       const policy = this.store.effectiveChannelPolicy(message.channelId);
       if (!policy.tracked) { releaseIngress(); return; }
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
-      const stateAtIngestion = message.messageId && this.store.discordMessageId(message.messageId)
-        ? this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId)
-        : this.channelSessionForWrite(message.channelId);
+      const stateAtIngestion = this.channelSessionForWrite(message.channelId);
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       const traceId = message.messageId ?? ingestion.message.id;
       logTrace('discord_ingress', { traceId, inputMessageId: message.messageId ?? ingestion.message.id, sessionId: stateAtIngestion.sessionId, channelId: message.channelId, persisted: ingestion.created, contentLength: effectiveContent.length });
@@ -627,20 +625,14 @@ export class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
-  // Channel inputs use a fresh session after the cache expires when no work or subagent is active.
-  // ownWork counts the caller's own queued work, so a notification claimed inside enqueue can still reset an idle session.
-  private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
+  // Channel inputs go to a fresh session once the prompt cache has expired.
+  private channelSessionForWrite(channelId: string): { sessionId: string; model: string } {
     const config = this.getRuntime().discord;
     const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
     const last = this.store.lastModelRequestTime(state.sessionId);
-    // A new session has no request yet; this also prevents consecutive resets after idle.
-    if (!last) return state;
-    const idleMs = Date.now() - Date.parse(last);
-    if (idleMs < IDLE_SESSION_RESET_MS || (this.workCounts.get(channelId) ?? 0) > ownWork) return state;
-    if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
-    const sessionId = this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle');
-    logInfo('discord_idle_session_reset', { channelId, oldSessionId: state.sessionId, sessionId, idleMinutes: Math.round(idleMs / 60_000) });
-    return { ...state, sessionId };
+    // A session that has not called the model yet is already fresh.
+    if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle') };
   }
 
   private switchChannelSession(channelId: string, oldSessionId: string, ownerId: string, reason: 'command' | 'idle'): string {
@@ -684,7 +676,7 @@ export class DiscordHandler {
         const target = await this.outputChannel(channelId);
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
-        const state = this.channelSessionForWrite(channelId, 1);
+        const state = this.channelSessionForWrite(channelId);
         const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
         if (!storedInput) return;
         started = true;
