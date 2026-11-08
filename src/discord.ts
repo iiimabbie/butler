@@ -632,6 +632,8 @@ export class DiscordHandler {
     const last = this.store.lastModelRequestTime(state.sessionId);
     // A session that has not called the model yet is already fresh.
     if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    // A running subagent reports back to this session, so keep it until the result arrives.
+    if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
     return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle') };
   }
 
