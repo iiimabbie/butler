@@ -178,7 +178,7 @@ export class DiscordHandler {
       const shouldAsk = () => Boolean(content || message.hasAttachments) && !deploymentPassive && !this.stopping && this.store.effectiveChannelPolicy(message.channelId).replyMode !== 'none' && (botInput
         ? Boolean(message.mentionsBot && this.store.effectiveChannelPolicy(message.channelId).botReply)
         : this.store.effectiveChannelPolicy(message.channelId).replyMode === 'all' || (this.store.effectiveChannelPolicy(message.channelId).replyMode === 'mention' && Boolean(message.mentionsBot)));
-      if (!shouldAsk()) { releaseIngress(); await preparation; stored = this.store.messagesWithSources(stored.sessionId).find(item => item.id === stored.id)!; this.memoryCoordinator?.notifyReady(); return; }
+      if (!shouldAsk()) { releaseIngress(); await preparation; this.memoryCoordinator?.notifyReady(); return; }
       const prepared = preparation.then(() => {
         stored = this.store.messagesWithSources(stored.sessionId).find(item => item.id === stored.id)!;
         this.memoryCoordinator?.notifyReady();
@@ -641,11 +641,11 @@ export class DiscordHandler {
   }
 
   private switchChannelSession(channelId: string, oldSessionId: string, ownerId: string, reason: 'command' | 'idle'): string {
-    this.memoryCoordinator?.flushSession(channelId, oldSessionId);
     const sessionId = this.store.newSession();
-    this.store.setChannelSession(channelId, sessionId, ownerId);
+    const carried = this.store.setChannelSession(channelId, sessionId, ownerId, reason === 'idle' ? oldSessionId : undefined);
+    this.memoryCoordinator?.flushSession(channelId, oldSessionId);
     this.consumedSteerMessageIds.delete(oldSessionId);
-    logInfo('discord_session_switch', { channelId, oldSessionId, sessionId, reason });
+    logInfo('discord_session_switch', { channelId, oldSessionId, sessionId, reason, carried });
     return sessionId;
   }
 
