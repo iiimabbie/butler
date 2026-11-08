@@ -105,7 +105,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         attachments, preparationStatus: 'ready', discordSegments: [],
       };
       if (options.context.store && options.context.sessionId) {
-        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, evidence.source, attachments, options.context.memoryOriginChannelId !== undefined && options.context.store.memoryWriteAllowed(options.context.memoryOriginChannelId) && options.context.store.memoryWriteAllowed(channelId));
+        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, { ...evidence.source, sourceKind: 'discord_fetched' }, attachments, options.context.memoryOriginChannelId !== undefined && options.context.store.memoryWriteAllowed(options.context.memoryOriginChannelId) && options.context.store.memoryWriteAllowed(channelId));
         if (persisted.created) options.context.store.updateAttachments(persisted.message.id, attachments);
         const storedEvidence = options.context.store.messagesWithSources(options.context.sessionId).find(item => item.id === persisted.message.id && item.role === 'user') ?? evidence;
         pendingInput.push(storedEvidence);
