@@ -762,7 +762,7 @@ export class Store implements SchedulerStore {
   isFixedChannel(channelId: string, _parentChannelId?: string): boolean { return this.fixedChannels.has(channelId); }
 
   effectiveChannelPolicy(channelId:string,_parentChannelId?:string):EffectiveChannelPolicy {
-    if (this.fixedChannels.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'all', mode:'steer' };
+    if (this.fixedChannels.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:false, replyMode:'all', mode:'steer' };
     const config = this.settings.current().channels[channelId];
     const tracked = Object.hasOwn(this.settings.current().channels, channelId);
     const bool = (key: 'botReply'|'hindsightWrite', fallback: boolean) => typeof config?.[key] === 'boolean' ? config[key] as boolean : fallback;
