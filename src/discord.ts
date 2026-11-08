@@ -43,6 +43,8 @@ const modelInflight = new Map<string, Promise<string[]>>();
 const imageModelCache = new Map<string, { expiresAt: number; models: string[] }>();
 const imageModelInflight = new Map<string, Promise<string[]>>();
 const MODEL_TTL = 10 * 60_000;
+// Anthropic prompt cache lasts at most one hour; after idle expiry, a new session is cheaper than recomputing the old one.
+const IDLE_SESSION_RESET_MS = 55 * 60_000;
 const DEFAULT_WORKSPACE = fileURLToPath(new URL('../workspace/', import.meta.url));
 const MEDIA_MODEL_SEGMENTS = new Set(['img', 'image', 'images', 'video', 'videos']);
 export type DiscordCommandApi = { get(route: string): Promise<unknown>; patch(route: string, options: { body: unknown }): Promise<unknown>; post?(route: string, options: { body: unknown }): Promise<unknown>; guildIds?: string[] };
@@ -92,8 +94,7 @@ export class DiscordHandler {
   recordRuntimeNotice(channelId: string, text: string): void {
     if (!this.store.isTrackedChannel(channelId)) return;
     try {
-      const config = this.getRuntime().discord;
-      const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+      const state = this.channelSessionForWrite(channelId);
       const { message } = this.store.addMessageOnce(state.sessionId, 'user', `[Butler runtime notice] ${text}`, { sourceKind: 'deployment_result', channelId }, []);
       this.store.updateAttachments(message.id, []);
     } catch (error) { logError(`Runtime notice was not recorded channel=${channelId}`, error, { mention: !isHttp429(error) }); }
@@ -159,8 +160,8 @@ export class DiscordHandler {
       };
       const policy = this.store.effectiveChannelPolicy(message.channelId);
       if (!policy.tracked) { releaseIngress(); return; }
-      const stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
       const initialAttachments = (message.attachments ?? []).map(item => ({ attachmentId: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', status: 'failed' as const, error: '附件準備尚未完成' }));
+      const stateAtIngestion = this.channelSessionForWrite(message.channelId);
       const ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
       const traceId = message.messageId ?? ingestion.message.id;
       logTrace('discord_ingress', { traceId, inputMessageId: message.messageId ?? ingestion.message.id, sessionId: stateAtIngestion.sessionId, channelId: message.channelId, persisted: ingestion.created, contentLength: effectiveContent.length });
@@ -443,13 +444,7 @@ export class DiscordHandler {
           const runtime = this.getRuntime();
           const config = runtime.discord;
           const oldState = this.store.channelState(context.channelId, config.defaultModel, config.ownerId);
-          const opening = await this.readOpeningMessage(context.channelId);
-          if (!opening) { await context.reply('無法取得此頻道的原始首則訊息，舊 session 保持不變。'); return; }
-          this.memoryCoordinator?.flushSession(context.channelId, oldState.sessionId);
-          const sessionId = this.store.newSession();
-          this.store.saveSessionOpeningContext(sessionId, opening);
-          this.store.setChannelSession(context.channelId, sessionId, config.ownerId);
-          this.consumedSteerMessageIds.delete(oldState.sessionId);
+          const sessionId = this.switchChannelSession(context.channelId, oldState.sessionId, config.ownerId, 'command');
           await context.reply(`新 session：${sessionId}`);
         });
       } finally {
@@ -630,6 +625,30 @@ export class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
+  // Channel inputs go to a fresh session once the prompt cache has expired.
+  // ownWork is the caller's own queued work: a notification is claimed inside its enqueue.
+  private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
+    const config = this.getRuntime().discord;
+    const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+    const last = this.store.lastModelRequestTime(state.sessionId);
+    // A session that has not called the model yet is already fresh.
+    if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    // Work running or queued in this channel still belongs to the current session.
+    if ((this.workCounts.get(channelId) ?? 0) > ownWork) return state;
+    // A running subagent reports back to this session, so keep it until the result arrives.
+    if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
+    return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, config.ownerId, 'idle') };
+  }
+
+  private switchChannelSession(channelId: string, oldSessionId: string, ownerId: string, reason: 'command' | 'idle'): string {
+    this.memoryCoordinator?.flushSession(channelId, oldSessionId);
+    const sessionId = this.store.newSession();
+    this.store.setChannelSession(channelId, sessionId, ownerId);
+    this.consumedSteerMessageIds.delete(oldSessionId);
+    logInfo('discord_session_switch', { channelId, oldSessionId, sessionId, reason });
+    return sessionId;
+  }
+
   // Every channel input (message, notification, handoff, subagent event) carries the channel's opening message as standing context.
   private async sessionOpeningContext(sessionId: string, channelId: string): Promise<SessionOpeningContext | undefined> {
     const stored = this.store.sessionOpeningContext(sessionId);
@@ -642,10 +661,9 @@ export class DiscordHandler {
   }
 
   private async handoff(input: HandoffInput): Promise<void> {
-    const config = this.getRuntime().discord;
     const target = await this.outputChannel(input.targetChannelId);
     if (!target) throw new ToolUsageError('Target channel is unavailable');
-    const state = this.store.channelState(input.targetChannelId, config.defaultModel, config.ownerId);
+    const state = this.channelSessionForWrite(input.targetChannelId);
     const { message } = this.store.addMessageOnce(state.sessionId, 'user', input.content, { sourceKind: 'session_handoff', authorId: input.requesterId, channelId: input.targetChannelId, discordMessageId: input.cardMessageId, eventTime: input.cardTime, ...(input.originMessageId ? { replyToMessageId: input.originMessageId, replyToChannelId: input.originChannelId } : {}) }, []);
     this.store.updateAttachments(message.id, []);
     this.memoryCoordinator?.notifyReady();
@@ -663,8 +681,7 @@ export class DiscordHandler {
         const target = await this.outputChannel(channelId);
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
-        const config = this.getRuntime().discord;
-        const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+        const state = this.channelSessionForWrite(channelId, 1);
         const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
         if (!storedInput) return;
         started = true;

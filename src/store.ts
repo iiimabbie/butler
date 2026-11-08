@@ -131,6 +131,10 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
     if (!(this.db.prepare('PRAGMA table_info(restart_notice)').all() as Array<{ name: string }>).some(column => column.name === 'channel_id')) this.db.exec('ALTER TABLE restart_notice ADD COLUMN channel_id TEXT');
+    if (!(this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>).some(column => column.name === 'last_model_request_at')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN last_model_request_at TEXT');
+      this.db.exec('UPDATE sessions SET last_model_request_at = (SELECT sampled_at FROM session_context_usage WHERE session_id = sessions.id) WHERE last_model_request_at IS NULL');
+    }
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
@@ -194,7 +198,7 @@ export class Store implements SchedulerStore {
 
   newSession(): string {
     const id = randomUUID();
-    this.db.prepare('INSERT INTO sessions VALUES(?,?)').run(id, new Date().toISOString());
+    this.db.prepare('INSERT INTO sessions(id,created_at) VALUES(?,?)').run(id, new Date().toISOString());
     return id;
   }
 
@@ -214,6 +218,10 @@ export class Store implements SchedulerStore {
     return this.addMessageOnce(session, role, content, source, attachments, memoryWrite).message;
   }
 
+  discordMessageId(discordMessageId: string): string | undefined {
+    return (this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(discordMessageId, discordMessageId) as { message_id: string } | undefined)?.message_id;
+  }
+
   addMessageOnce(session: string, role: string, content: string, source: MessageSource = {}, attachments: MessageInputAttachment[] = [], memoryWrite?:boolean): AddMessageResult {
     const canWrite = memoryWrite ?? this.memoryWriteAllowed(source.channelId);
     const message: StoredMessage = { id: randomUUID(), sessionId: session, role, content, createdAt: source.eventTime ?? new Date().toISOString(), source, attachments, preparationStatus: 'preparing', discordSegments: [] };
@@ -221,8 +229,8 @@ export class Store implements SchedulerStore {
     try {
       if (source.discordMessageId) {
         // Butler's own replies keep their Discord IDs on outgoing segments, so a later fetch of one must not store a second copy.
-        const existing = this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(source.discordMessageId, source.discordMessageId) as { message_id: string } | undefined;
-        if (existing) { this.db.exec('COMMIT'); return { message: this.messagesWithSourcesForId(existing.message_id), created: false }; }
+        const existing = this.discordMessageId(source.discordMessageId);
+        if (existing) { this.db.exec('COMMIT'); return { message: this.messagesWithSourcesForId(existing), created: false }; }
       }
       this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(message.id, session, role, content, message.createdAt);
       this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name,forwarded_message_json,is_bot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -394,6 +402,10 @@ export class Store implements SchedulerStore {
     this.updateMemoryBatch(operationId, resolution, { error: note });
   }
 
+
+  lastModelRequestTime(session: string): string | null {
+    return (this.db.prepare('SELECT last_model_request_at FROM sessions WHERE id=?').get(session) as { last_model_request_at: string | null } | undefined)?.last_model_request_at ?? null;
+  }
 
   messages(session: string): Message[] {
     return this.db.prepare('SELECT role,content FROM messages WHERE session_id=? ORDER BY rowid').all(session) as unknown as Message[];
@@ -687,6 +699,7 @@ export class Store implements SchedulerStore {
     try {
       this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
         .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
+      this.db.prepare('UPDATE sessions SET last_model_request_at=? WHERE id=?').run(attemptedAt, record.sessionId);
       this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 500)')
         .run(new Date(Date.parse(attemptedAt) - 24 * 60 * 60 * 1000).toISOString());
       this.db.exec('COMMIT');
@@ -749,7 +762,7 @@ export class Store implements SchedulerStore {
   isFixedChannel(channelId: string, _parentChannelId?: string): boolean { return this.fixedChannels.has(channelId); }
 
   effectiveChannelPolicy(channelId:string,_parentChannelId?:string):EffectiveChannelPolicy {
-    if (this.fixedChannels.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:true, replyMode:'all', mode:'steer' };
+    if (this.fixedChannels.has(channelId)) return { tracked:true, botReply:true, hindsightWrite:false, replyMode:'all', mode:'steer' };
     const config = this.settings.current().channels[channelId];
     const tracked = Object.hasOwn(this.settings.current().channels, channelId);
     const bool = (key: 'botReply'|'hindsightWrite', fallback: boolean) => typeof config?.[key] === 'boolean' ? config[key] as boolean : fallback;
