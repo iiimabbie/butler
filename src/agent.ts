@@ -357,7 +357,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
           }
         }
       }
-      if (percent >= 80) {
+      // Live compaction rewrites the cached prefix, so it is only an emergency pass near the limit.
+      if (percent >= 95) {
         const candidate = JSON.stringify(liveGroups);
         if (candidate !== liveCompactionCandidate) {
           liveCompactionCandidate = candidate;
