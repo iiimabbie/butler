@@ -166,16 +166,10 @@ export class DiscordHandler {
       let ingestion!: ReturnType<Store['addMessageOnce']>;
       const lastMessageAt = this.store.lastMessageTime(stateAtIngestion.sessionId);
       const isSteer = mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1;
-      if (!botInput && !isSteer && lastMessageAt && Date.now() - Date.parse(lastMessageAt) >= IDLE_SESSION_RESET_MS) {
+      if (!isSteer && lastMessageAt && Date.now() - Date.parse(lastMessageAt) >= IDLE_SESSION_RESET_MS) {
         await this.enqueue(message.channelId, async () => {
           stateAtIngestion = this.store.channelState(message.channelId, ingressRuntime.discord.defaultModel, ingressRuntime.discord.ownerId);
-          const last = this.store.lastMessageTime(stateAtIngestion.sessionId);
-          const idleMs = last ? Date.now() - Date.parse(last) : 0;
-          if (idleMs >= IDLE_SESSION_RESET_MS && (!message.messageId || !this.store.discordMessageId(message.messageId))) {
-            const oldSessionId = stateAtIngestion.sessionId;
-            const sessionId = await this.switchChannelSession(message.channelId, oldSessionId, ingressRuntime.discord.ownerId);
-            if (sessionId) { stateAtIngestion = { ...stateAtIngestion, sessionId }; logInfo('discord_idle_session_reset', { channelId: message.channelId, oldSessionId, sessionId, idleMinutes: idleMs / 60_000 }); }
-          }
+          if (!message.messageId || !this.store.discordMessageId(message.messageId)) stateAtIngestion = await this.resetIdleSession(message.channelId, stateAtIngestion, ingressRuntime.discord.ownerId);
           ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
         });
       } else ingestion = this.store.addMessageOnce(stateAtIngestion.sessionId, 'user', effectiveContent, source, initialAttachments);
@@ -642,6 +636,17 @@ export class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
   }
 
+  // Any input that starts work in a channel session (message, bot, handoff, notification) moves to a fresh session after the cache has expired.
+  private async resetIdleSession<T extends { sessionId: string }>(channelId: string, state: T, ownerId: string): Promise<T> {
+    const last = this.store.lastMessageTime(state.sessionId);
+    const idleMs = last ? Date.now() - Date.parse(last) : 0;
+    if (idleMs < IDLE_SESSION_RESET_MS) return state;
+    const sessionId = await this.switchChannelSession(channelId, state.sessionId, ownerId);
+    if (!sessionId) return state;
+    logInfo('discord_idle_session_reset', { channelId, oldSessionId: state.sessionId, sessionId, idleMinutes: Math.round(idleMs / 60_000) });
+    return { ...state, sessionId };
+  }
+
   private async switchChannelSession(channelId: string, oldSessionId: string, ownerId: string): Promise<string | undefined> {
     let opening: SessionOpeningContext | undefined;
     try { opening = await this.readOpeningMessage(channelId); }
@@ -670,7 +675,7 @@ export class DiscordHandler {
     const config = this.getRuntime().discord;
     const target = await this.outputChannel(input.targetChannelId);
     if (!target) throw new ToolUsageError('Target channel is unavailable');
-    const state = this.store.channelState(input.targetChannelId, config.defaultModel, config.ownerId);
+    const state = await this.resetIdleSession(input.targetChannelId, this.store.channelState(input.targetChannelId, config.defaultModel, config.ownerId), config.ownerId);
     const { message } = this.store.addMessageOnce(state.sessionId, 'user', input.content, { sourceKind: 'session_handoff', authorId: input.requesterId, channelId: input.targetChannelId, discordMessageId: input.cardMessageId, eventTime: input.cardTime, ...(input.originMessageId ? { replyToMessageId: input.originMessageId, replyToChannelId: input.originChannelId } : {}) }, []);
     this.store.updateAttachments(message.id, []);
     this.memoryCoordinator?.notifyReady();
@@ -689,7 +694,7 @@ export class DiscordHandler {
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
         const config = this.getRuntime().discord;
-        const state = this.store.channelState(channelId, config.defaultModel, config.ownerId);
+        const state = await this.resetIdleSession(channelId, this.store.channelState(channelId, config.defaultModel, config.ownerId), config.ownerId);
         const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
         if (!storedInput) return;
         started = true;
