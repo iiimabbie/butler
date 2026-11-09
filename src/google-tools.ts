@@ -3,14 +3,14 @@ import { open, realpath } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
-import { decodeHTML } from 'entities';
+import { decodeHTML, escapeUTF8 } from 'entities';
 import { GoogleClient, GOOGLE_FILE_LIMIT } from './google-client.js';
 
 const str = { type: 'string' };
 const count = (max: number, fallback: number) => ({ type: 'integer', minimum: 1, maximum: max, default: fallback });
 const account = { type: 'string', description: 'Account email; omit to use the default account. Use google_accounts_list to list accounts.' };
 const messageIds = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true };
-const recipients = { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Email addresses without display names.' };
+const recipients = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true, description: 'Email addresses without display names.' };
 const replyToMessageId = { type: 'string', description: 'Gmail message ID to reply to in the same thread. For replies, subject is usually Re: followed by the original subject.' };
 const schemas: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
   google_accounts_list: { description: 'List Google accounts, default status, connection status and gmail.modify permission.', properties: {}, required: [] },
@@ -100,8 +100,8 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
   }
   if (n === 'gmail_send' || n === 'gmail_draft') {
     const to = parseRecipients('to', a.to);
-    const cc = a.cc === undefined ? [] : parseRecipients('cc', a.cc);
-    const bcc = a.bcc === undefined ? [] : parseRecipients('bcc', a.bcc);
+    const cc = parseRecipients('cc', a.cc);
+    const bcc = parseRecipients('bcc', a.bcc);
     let reply: { messageId: string; references: string; threadId: string } | undefined;
     if (a.reply_to_message_id !== undefined) {
       const original = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(s('reply_to_message_id'))}`, { account: gmailAccount, query: { format: 'metadata' } });
@@ -220,7 +220,6 @@ function validate(name: string, args: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(args)) {
     const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number; minItems?: number; maxItems?: number } | undefined;
     if (!rule) throw new ToolUsageError('Unknown Google tool argument');
-    if ((name === 'gmail_send' || name === 'gmail_draft') && ['to', 'cc', 'bcc'].includes(key)) continue;
     if (rule.type === 'string') {
       const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key);
       if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new ToolUsageError(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
@@ -310,10 +309,9 @@ function attachmentMetadata(part: any): unknown[] {
   return out;
 }
 function parseRecipients(field: string, value: unknown): string[] {
-  const addresses = Array.isArray(value) ? value : [value];
-  if (!addresses.length) throw new ToolUsageError(`${field} must contain at least one email address`);
+  const addresses = (value ?? []) as string[];
   for (const address of addresses) {
-    if (typeof address !== 'string' || !/^[a-zA-Z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[a-zA-Z0-9!#$%&'*+\-/=?^_`{|}~]+)*@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(address)) throw new ToolUsageError(`Invalid ${field} address: ${JSON.stringify(address)}`);
+    if (!/^[a-zA-Z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[a-zA-Z0-9!#$%&'*+\-/=?^_`{|}~]+)*@[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+$/.test(address)) throw new ToolUsageError(`Invalid ${field} address: ${JSON.stringify(address)}`);
   }
   return addresses;
 }
@@ -328,7 +326,7 @@ function makeMime(to: string[], cc: string[], bcc: string[], subject: string, bo
   if (!signature) return `${header}Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${encode(body)}`;
   const plainSignature = decodeHTML(signature.replace(/<br\s*\/?>|<\/(?:div|p)\s*>/gi, '\n').replace(/<[^>]*>/g, ''))
     .replace(/\n[ \t\u00a0]*\n(?:[ \t\u00a0]*\n)+/g, '\n\n').trim();
-  const htmlBody = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/\r\n|\r|\n/g, '<br>');
+  const htmlBody = escapeUTF8(body).replace(/\r\n|\r|\n/g, '<br>');
   const boundary = `butler_${randomBytes(24).toString('hex')}`;
   const part = (type: string, content: string) => `--${boundary}\r\nContent-Type: text/${type}; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${encode(content)}\r\n`;
   return `${header}Content-Type: multipart/alternative; boundary="${boundary}"\r\n\r\n${part('plain', `${body}\n\n-- \n${plainSignature}`)}${part('html', `${htmlBody}<br>-- <br><div dir="ltr" class="gmail_signature" data-smartmail="gmail_signature">${signature}</div>`)}--${boundary}--\r\n`;
