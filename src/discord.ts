@@ -32,6 +32,7 @@ import { SubagentCoordinator, type SubagentEvent } from './subagent-coordinator.
 import { logTrace, traceTextMetadata } from './model-request.js';
 
 const DISCORD_MESSAGE_LIMIT = 2000;
+const DISCORD_ATTACHMENT_LIMIT = 10;
 const DELIVERY_ERROR = 'Butler 暫時無法處理這項請求，請稍後再試。';
 const ALLOWED_MENTIONS = { parse: ['users', 'roles'] as ['users', 'roles'], repliedUser: true };
 type DiscordConfig = { token: string; ownerId: string; defaultModel: string; baseUrl: string; apiKey?: string; attachmentDir: string; maxContextTokens: number; modelContextTokens: Record<string, number>; requestTimeoutMs: number };
@@ -499,14 +500,18 @@ class DiscordHandler {
           deliveryAttempted = true;
           let outgoing: StoredMessage | undefined;
           const delivered: string[] = [];
+          const deliveredAttachments: import('./store.js').MessageInputAttachment[] = [];
           try {
-            await sendText({ channelId: outputChannelId, messageId: job.messageId, reply: job.reply }, text, attachmentFiles, () => { filesDelivered = true; }, async (content, result) => {
+            await sendText({ channelId: outputChannelId, messageId: job.messageId, reply: job.reply }, text, attachmentFiles, () => { filesDelivered = true; }, async (content, result, uploads) => {
               const saved = this.recordOutgoingSegment(session, content, result, channelId, outgoing);
               if (!saved) return;
               outgoing = saved;
               delivered.push(content);
-              const deliveredAttachments = await archiveDeliveredAttachments(result, attachmentFiles, config.attachmentDir, saved.id);
-              if (deliveredAttachments.length) this.store.updateAttachments(saved.id, deliveredAttachments);
+              const archived = await archiveDeliveredAttachments(result, uploads, config.attachmentDir, saved.id);
+              if (!archived.length) return;
+              // updateAttachments replaces the stored set, so batches spread over several segments accumulate here.
+              deliveredAttachments.push(...archived);
+              this.store.updateAttachments(saved.id, deliveredAttachments);
             }, trace);
           } finally {
             let finalized = false;
@@ -730,21 +735,29 @@ function splitDiscordText(text: string): string[] {
   return chunks;
 }
 
-async function sendText(message: Pick<TextMessage, 'channelId' | 'messageId' | 'reply'>, text: string, files?: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown) => void | Promise<void>, trace?: { askId?: string; traceId?: string; sessionId?: string }): Promise<void> {
+type OutgoingFile = { attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' };
+
+// Files ride on the leading segments, at most DISCORD_ATTACHMENT_LIMIT per message; leftovers get file-only messages.
+async function sendText(message: Pick<TextMessage, 'channelId' | 'messageId' | 'reply'>, text: string, files: OutgoingFile[] = [], onFilesDelivered?: () => void, onDelivered?: (content: string, result: unknown, uploads: OutgoingFile[]) => void | Promise<void>, trace?: { askId?: string; traceId?: string; sessionId?: string }): Promise<void> {
   const context = { ...trace, channelId: message.channelId, inputMessageId: message.messageId };
-  const chunks = splitDiscordText(text || (files?.length ? ' ' : DELIVERY_ERROR));
-  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), chunks: chunks.length });
+  const uploads = files.map((file, slot) => ({ ...file, name: outgoingAttachmentName(file.name, slot) }));
+  const batches: OutgoingFile[][] = [];
+  for (let offset = 0; offset < uploads.length; offset += DISCORD_ATTACHMENT_LIMIT) batches.push(uploads.slice(offset, offset + DISCORD_ATTACHMENT_LIMIT));
+  const chunks = splitDiscordText(text || (files.length ? ' ' : DELIVERY_ERROR));
+  while (chunks.length < batches.length) chunks.push(' ');
+  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), chunks: chunks.length, files: files.length });
   for (let index = 0; index < chunks.length; index++) {
     const segment = { ...context, index, total: chunks.length, ...traceTextMetadata(chunks[index]!) };
+    const batch = batches[index] ?? [];
     let stage = 'send';
     logTrace('discord_segment_start', segment);
     try {
-      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(index === 0 && files?.length ? { files: files.map((file, slot) => ({ ...file, name: outgoingAttachmentName(file.name, slot) })) } : {}) });
+      const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(batch.length ? { files: batch } : {}) });
       const discordMessageId = isRecord(result) && typeof result.id === 'string' && /^[0-9]{2,32}$/.test(result.id) ? result.id : undefined;
       logTrace('discord_segment_sent', { ...segment, discordMessageId });
       stage = 'persistence_callback';
-      if (index === 0 && files?.length) onFilesDelivered?.();
-      await onDelivered?.(chunks[index]!, result);
+      if (batches.length && index === batches.length - 1) onFilesDelivered?.();
+      await onDelivered?.(chunks[index]!, result, batch);
       logTrace('discord_segment_recorded', { ...segment, discordMessageId, callbackPresent: Boolean(onDelivered) });
     } catch (error) {
       logTrace('discord_segment_failed', { ...segment, stage });
@@ -759,7 +772,8 @@ function outgoingAttachmentName(name: string, slot: number): string {
   return `butler-${slot}-${name.replace(/[^A-Za-z0-9._-]/g, '_')}`;
 }
 
-async function archiveDeliveredAttachments(result: unknown, files: Array<{ attachment: string; name: string; archivePath?: string; origin?: 'butler_generated' }>, attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {
+// files are the uploads of this Discord message, already carrying their outgoing names.
+async function archiveDeliveredAttachments(result: unknown, files: OutgoingFile[], attachmentDir: string, messageId: string): Promise<import('./store.js').MessageInputAttachment[]> {
   if (!files.length) return [];
   if (!isRecord(result) || !isRecord(result.attachments) || typeof result.attachments.values !== 'function') return [];
   const items = [...(result.attachments.values as () => Iterable<unknown>)()];
@@ -772,7 +786,7 @@ async function archiveDeliveredAttachments(result: unknown, files: Array<{ attac
   for (let index = 0; index < items.length; index++) {
     const item = items[index];
     if (!isRecord(item) || typeof item.id !== 'string' || typeof item.name !== 'string') continue;
-    const file = files.find((candidate, slot) => outgoingAttachmentName(candidate.name, slot) === item.name);
+    const file = files.find(candidate => candidate.name === item.name);
     if (!file) {
       logError(`Delivered Discord attachment has no matching upload message=${messageId} filename=${item.name}`, new Error('Attachment mapping mismatch'));
       continue;
