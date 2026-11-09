@@ -31,7 +31,6 @@ export interface MessageSource {
 }
 
 export type NotificationStatus = 'pending' | 'processing' | 'completed' | 'unknown';
-export interface NotificationEvent { id: string; payload: NotificationPayload; inputMessageId?: string; status: NotificationStatus }
 export class NotificationConflictError extends Error {
   constructor() { super('Notification id already has different content'); this.name = 'NotificationConflictError'; }
 }
@@ -551,33 +550,28 @@ export class Store implements SchedulerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  notificationEvent(id: string): NotificationEvent | undefined {
-    const row = this.db.prepare('SELECT * FROM notification_events WHERE id=?').get(id) as { id: string; payload_json: string; input_message_id: string | null; status: NotificationStatus } | undefined;
-    return row ? { id: row.id, payload: JSON.parse(row.payload_json) as NotificationPayload, inputMessageId: row.input_message_id ?? undefined, status: row.status } : undefined;
+  hasPendingNotifications(): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM notification_events WHERE status='pending' LIMIT 1").get());
   }
 
-  pendingNotificationIds(): string[] {
-    return (this.db.prepare("SELECT id FROM notification_events WHERE status='pending' ORDER BY rowid").all() as Array<{ id: string }>).map(row => row.id);
-  }
-
-  claimNotification(id: string, session: string, channelId: string): StoredMessage | undefined {
+  claimNotifications(session: string, channelId: string): StoredMessage | undefined {
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const event = this.notificationEvent(id);
-      if (!event || event.status !== 'pending') { this.db.exec('COMMIT'); return undefined; }
+      const events = this.db.prepare("SELECT payload_json FROM notification_events WHERE status='pending' ORDER BY rowid").all() as Array<{ payload_json: string }>;
+      if (!events.length) { this.db.exec('COMMIT'); return undefined; }
       if (!this.hasSession(session)) throw new Error('Unknown notification session');
       const now = new Date().toISOString();
-      const input: StoredMessage = { id: randomUUID(), sessionId: session, role: 'user', content: JSON.stringify(event.payload), createdAt: now, source: { sourceKind: 'notification', channelId, eventTime: event.payload.occurred_at }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
+      const input: StoredMessage = { id: randomUUID(), sessionId: session, role: 'user', content: JSON.stringify(events.map(event => JSON.parse(event.payload_json) as NotificationPayload)), createdAt: now, source: { sourceKind: 'notification', channelId }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
       this.insertMessage(input);
-      this.db.prepare("UPDATE notification_events SET status='processing',input_message_id=?,updated_at=? WHERE id=? AND status='pending'").run(input.id, now, id);
+      this.db.prepare("UPDATE notification_events SET status='processing',input_message_id=?,updated_at=? WHERE status='pending'").run(input.id, now);
       this.db.exec('COMMIT');
       return input;
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  finishNotification(id: string, status: 'completed' | 'unknown'): void {
-    const result = this.db.prepare("UPDATE notification_events SET status=?,updated_at=? WHERE id=? AND status='processing'").run(status, new Date().toISOString(), id);
-    if (Number(result.changes) !== 1) throw new Error('Notification state changed before completion');
+  finishNotifications(inputMessageId: string, status: 'completed' | 'unknown'): void {
+    const result = this.db.prepare("UPDATE notification_events SET status=?,updated_at=? WHERE input_message_id=? AND status='processing'").run(status, new Date().toISOString(), inputMessageId);
+    if (!Number(result.changes)) throw new Error('Notification state changed before completion');
   }
 
   saveSubagentEvent(event: { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: string; status: string }): void {

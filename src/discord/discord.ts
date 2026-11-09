@@ -127,7 +127,6 @@ class DiscordHandler {
   setBotIdentity(id: string, name: string): void {
     this.botIdentity = { id, name };
     for (const event of this.subagentCoordinator.pendingEvents()) this.handleSubagentEvent(event);
-    if (this.getRuntime().settings.notifications) for (const id of this.store.pendingNotificationIds()) this.enqueueNotification(id);
   }
 
   async close(): Promise<void> {
@@ -588,7 +587,7 @@ class DiscordHandler {
   }
 
   // Channel inputs go to a fresh session once the prompt cache has expired.
-  // ownWork is the caller's own queued work: a notification is claimed inside its enqueue.
+  // ownWork is the caller's own queued work: a notification batch is claimed inside its enqueue.
   private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
     const config = this.getRuntime().discord;
     const state = this.store.channelState(channelId, config.defaultModel);
@@ -631,30 +630,30 @@ class DiscordHandler {
     void this.enqueue(input.targetChannelId, () => this.runChannelInput(stored, { channelId: input.targetChannelId, outputChannelId: input.targetChannelId, entryKind: 'normal', requesterId: input.requesterId, triggerInputId: stored.id }, target)).catch(error => logError(`Session handoff failed channel=${input.targetChannelId}`, error, { mention: !isHttp429(error) }));
   }
 
-  enqueueNotification(id: string): void {
+  enqueueNotifications(): void {
     const channelId = this.getRuntime().settings.discord?.notificationChannelId;
-    if (this.stopping || !this.botIdentity || !channelId) return;
+    if (this.stopping || !this.botIdentity || !channelId || !this.store.hasPendingNotifications()) return;
     const work = async () => {
       if (this.stopping) return;
-      let started = false;
+      let inputMessageId: string | undefined;
       try {
         const target = await this.outputChannel(channelId);
         if (!target) throw new Error('Notification output channel unavailable');
         if (this.stopping) return;
         const state = this.channelSessionForWrite(channelId, 1);
-        const storedInput = this.store.claimNotification(id, state.sessionId, channelId);
+        const storedInput = this.store.claimNotifications(state.sessionId, channelId);
         if (!storedInput) return;
-        started = true;
+        inputMessageId = storedInput.id;
         await this.runChannelInput(storedInput, {
           channelId, outputChannelId: channelId, entryKind: 'notification', triggerInputId: storedInput.id,
         }, target);
-        this.store.finishNotification(id, 'completed');
+        this.store.finishNotifications(inputMessageId, 'completed');
       } catch (error) {
-        if (started) this.store.finishNotification(id, 'unknown');
-        logError(`Notification processing failed id=${id}`, error, { mention: !isHttp429(error), fields: { started } });
+        if (inputMessageId) this.store.finishNotifications(inputMessageId, 'unknown');
+        logError('Notification batch processing failed', error, { mention: !isHttp429(error), fields: { started: Boolean(inputMessageId) } });
       }
     };
-    void this.enqueue(channelId, work).catch(error => logError(`Could not enqueue notification id=${id}`, error, { mention: !isHttp429(error) }));
+    void this.enqueue(channelId, work).catch(error => logError('Could not enqueue notification batch', error, { mention: !isHttp429(error) }));
   }
 
   private channelSubagent(channelId: string, subagent: import('../config.js').ButlerConfig['subagent']): import('../config.js').ButlerConfig['subagent'] {
@@ -1007,7 +1006,18 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     },
   });
   store.setExternalChannelStopHooks({ canStop: id => handler.canStopChannel(id), archive: id => { store.archiveChannelSession(id); } });
+  let closed = false;
   let discordReady = false;
+  let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+  const scheduleNotificationBatch = () => {
+    const next = new Date();
+    next.setMinutes(60, 0, 0);
+    notificationTimer = setTimeout(() => {
+      try { handler.enqueueNotifications(); }
+      catch (error) { logError('Notification batch scheduling failed', error, { mention: !isHttp429(error) }); }
+      scheduleNotificationBatch();
+    }, next.getTime() - Date.now());
+  };
   const syncGuildCommands = async (guildIds: string[], scope: 'startup' | 'guild_join') => {
     await overwriteGuildCommands(client, guildIds);
     logInfo('Discord slash command sync complete', { scope, guildCount: guildIds.length });
@@ -1017,8 +1027,10 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   };
   client.on('guildCreate', guild => { if (discordReady) void syncGuildCommands([guild.id], 'guild_join').catch(error => reportCommandSyncFailure('guild_join', error)); });
   client.once('clientReady', readyClient => {
+    if (closed) return;
     discordReady = true;
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
+    if (settings.notifications) scheduleNotificationBatch();
     logInfo('Discord ready', { botId: readyClient.user.id });
     void syncGuildCommands([...readyClient.guilds.cache.keys()], 'startup').catch(error => reportCommandSyncFailure('startup', error));
     const notice = store.takeRestartNotice();
@@ -1057,7 +1069,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   });
   client.on('error', error => logError('Discord client error', error, { mention: !isHttp429(error) }));
 
-  let closed = false;
   let uiStartupFailed = false;
   let closeUi: (() => Promise<void>) | undefined;
   let closeNotifications: (() => Promise<void>) | undefined;
@@ -1065,6 +1076,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     closed = true;
+    clearTimeout(notificationTimer);
     shutdownPromise = (async () => {
       closeConfigWatch?.();
       try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error, { mention: !isHttp429(error) }); }
@@ -1085,11 +1097,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   try {
     if (settings.notifications) {
       try {
-        const intake = await startNotificationListener(settings.notifications, payload => {
-          const result = store.acceptNotification(payload);
-          if (result.status === 'pending') handler.enqueueNotification(payload.id);
-          return result;
-        });
+        const intake = await startNotificationListener(settings.notifications, payload => store.acceptNotification(payload));
         if (closed) { await intake.close(); return; }
         closeNotifications = intake.close;
       } catch (error) { throw new Error('Notification listener could not start', { cause: error }); }
