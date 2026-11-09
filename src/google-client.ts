@@ -1,10 +1,10 @@
 import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
 import { ToolUsageError } from './tool-errors.js';
-import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
+import { readJsonResponse, readResponseBytes, ResponseSizeLimitError } from './response-body.js';
 
 export const GOOGLE_FILE_LIMIT = 10 * 1024 * 1024;
 export class GoogleClient {
-  constructor(private readonly auth: GoogleAuth, private readonly fetcher: typeof fetch = fetch) {}
+  constructor(private readonly auth: GoogleAuth) {}
   async available(): Promise<boolean> { return await this.auth.status() === 'connected'; }
 
   async accounts() { return this.auth.accounts(); }
@@ -27,12 +27,15 @@ export class GoogleClient {
     const account = await this.account(options.account);
     const url = new URL(path, 'https://www.googleapis.com');
     for (const [k, v] of Object.entries(options.query ?? {})) if (v !== undefined) url.searchParams.set(k, String(v));
-    const headers: Record<string, string> = { authorization: `Bearer ${await this.auth.accessToken(account)}` };
+    let token: string;
+    try { token = await this.auth.accessToken(account); }
+    catch (error) { if (error instanceof GoogleAuthError) throw new ToolUsageError(error.message); throw error; }
+    const headers: Record<string, string> = { authorization: `Bearer ${token}` };
     let body: BodyInit | undefined;
     if (options.upload) { headers['content-type'] = options.upload.contentType; body = new Uint8Array(options.upload.bytes); }
     else if (options.body !== undefined) { headers['content-type'] = 'application/json'; body = JSON.stringify(options.body); }
     let response: Response;
-    try { response = await this.fetcher(url, { method: options.method ?? 'GET', headers, body, redirect: 'error', signal: AbortSignal.timeout(30_000) }); }
+    try { response = await fetch(url, { method: options.method ?? 'GET', headers, body, redirect: 'error', signal: AbortSignal.timeout(30_000) }); }
     catch { throw new Error('Google API connection failed; outcome is unknown and was not retried'); }
     if (!response.ok) {
       if (response.status === 401) {
@@ -46,7 +49,7 @@ export class GoogleClient {
       try { return { content_type: response.headers.get('content-type') ?? 'application/octet-stream', bytes: await readLimited(response) }; }
       catch (error) { throw new Error(error instanceof Error && error.message === 'Google file exceeds the 10 MiB read limit' ? error.message : 'Google file read failed; no complete result was returned'); }
     }
-    const value: unknown = await response.json().catch(() => null);
+    const value: unknown = await readJsonResponse(response, GOOGLE_FILE_LIMIT).catch(() => null);
     if (value === null || typeof value !== 'object') throw new Error('Google API returned invalid JSON; request was not retried');
     return value;
   }

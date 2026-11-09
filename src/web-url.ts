@@ -11,7 +11,7 @@ for (const [address, prefix] of [
 ] as const) blocked.addSubnet(address, prefix, 'ipv4');
 const globalV6 = new BlockList(); globalV6.addSubnet('2000::', 3, 'ipv6');
 for (const [address, prefix] of [['2001::',23],['2001:db8::',32],['2002::',16],['3fff::',20]] as const) blocked.addSubnet(address, prefix, 'ipv6');
-export function isPublicWebAddress(address: string): boolean {
+function isPublicWebAddress(address: string): boolean {
   const family = isIP(address);
   return family === 4 ? !blocked.check(address, 'ipv4')
     : family === 6 && globalV6.check(address, 'ipv6') && !blocked.check(address, 'ipv6');

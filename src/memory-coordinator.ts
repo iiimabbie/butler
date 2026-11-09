@@ -4,7 +4,8 @@ import { Hindsight, ConversationSubmissionError, MemoryWriteSuppressedError } fr
 import { buildConversationPayload } from './conversation-format.js';
 import { logError } from './log.js';
 import { isHttp429 } from './tool-errors.js';
-import { nextCronRun, DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
+import { nextCronRun } from './scheduler.js';
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 
 const MAX_TURNS = 25;
 const POLL_DELAYS = [5_000, 15_000, 30_000, 60_000] as const;
@@ -18,7 +19,6 @@ export class MemoryCoordinator {
   private closed = false;
   private timer?: ReturnType<typeof setTimeout>;
   private activeHttp?: Promise<void>;
-  private readonly pollDelays = new Map<string, number>();
   private readonly recoveryPending = new Set<string>();
   private roundRobinAfter = '';
   private attachmentTurn = false;
@@ -36,11 +36,6 @@ export class MemoryCoordinator {
     this.passive = false;
     for (const batch of this.store.inFlightMemoryBatches()) {
       this.recoveryPending.add(batch.operationId);
-      if (batch.lastPollAt && batch.nextPollAt) {
-        const interval = Date.parse(batch.nextPollAt) - Date.parse(batch.lastPollAt);
-        const index = POLL_DELAYS.findIndex(delay => delay === interval);
-        this.pollDelays.set(batch.operationId, Math.max(0, index));
-      }
       this.store.updateMemoryBatch(batch.operationId, batch.status === 'submitting' ? 'unknown' : batch.status, {
         ...(batch.status === 'submitting' ? { error: 'Restarted after persistent submit intent; checking original operation ID.' } : {}),
         nextPollAt: new Date().toISOString(),
@@ -146,22 +141,22 @@ export class MemoryCoordinator {
     const midnightDelay = Math.max(0, this.midnightAt - now);
     if (this.activeHttp) return hasFullPrefix ? Math.min(1_000, midnightDelay) : midnightDelay;
 
-    const recovery = this.store.inFlightMemoryBatches().filter(batch => this.recoveryPending.has(batch.operationId));
-    const pollBatches = this.store.inFlightMemoryBatches().filter(batch => !this.recoveryPending.has(batch.operationId));
-    const candidates = this.store.frozenNeverAttempted()
-      .filter(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
+    const inFlight = this.store.inFlightMemoryBatches();
+    const recovery = inFlight.filter(batch => this.recoveryPending.has(batch.operationId));
+    const pollBatches = inFlight.filter(batch => !this.recoveryPending.has(batch.operationId));
+    const candidates = this.readySubmissions();
     const times: number[] = [this.midnightAt];
     const attachmentJobs = this.store.attachmentMemoryJobs();
     if (hasFullPrefix || recovery.length || candidates.length || attachmentJobs.some(job => job.state === 'queued')) times.push(now);
     times.push(...pollBatches.map(batch => batch.nextPollAt ? Date.parse(batch.nextPollAt) : now));
     times.push(...attachmentJobs.filter(job => job.nextPollAt).map(job => Date.parse(job.nextPollAt!)));
-    return times.length ? Math.max(0, Math.min(...times) - now) : undefined;
+    return Math.max(0, Math.min(...times) - now);
   }
 
   private async drainOne(): Promise<void> {
     const now = Date.now();
     const inFlight = this.store.inFlightMemoryBatches();
-    const hasDueConversationWork = this.recoveryPending.size > 0 || inFlight.some(batch => !batch.nextPollAt || Date.parse(batch.nextPollAt) <= now) || this.store.frozenNeverAttempted().some(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
+    const hasDueConversationWork = this.recoveryPending.size > 0 || inFlight.some(batch => !batch.nextPollAt || Date.parse(batch.nextPollAt) <= now) || this.readySubmissions().length > 0;
     const attachmentWork = this.store.attachmentMemoryJobs().find(job => job.state === 'queued' || (job.nextPollAt && Date.parse(job.nextPollAt) <= now));
     if (attachmentWork && (this.attachmentTurn || !hasDueConversationWork)) {
       await this.drainAttachment(attachmentWork);
@@ -177,8 +172,7 @@ export class MemoryCoordinator {
     } else {
       const now = Date.now();
       const duePolls = inFlight.filter(batch => !batch.nextPollAt || Date.parse(batch.nextPollAt) <= now);
-      const submissions = this.store.frozenNeverAttempted()
-        .filter(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
+      const submissions = this.readySubmissions();
       work = [
         ...duePolls.map(batch => ({ documentId: batch.documentId, kind: 'poll' as const, batch })),
         ...submissions.map(batch => ({ documentId: batch.documentId, kind: 'submit' as const, batch })),
@@ -202,7 +196,6 @@ export class MemoryCoordinator {
 
   private suppressBatch(batch: MemoryBatch): void {
     this.store.updateMemoryBatch(batch.operationId, 'suppressed', { error: 'Source memory-write policy is no longer valid.' });
-    this.pollDelays.delete(batch.operationId);
     this.recoveryPending.delete(batch.operationId);
   }
 
@@ -263,7 +256,7 @@ export class MemoryCoordinator {
         const detail = typeof response?.error_message === 'string' ? response.error_message.slice(0, 500) : typeof response?.error === 'string' ? response.error.slice(0, 500) : '';
         const error = `Attachment memory operation ${operationId} ended with ${result.status}${detail ? `: ${detail}` : ''}`;
         this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, result.status === 'not_found' ? 'unknown' : 'failed', { nextPollAt: null, error });
-        const context = `Attachment memory operation terminal document=${job.documentId} operation=${operationId} status=${result.status}${detail ? ` reason=${detail}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
+        logError(`Attachment memory operation terminal document=${job.documentId} operation=${operationId} status=${result.status}${detail ? ` reason=${detail}` : ''}`);
       }
     } catch (error) {
       logError(`Attachment memory poll failed document=${job.documentId} operation=${operationId}`, error, { mention: !isHttp429(error) });
@@ -281,7 +274,6 @@ export class MemoryCoordinator {
       this.store.updateMemoryBatch(batch.operationId, 'pending', {
         nextPollAt: new Date(Date.now() + POLL_DELAYS[0]).toISOString(),
       });
-      this.pollDelays.set(batch.operationId, 0);
     } catch (error) {
       if (error instanceof MemoryWriteSuppressedError) { this.suppressBatch(batch); return; }
       logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
@@ -290,7 +282,6 @@ export class MemoryCoordinator {
         error: this.errorText(error),
         ...(!rejection ? { nextPollAt: new Date().toISOString() } : {}),
       });
-      if (rejection) this.pollDelays.delete(batch.operationId);
     }
   }
 
@@ -302,47 +293,35 @@ export class MemoryCoordinator {
       this.recoveryPending.delete(batch.operationId);
       if (result.status === 'completed') {
         this.store.completeMemoryBatch(batch.operationId);
-        this.pollDelays.delete(batch.operationId);
       } else if (result.status === 'pending' || result.status === 'processing') {
-        const index = this.pollDelays.get(batch.operationId) ?? (batch.lastPollAt ? 1 : 0);
-        const nextIndex = Math.min(index + 1, POLL_DELAYS.length - 1);
-        this.pollDelays.set(batch.operationId, nextIndex);
+        const nextIndex = Math.min(batch.pollAttempt + 1, POLL_DELAYS.length - 1);
         this.store.updateMemoryBatch(batch.operationId, result.status, {
-          lastPollAt: now,
+          lastPollAt: now, pollAttempt: nextIndex,
           nextPollAt: new Date(Date.now() + POLL_DELAYS[nextIndex]).toISOString(),
         });
-      } else if (result.status === 'not_found') {
-        const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
-        const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
-        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=not_found${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
-        this.store.updateMemoryBatch(batch.operationId, 'needs_clarification', {
-          lastPollAt: now,
-          error: 'Operation not found after persistent submit intent; automatic resubmission is unsafe.',
-        });
-        this.pollDelays.delete(batch.operationId);
       } else {
-        const response = result.response && typeof result.response === 'object' ? result.response as Record<string, unknown> : undefined;
+        const response = result.response;
         const reason = response ? ['error', 'message', 'code'].map(key => response[key]).filter((value): value is string => typeof value === 'string').join(' ') : '';
-        const context = `Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=${result.status}${reason ? ` reason=${reason}` : ''}`; logError(context, undefined, { mention: !isHttp429(context) });
-        this.store.updateMemoryBatch(batch.operationId, result.status, {
+        logError(`Memory operation terminal status operation=${batch.operationId} channel=${batch.channelId} status=${result.status}${reason ? ` reason=${reason}` : ''}`);
+        this.store.updateMemoryBatch(batch.operationId, result.status === 'not_found' ? 'needs_clarification' : result.status, {
           lastPollAt: now,
-          error: JSON.stringify(result.response),
+          error: result.status === 'not_found' ? 'Operation not found after persistent submit intent; automatic resubmission is unsafe.' : JSON.stringify(response),
         });
-        this.pollDelays.delete(batch.operationId);
       }
     } catch (error) {
       logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
       this.recoveryPending.delete(batch.operationId);
-      const index = this.pollDelays.get(batch.operationId) ?? (batch.lastPollAt ? 1 : 0);
-      const nextIndex = Math.min(index + 1, POLL_DELAYS.length - 1);
-      this.pollDelays.set(batch.operationId, nextIndex);
+      const nextIndex = Math.min(batch.pollAttempt + 1, POLL_DELAYS.length - 1);
       this.store.updateMemoryBatch(batch.operationId, 'unknown', {
         error: this.errorText(error),
-        lastPollAt: now,
+        lastPollAt: now, pollAttempt: nextIndex,
         nextPollAt: new Date(Date.now() + POLL_DELAYS[nextIndex]).toISOString(),
       });
     }
-    this.roundRobinAfter = batch.documentId;
+  }
+
+  private readySubmissions(): MemoryBatch[] {
+    return this.store.frozenNeverAttempted().filter(batch => this.store.blockingMemoryBatch(batch.documentId)?.operationId === batch.operationId);
   }
 
   private documentOrder(a: string, b: string): number {

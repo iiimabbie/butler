@@ -34,7 +34,7 @@ export function validateTranscriptDate(value: unknown): string {
   return value;
 }
 
-export function transcriptCandidateWindow(date: string): { start: string; end: string } {
+function transcriptCandidateWindow(date: string): { start: string; end: string } {
   const [year, month, day] = date.split('-').map(Number);
   const start = new Date(0);
   start.setUTCHours(0, 0, 0, 0);
@@ -43,8 +43,7 @@ export function transcriptCandidateWindow(date: string): { start: string; end: s
   return { start: start.toISOString(), end: end.toISOString() };
 }
 
-export function formatTranscript(store: Store, dateValue: unknown, timezone: string, offset: number, limit: number): TranscriptPage {
-  const date = validateTranscriptDate(dateValue);
+export function formatTranscript(store: Store, date: string, timezone: string, offset: number, limit: number): TranscriptPage {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
     year: 'numeric', month: '2-digit', day: '2-digit',
@@ -70,8 +69,10 @@ export function formatTranscript(store: Store, dateValue: unknown, timezone: str
   const transcript = [...channelGroups]
     .map(([channelId, messages]) => `=== 頻道：${channelId} ===\n${messages.join('\n\n')}`)
     .join('\n\n');
-  const pageOffset = Math.min(offset, transcript.length);
-  const pageEnd = Math.min(pageOffset + limit, transcript.length);
+  let pageOffset = Math.min(offset, transcript.length);
+  if (pageOffset > 0 && /[\uDC00-\uDFFF]/.test(transcript[pageOffset]!) && /[\uD800-\uDBFF]/.test(transcript[pageOffset - 1]!)) pageOffset--;
+  let pageEnd = Math.min(pageOffset + limit, transcript.length);
+  if (pageEnd < transcript.length && /[\uD800-\uDBFF]/.test(transcript[pageEnd - 1]!) && /[\uDC00-\uDFFF]/.test(transcript[pageEnd]!)) pageEnd = pageEnd - 1 === pageOffset ? pageEnd + 1 : pageEnd - 1;
   return {
     date, timezone, total_messages: entries.length, total_length: transcript.length,
     offset: pageOffset, has_more: pageEnd < transcript.length,

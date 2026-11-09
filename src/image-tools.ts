@@ -1,16 +1,18 @@
 import { ToolUsageError } from './tool-errors.js';
 import { constants as fsConstants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { open, mkdir, writeFile, copyFile, unlink, realpath } from 'node:fs/promises';
+import { mkdir, writeFile, copyFile, realpath } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { readResponseBytes } from './response-body.js';
+import { readSafeFile } from './safe-file.js';
+import { readJsonResponse, readResponseBytes } from './response-body.js';
+import { detectSupportedImageType } from './attachment-image-type.js';
+import { isRecord } from './tool-schema.js';
 
 export interface ImageConfig {
   baseUrl: string;
   apiKey?: string;
   model: string;
-  protocol: 'images';
   timeoutMs?: number;
   identityReferencePath?: string;
 }
@@ -73,29 +75,25 @@ export function createImageToolRuntime(options: {
   config: ImageConfig;
   attachmentDir: string;
   attachmentFiles: ImageAttachmentFile[];
-  fetcher?: typeof fetch;
 }): ImageToolRuntime {
   const { config } = options;
-  const fetcher = options.fetcher ?? fetch;
   const definitions: Array<Record<string, unknown>> = [generationDefinition(Boolean(config.identityReferencePath)), saveDefinition];
   const pending = new Map<string, { filename: string; mime: string; archivePath: string }>();
 
   const registerImage = async (bytes: Buffer): Promise<PendingImageResult> => {
     if (!bytes.length || bytes.length > RESPONSE_LIMIT) throw new Error('Generated image must be from 1 byte to 20 MiB; outcome is unknown and must not be retried automatically');
-    const image = detectImage(bytes);
+    const image = detectNonGifImage(bytes);
     if (!image) throw new Error('Generated image is not PNG, JPEG or WebP data; outcome is unknown and must not be retried automatically');
-    const archivePath = join(options.attachmentDir, 'images', `${randomUUID()}-generated.${image.extension}`);
-    const filename = `${randomUUID()}.${image.extension}`;
-    const path = join(options.attachmentDir, filename);
+    const archivePath = join(options.attachmentDir, 'images', `${randomUUID()}-generated${image.extension}`);
+    const filename = `${randomUUID()}${image.extension}`;
     try {
       await mkdir(dirname(archivePath), { recursive: true, mode: 0o700 });
       await writeFile(archivePath, bytes, { flag: 'wx', mode: 0o600 });
-      await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
     } catch {
       throw new Error('Generated image could not be archived or saved as a temporary image; generation was not retried and must not be retried automatically');
     }
-    pending.set(path, { filename, mime: image.mime, archivePath });
-    return { status: 'awaiting_save', filename, path, mime: image.mime, next_step: 'Save it with image_save using this exact path before delivery. Do not generate it again.' };
+    pending.set(archivePath, { filename, mime: image.mimeType, archivePath });
+    return { status: 'awaiting_save', filename, path: archivePath, mime: image.mimeType, next_step: 'Save it with image_save using this exact path before delivery. Do not generate it again.' };
   };
 
   return {
@@ -132,14 +130,11 @@ export function createImageToolRuntime(options: {
         if (!isInside(realWorkspace, realParent)) throw new ToolUsageError('image_save destination must be inside workspace');
         try { await copyFile(args.path, destination, fsConstants.COPYFILE_EXCL); }
         catch { throw new Error('image_save could not create the destination without overwriting; generated image remains pending'); }
-        try { await unlink(args.path); }
-        catch { throw new Error('image_save copied the named file but could not remove the temporary image; generated image remains pending and was not queued'); }
         pending.delete(args.path);
         options.attachmentFiles.push({ attachment: destination, name: filename, archivePath: image.archivePath, origin: 'butler_generated' });
         return { status: 'queued_for_final_reply', path: destination, filename, mime: image.mime, delivery: 'pending' };
       }
       if (name !== 'image_generate') throw new ToolUsageError(`Unknown image tool: ${name}`);
-      if (config.protocol !== 'images') throw new Error('Unsupported image generation protocol');
       if (typeof args.prompt !== 'string' || args.prompt.trim().length === 0 || args.prompt.length > 10_000 || Object.keys(args).some(key => key !== 'prompt' && key !== 'self' && key !== 'reference_images')) {
         throw new ToolUsageError('image_generate requires a non-empty prompt of at most 10000 characters, optional self and optional reference_images');
       }
@@ -158,7 +153,7 @@ export function createImageToolRuntime(options: {
       let response: Response;
       try {
         if (!references.length) {
-          response = await fetcher(`${config.baseUrl.replace(/\/+$/, '')}/images/generations`, {
+          response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/images/generations`, {
             method: 'POST',
             headers: {
               'content-type': 'application/json',
@@ -173,8 +168,8 @@ export function createImageToolRuntime(options: {
           form.set('prompt', args.prompt);
           form.set('n', '1');
           form.set('response_format', 'b64_json');
-          references.forEach((reference, index) => form.append('image[]', new Blob([new Uint8Array(reference.bytes)], { type: reference.mime }), `reference-${index + 1}.${reference.extension}`));
-          response = await fetcher(`${config.baseUrl.replace(/\/+$/, '')}/images/edits`, {
+          references.forEach((reference, index) => form.append('image[]', new Blob([new Uint8Array(reference.bytes)], { type: reference.mime }), `reference-${index + 1}${reference.extension}`));
+          response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/images/edits`, {
             method: 'POST',
             headers: { ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}) },
             body: form,
@@ -206,31 +201,23 @@ export async function allowedReferencePath(path: string, attachmentDir: string):
   return real;
 }
 
-async function readReferenceImage(path: string): Promise<{ bytes: Buffer; extension: 'png' | 'jpg' | 'webp'; mime: string }> {
-  let handle;
+async function readReferenceImage(path: string): Promise<{ bytes: Buffer; extension: string; mime: string }> {
   try {
-    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
-    const info = await handle.stat();
-    if (!info.isFile() || info.size < 1 || info.size > REFERENCE_LIMIT) throw new Error(`Reference image must be a regular file from 1 byte to 20 MiB: ${path}`);
-    const bytes = await handle.readFile();
-    if (bytes.length < 1 || bytes.length > REFERENCE_LIMIT) throw new Error(`Reference image must be a regular file from 1 byte to 20 MiB: ${path}`);
-    const image = detectImage(bytes);
+    const bytes = await readSafeFile(path, REFERENCE_LIMIT);
+    if (!bytes.length) throw new Error(`Reference image must be a regular file from 1 byte to 20 MiB: ${path}`);
+    const image = detectNonGifImage(bytes);
     if (!image) throw new Error(`Reference image must be a PNG, JPEG, or WebP image: ${path}`);
-    return { bytes, ...image };
+    return { bytes, extension: image.extension, mime: image.mimeType };
   } catch (error) {
     if (error instanceof Error && error.message.startsWith('Reference image')) throw error;
     throw new Error(`Reference image could not be read safely: ${path}`);
-  } finally {
-    await handle?.close().catch(() => {});
   }
 }
 
 async function readGeneratedImage(response: Response, sensitive: Array<string | undefined>): Promise<Buffer> {
   try {
-    if (!response.body) throw new Error('Missing response body');
-    const body = await readResponseBytes(response, RESPONSE_LIMIT);
-    if (!response.ok) throw new Error(formatImageServiceError(response, body, sensitive));
-    const payload: unknown = JSON.parse(body.toString('utf8'));
+    if (!response.ok) throw new Error(formatImageServiceError(response, await readResponseBytes(response, RESPONSE_LIMIT), sensitive));
+    const payload = await readJsonResponse(response, RESPONSE_LIMIT);
     if (!isRecord(payload) || !Array.isArray(payload.data) || !isRecord(payload.data[0]) || typeof payload.data[0].b64_json !== 'string') {
       throw new Error('Image generation returned no b64_json image; outcome is unknown and must not be retried automatically');
     }
@@ -246,15 +233,10 @@ async function readGeneratedImage(response: Response, sensitive: Array<string | 
   }
 }
 
-export function detectImage(bytes: Buffer): { extension: 'png' | 'jpg' | 'webp'; mime: string } | undefined {
-  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { extension: 'png', mime: 'image/png' };
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return { extension: 'jpg', mime: 'image/jpeg' };
-  if (bytes.length >= 12 && bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return { extension: 'webp', mime: 'image/webp' };
-  return undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+// The image API accepts PNG, JPEG and WebP only.
+function detectNonGifImage(bytes: Uint8Array) {
+  const image = detectSupportedImageType(bytes);
+  return image?.mimeType === 'image/gif' ? undefined : image;
 }
 
 // Preserve bounded upstream diagnostics in the existing tool-error log.

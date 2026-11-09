@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { readSafeFile } from './safe-file.js';
 import { transcribeAudio, type AudioTranscriptionConfig } from './audio-transcription.js';
 
 const execFileAsync = promisify(execFile);
@@ -24,12 +23,7 @@ export function isVideoAttachment(mime: string, filename: string): boolean {
 }
 function ext(filename: string): string { return filename.slice(filename.lastIndexOf('.')).toLowerCase(); }
 function safeMessage(error: unknown): string { return error instanceof Error ? error.message.slice(0, 240) : '未知影片處理錯誤'; }
-async function readSource(path: string): Promise<Buffer> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try { const s = await handle.stat(); if (!s.isFile() || s.size > 20 * 1024 * 1024) throw new Error('原始影片無法安全讀取或超過限制'); const data = await handle.readFile(); if (data.length !== s.size) throw new Error('原始影片讀取不完整'); return data; }
-  finally { await handle.close(); }
-}
-async function run(binary: string, args: string[], deadline = Date.now() + VIDEO_PROCESS_BUDGET_MS): Promise<string> {
+async function run(binary: string, args: string[], deadline: number): Promise<string> {
   const timeout = Math.max(1, Math.min(PROCESS_TIMEOUT_MS, deadline - Date.now()));
   try { const result = await execFileAsync(binary, args, { timeout, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8', windowsHide: true }); return result.stdout; }
   catch (e) { const error = e as NodeJS.ErrnoException & { code?: number|string; stderr?: string }; const code = error.code === 'ETIMEDOUT' ? 'timeout' : `exit ${String(error.code ?? 'unknown')}`; throw new Error(`${binary} ${code}${error.stderr ? `: ${error.stderr.replace(/[\r\n\t]+/g,' ').slice(0,160)}` : ''}`); }
@@ -43,7 +37,7 @@ async function loadCache(root: string, key: string): Promise<VideoResult | undef
     if (item.schema !== CACHE_SCHEMA || item.version !== VIDEO_PROCESSING_VERSION || item.key !== key || !item.result || !['ready','failed'].includes(item.status)) return;
     if ((item.status === 'failed' || item.result.audioStatus.startsWith('音軌轉錄失敗：')) && (item.retryAfter ?? 0) <= Date.now()) return;
     if (item.status === 'ready' && item.result.frames.length === 0) return;
-    for (const frame of item.result.frames ?? []) {
+    for (const frame of item.result.frames) {
       const p = resolve(root, frame.cacheName); if (!frame.cacheName || !within(root,p) || dirname(p) !== resolve(root)) return;
       const s = await lstat(p); if (!s.isFile() || s.isSymbolicLink() || s.size < 16 || s.size > MAX_FRAME_BYTES) return;
       const bytes = await readFile(p); if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return;
@@ -55,17 +49,18 @@ async function saveCache(root: string, key: string, result: VideoResult): Promis
   const item: VideoCache = { schema: CACHE_SCHEMA, version: VIDEO_PROCESSING_VERSION, key, status: result.status, ...((result.status === 'failed' || result.audioStatus.startsWith('音軌轉錄失敗：')) ? { retryAfter: Date.now() + 5 * 60_000 } : {}), result };
   const temp = join(root, `.${key}.${randomUUID()}.tmp`); await writeFile(temp, JSON.stringify(item), { flag: 'wx', mode: 0o600 }); await rename(temp, join(root, `${key}.json`));
 }
-async function processVideo(sourceBytes: Buffer, filename: string, root: string, key: string, transcription?: AudioTranscriptionConfig, fetcher?: typeof fetch): Promise<VideoResult> {
+async function processVideo(sourceBytes: Buffer, filename: string, root: string, key: string, transcription?: AudioTranscriptionConfig): Promise<VideoResult> {
+  const deadline = Date.now() + VIDEO_PROCESS_BUDGET_MS;
   const work = join(root, `.work-${randomUUID()}`); await mkdir(work, { mode: 0o700 });
   const frames: Frame[] = []; let audioStatus = '影片無音軌，未產生轉錄。'; let transcript: string | undefined;
   try {
     const source = join(work, `input${ext(filename) || '.bin'}`); await writeFile(source, sourceBytes, { mode: 0o600 });
-    const probeText = await run('ffprobe',['-v','error','-protocol_whitelist','file,pipe','-show_entries','format=duration:stream=codec_type,r_frame_rate,avg_frame_rate,duration','-of','json',source]);
+    const probeText = await run('ffprobe',['-v','error','-protocol_whitelist','file,pipe','-show_entries','format=duration:stream=codec_type,r_frame_rate,avg_frame_rate,duration','-of','json',source], deadline);
     const probe = JSON.parse(probeText) as { format?: { duration?: string }; streams?: Array<{ codec_type?: string; avg_frame_rate?: string; r_frame_rate?: string; duration?: string }> };
     const streams = probe.streams ?? []; const video = streams.find(s=>s.codec_type === 'video'); const audio = streams.some(s=>s.codec_type === 'audio');
     const duration = Number(video?.duration ?? probe.format?.duration); if (!video || !Number.isFinite(duration) || duration <= 0) throw new Error('影片沒有可讀取的視訊串流或時長');
     if (audio) {
-      try { const wav = join(work,'audio.wav'); await run('ffmpeg',['-nostdin','-v','error','-protocol_whitelist','file,pipe','-i',source,'-vn','-ac','1','-ar','16000','-y',wav]); const s=await stat(wav); if (!s.isFile() || s.size < 44 || s.size > 25*1024*1024) throw new Error('抽取音軌超出限制或無效'); transcript = await transcribeAudio({path:wav,filename:'audio.wav',config:transcription,fetcher}); audioStatus='音軌已轉錄（Groq Whisper）。'; }
+      try { const wav = join(work,'audio.wav'); await run('ffmpeg',['-nostdin','-v','error','-protocol_whitelist','file,pipe','-i',source,'-vn','-ac','1','-ar','16000','-y',wav], deadline); const s=await stat(wav); if (!s.isFile() || s.size < 44 || s.size > 25*1024*1024) throw new Error('抽取音軌超出限制或無效'); transcript = await transcribeAudio({path:wav,filename:'audio.wav',config:transcription,timeoutMs:Math.max(1,deadline-Date.now())}); audioStatus='音軌已轉錄（Groq Whisper）。'; }
       catch(e) { audioStatus=`音軌轉錄失敗：${safeMessage(e)}；原始影片已保留。`; }
     }
     const rate = video.avg_frame_rate ?? video.r_frame_rate ?? ''; const [n,d] = rate.split('/').map(Number); const frameStep = n>0 && d>0 ? d/n : 1/25; const tailSafe = Math.max(0.05, Math.min(0.5, frameStep*2));
@@ -75,7 +70,7 @@ async function processVideo(sourceBytes: Buffer, filename: string, root: string,
       const target=targets[i]!; let saved: string|undefined; let used=target;
       for (let attempt=0;attempt<3;attempt++) {
         used=Math.max(0,target-attempt*Math.max(frameStep,0.04)); const temp=join(work,`frame-${i}-${attempt}.jpg`);
-        try { await run('ffmpeg',['-nostdin','-v','error','-protocol_whitelist','file,pipe','-ss',used.toFixed(3),'-i',source,'-frames:v','1','-vf',`scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease`,'-y',temp]); const s=await stat(temp); if (s.isFile()&&s.size>16&&s.size<=MAX_FRAME_BYTES) { const b=await readFile(temp); if(b[0]===0xff&&b[1]===0xd8){saved=temp;break;} } }
+        try { await run('ffmpeg',['-nostdin','-v','error','-protocol_whitelist','file,pipe','-ss',used.toFixed(3),'-i',source,'-frames:v','1','-vf',`scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease`,'-y',temp], deadline); const s=await stat(temp); if (s.isFile()&&s.size>16&&s.size<=MAX_FRAME_BYTES) { const b=await readFile(temp); if(b[0]===0xff&&b[1]===0xd8){saved=temp;break;} } }
         catch (error) { frameError=safeMessage(error); /* bounded fallback attempts */ }
       }
       if (saved) { const cacheName=`${key}-${i}.jpg`; await rename(saved,join(root,cacheName)); frames.push({timeSeconds:Number(used.toFixed(3)),cacheName}); }
@@ -84,13 +79,13 @@ async function processVideo(sourceBytes: Buffer, filename: string, root: string,
     const result: VideoResult={status:'ready',audioStatus, ...(transcript?{transcript}:{}),frames}; await saveCache(root,key,result); return result;
   } catch(e) {
     const result: VideoResult={status:'failed',audioStatus,frames:[],error:safeMessage(e)}; await saveCache(root,key,result).catch(()=>{}); return result;
-  } finally { const { rm }=await import('node:fs/promises'); await rm(work,{recursive:true,force:true}).catch(()=>{}); }
+  } finally { await rm(work,{recursive:true,force:true}).catch(()=>{}); }
 }
-export async function getVideoAttachmentResult(input: { path: string; filename: string; attachmentDir: string; transcription?: AudioTranscriptionConfig; fetcher?: typeof fetch }): Promise<{ result: VideoResult; frames: Array<{timeSeconds:number; bytes:Buffer; cachePath:string}> }> {
-  const bytes=await readSource(input.path); const key=basename(input.path); const root=cacheRoot(input.attachmentDir); await mkdir(root,{recursive:true,mode:0o700}); const rootStat=await lstat(root); if(!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('影片快取目錄不安全'); await chmod(root,0o700);
+export async function getVideoAttachmentResult(input: { path: string; filename: string; attachmentDir: string; transcription?: AudioTranscriptionConfig }): Promise<{ result: VideoResult; frames: Array<{timeSeconds:number; bytes:Buffer}> }> {
+  const key=basename(input.path); const root=cacheRoot(input.attachmentDir); await mkdir(root,{recursive:true,mode:0o700}); const rootStat=await lstat(root); if(!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new Error('影片快取目錄不安全'); await chmod(root,0o700);
   let result=await loadCache(root,key);
-  if (!result) { const flightKey=`${root}:${key}`; let pending=inFlight.get(flightKey); if(!pending){pending=processVideo(bytes,input.filename,root,key,input.transcription,input.fetcher).finally(()=>inFlight.delete(flightKey));inFlight.set(flightKey,pending);} result=await pending; }
-  const frames=[] as Array<{timeSeconds:number;bytes:Buffer;cachePath:string}>;
-  if(result.status==='ready') for(const frame of result.frames){const p=resolve(root,frame.cacheName);if(!within(root,p)||dirname(p)!==root)throw new Error('影片快取路徑無效');frames.push({timeSeconds:frame.timeSeconds,bytes:await readFile(p),cachePath:p});}
+  if (!result) { const flightKey=`${root}:${key}`; let pending=inFlight.get(flightKey); if(!pending){pending=readSafeFile(input.path).then(bytes => processVideo(bytes,input.filename,root,key,input.transcription)).finally(()=>inFlight.delete(flightKey));inFlight.set(flightKey,pending);} result=await pending; }
+  const frames=[] as Array<{timeSeconds:number;bytes:Buffer}>;
+  if(result.status==='ready') for(const frame of result.frames){const p=resolve(root,frame.cacheName);if(!within(root,p)||dirname(p)!==root)throw new Error('影片快取路徑無效');frames.push({timeSeconds:frame.timeSeconds,bytes:await readFile(p)});}
   return {result,frames};
 }

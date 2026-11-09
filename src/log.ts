@@ -1,3 +1,4 @@
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ButlerConfig } from './config.js';
 
@@ -16,14 +17,14 @@ export type LogMethods = { logInfo: typeof logInfo; logWarn: typeof logWarn; log
 export function configureLogging(config: ButlerConfig): void {
   const discord = config.discord;
   webhookUrl = discord?.errorWebhookUrl; mentionUserId = discord?.errorWebhookMentionUserId; threadId = discord?.errorWebhookThreadId;
-  secrets = [config.notifications?.bearerToken, discord?.token, config.llm?.apiKey, config.web?.tavily?.apiKey, config.web?.firecrawl?.apiKey, config.web?.anysearch?.apiKey, config.google?.clientSecret, config.image?.apiKey, discord?.errorWebhookUrl].filter((value): value is string => Boolean(value));
+  secrets = [config.notifications?.bearerToken, discord?.token, config.llm?.apiKey, config.web?.tavily?.apiKey, config.web?.firecrawl?.apiKey, config.web?.anysearch?.apiKey, config.google?.clientSecret, config.image?.apiKey, config.transcription?.apiKey, discord?.errorWebhookUrl].filter((value): value is string => Boolean(value));
 }
 function redact(value: string): string {
   let result = value;
   for (const secret of secrets) result = result.split(secret).join('[REDACTED]');
   return result.replace(/https:\/\/discord\.com\/api\/(?:v10\/)?webhooks\/\d+\/[^\s"'<>]+/gi, '[REDACTED_WEBHOOK]').replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]').replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|(?:token|key|secret)=?["']?[A-Za-z0-9._-]{12,})/gi, '[REDACTED]');
 }
-export function formatLogTimestamp(date = new Date()): string { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(date).replace(/, /, 'T') + `.${String(date.getMilliseconds()).padStart(3, '0')}+08:00`; }
+export function formatLogTimestamp(date = new Date()): string { return new Intl.DateTimeFormat('en-CA', { timeZone: DEFAULT_SCHEDULE_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).format(date).replace(/, /, 'T') + `.${String(date.getMilliseconds()).padStart(3, '0')}+08:00`; }
 function serializeError(value: unknown, depth = 0): string {
   if (depth > 4) return '';
   if (value instanceof Error) { const cause = 'cause' in value ? serializeError(value.cause, depth + 1) : ''; return `${value.stack ?? `${value.name}: ${value.message}`}${cause ? `\nCaused by: ${cause}` : ''}`; }
@@ -63,15 +64,14 @@ function output(level: 'INFO' | 'WARN' | 'ERROR', event: string, fields?: Record
 }
 export function logInfo(event: string, fields?: Record<string, unknown>): void { output('INFO', event, fields); }
 export function logWarn(event: string, error?: unknown, fields?: Record<string, unknown>): void { output('WARN', event, fields, error); }
-export function logError(event: string, error?: unknown, options: { notify?: boolean; mention?: boolean; deduplicationKey?: string; fields?: Record<string, unknown>; onNotifySettled?: (delivered: boolean) => void } = {}): void {
+export function logError(event: string, error?: unknown, options: { notify?: boolean; mention?: boolean; deduplicationKey?: string; fields?: Record<string, unknown> } = {}): void {
   const line = output('ERROR', event, options.fields, error);
-  const settle = (delivered: boolean) => { try { options.onNotifySettled?.(delivered); } catch {} };
-  if (!webhookUrl || options.notify === false) { settle(false); return; }
+  if (!webhookUrl || options.notify === false) { return; }
   const identity = `${options.deduplicationKey ?? event}\n${formatIdentityError(error)}`;
   const now = Date.now();
   for (const [key, at] of recentErrors) if (now - at >= deduplicationWindowMs) recentErrors.delete(key);
-  const previous = recentErrors.get(identity); if (previous !== undefined && now - previous < deduplicationWindowMs) { settle(false); return; }
-  if (queued >= 50) { logError('Error notifier queue full', undefined, { notify: false }); settle(false); return; }
+  const previous = recentErrors.get(identity); if (previous !== undefined && now - previous < deduplicationWindowMs) { return; }
+  if (queued >= 50) { logError('Error notifier queue full', undefined, { notify: false }); return; }
   recentErrors.set(identity, now); queued++;
   const target = webhookUrl, notifyUserId = mentionSuppression.getStore() || options.mention === false ? undefined : mentionUserId, notifyThreadId = threadId;
   const body = { ...(notifyUserId ? { content: `<@${notifyUserId}>` } : {}), embeds: [{ title: 'Butler ERROR', description: truncate(line, 4096), color: 0xED4245, timestamp: new Date().toISOString() }], allowed_mentions: { parse: [] as string[], ...(notifyUserId ? { users: [notifyUserId] } : {}) } };
@@ -81,18 +81,18 @@ export function logError(event: string, error?: unknown, options: { notify?: boo
       const destination = new URL(target); destination.searchParams.set('wait', 'true'); if (notifyThreadId) destination.searchParams.set('thread_id', notifyThreadId);
       let response: Response;
       try { response = await fetch(destination, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) }); }
-      catch (cause) { logError('Error notifier network failure', cause, { notify: false }); settle(false); return; }
+      catch (cause) { logError('Error notifier network failure', cause, { notify: false }); return; }
       if (response.status === 429) {
         let retryAfterMs: number | undefined;
         try { const rate = await response.json() as { retry_after?: unknown }; if (typeof rate.retry_after === 'number' && Number.isFinite(rate.retry_after) && rate.retry_after >= 0) retryAfterMs = rate.retry_after * 1000; } catch {}
-        if (retryAfterMs === undefined || retryAfterMs > 30_000) { logError('Error notifier retry delay invalid', undefined, { notify: false }); settle(false); return; }
+        if (retryAfterMs === undefined || retryAfterMs > 30_000) { logError('Error notifier retry delay invalid', undefined, { notify: false }); return; }
         if (retryAfterMs) await new Promise(resolve => setTimeout(resolve, retryAfterMs));
         try { response = await fetch(destination, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(5000) }); }
-        catch (cause) { logError('Error notifier retry failed', cause, { notify: false }); settle(false); return; }
+        catch (cause) { logError('Error notifier retry failed', cause, { notify: false }); return; }
       }
-      if (!response.ok) { const status = response.status; try { await response.body?.cancel(); } catch {} logError('Error notifier response failed', undefined, { notify: false, fields: { status } }); settle(false); return; }
-      lastSentAt = Date.now(); try { await response.body?.cancel(); } catch {} settle(true);
-    } catch (cause) { logError('Error notifier internal failure', cause, { notify: false }); settle(false); }
+      if (!response.ok) { const status = response.status; try { await response.body?.cancel(); } catch {} logError('Error notifier response failed', undefined, { notify: false, fields: { status } }); return; }
+      lastSentAt = Date.now(); try { await response.body?.cancel(); } catch {}
+    } catch (cause) { logError('Error notifier internal failure', cause, { notify: false }); }
     finally { queued--; }
   });
 }

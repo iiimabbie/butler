@@ -1,22 +1,22 @@
 import fs from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync, backup } from 'node:sqlite';
 import YAML from 'yaml';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BACKUP_ROOT = path.join(ROOT, 'backups', 'memory-and-chats');
-export const CLEAR_TABLES = [
+const CLEAR_TABLES = [
   'memory_batch_sources', 'attachment_memory_jobs', 'message_input_attachments', 'message_sources', 'hindsight_pending',
   'discord_outgoing_segments', 'message_preparation', 'memory_batches', 'tool_calls',
   'subagent_inbox', 'subagent_events', 'subagent_runs', 'subagent_windows',
   'session_compact_checkpoints', 'session_workspace', 'session_opening_context', 'session_context_usage',
   'attachment_deliveries', 'model_requests', 'ask_context', 'notification_events',
-  'restart_notice', 'session_sources', 'messages', 'sessions',
+  'restart_notice', 'messages', 'sessions',
 ];
-export const KEEP_TABLES = [
+const KEEP_TABLES = [
   'schedule_runtime', 'schedule_runs', 'web_usage',
 ];
 const LINK_TABLES = ['channel_state'];
@@ -159,7 +159,7 @@ async function assertStopped() {
 function rows(db, table) { return sorted(db.prepare(`SELECT * FROM "${table}"`).all()); }
 function counts(db) { return Object.fromEntries(CLEAR_TABLES.map(table => [table, Number(db.prepare(`SELECT COUNT(*) n FROM "${table}"`).get().n)])); }
 function preservedSqlite(db) { return Object.fromEntries(KEEP_TABLES.map(table => [table, rows(db, table)])); }
-export function checkSchema(db) {
+function checkSchema(db) {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").all().map(row => row.name);
   for (const table of [...CLEAR_TABLES, ...KEEP_TABLES, ...LINK_TABLES]) {
     if (!tables.includes(table)) throw new Error(`SQLite 缺少資料表：${table}`);
@@ -173,7 +173,7 @@ export function checkSchema(db) {
   }
   if (db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('SQLite 原有外鍵違規，停止');
 }
-export function resetChats(db, channels, sources = []) {
+function resetChats(db, channels) {
   for (const table of CLEAR_TABLES) db.exec(`DELETE FROM "${table}"`);
   const mapping = new Map();
   for (const row of channels) {
@@ -183,12 +183,8 @@ export function resetChats(db, channels, sources = []) {
     db.prepare('INSERT INTO sessions(id,created_at) VALUES(?,?)').run(id, new Date().toISOString());
   }
   for (const row of channels) db.prepare('UPDATE channel_state SET session_id=? WHERE channel_id=?').run(mapping.get(row.session_id), row.channel_id);
-  for (const source of sources) {
-    if (!mapping.has(source.session_id)) continue;
-    db.prepare('INSERT INTO session_sources(session_id,channel_id,source_type,owner_id,bot_id) VALUES(?,?,?,?,?)').run(mapping.get(source.session_id), source.channel_id, source.source_type, source.owner_id, source.bot_id);
-  }
   for (const table of CLEAR_TABLES) {
-    if (table !== 'sessions' && table !== 'session_sources' && countsFor(db, table) !== 0) throw new Error(`清除表仍有資料：${table}`);
+    if (table !== 'sessions' && countsFor(db, table) !== 0) throw new Error(`清除表仍有資料：${table}`);
   }
   if (!same(rows(db, 'channel_state'), sorted(channels.map(row => ({ ...row, session_id: mapping.get(row.session_id) }))))) throw new Error('頻道設定核對失敗');
   if (countsFor(db, 'sessions') !== mapping.size || db.prepare('PRAGMA foreign_key_check').all().length) throw new Error('新會話或外鍵核對失敗');
@@ -231,7 +227,6 @@ async function main() {
     const beforeCounts = counts(db);
     const kept = preservedSqlite(db);
     const channels = rows(db, 'channel_state');
-    const sources = rows(db, 'session_sources');
     const bank = `${base}/v1/default/banks/${encodeURIComponent(bankId)}`;
     const banks = await list(`${base}/v1/default/banks`, 'banks');
     const profile = banks.find(row => row.bank_id === bankId);
@@ -250,8 +245,8 @@ async function main() {
     try {
       db.exec('PRAGMA foreign_keys=ON; BEGIN IMMEDIATE');
       transaction = true;
-      if (!same(counts(db), beforeCounts) || !same(preservedSqlite(db), kept) || !same(rows(db, 'channel_state'), channels) || !same(rows(db, 'session_sources'), sources)) throw new Error('備份後 SQLite 資料改變，停止');
-      resetChats(db, channels, sources);
+      if (!same(counts(db), beforeCounts) || !same(preservedSqlite(db), kept) || !same(rows(db, 'channel_state'), channels)) throw new Error('備份後 SQLite 資料改變，停止');
+      resetChats(db, channels);
       if (!same(preservedSqlite(db), kept)) throw new Error('SQLite 保留資料改變');
       await assertStopped();
       assertIdle(await getStats(bank));
@@ -277,6 +272,4 @@ async function main() {
     }
   } finally { db.close(); }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
-  main().catch(error => { console.error(`停止：${error.message}`); process.exitCode = 1; });
-}
+main().catch(error => { console.error(`停止：${error.message}`); process.exitCode = 1; });

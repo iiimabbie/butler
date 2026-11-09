@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { codeExecuteDefinition, executeCode, readOnlyTools } from './code-mode.js';
-import { preserveOptionalToolArguments } from './tool-schema.js';
+import { isRecord, preserveOptionalToolArguments, validateToolArgs } from './tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from './memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from './knowledge-tools.js';
 import { DiscordReactionInputError, ToolUsageError, WebFetchExtractionError, WebPoolError } from './tool-errors.js';
@@ -22,14 +22,13 @@ import type { ScheduleToolRuntime } from './schedule-tools.js';
 import type { ImageToolRuntime } from './image-tools.js';
 import type { HledgerRuntime } from './hledger-tools.js';
 import type { ProgressEvent } from './progress.js';
-import type { ReasoningEffort, MessageSource, StoredMessage, SessionOpeningContext } from './store.js';
+import type { ReasoningEffort, StoredMessage, SessionOpeningContext } from './store.js';
 import { formatRecall, Hindsight } from './hindsight.js';
-import type { MessageInputAttachment } from './store.js';
 import { logError, logInfo, logWarn } from './log.js';
 import { AttachmentInputError, formatDeliveryNotice, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from './input-attachments.js';
 import { countContext } from './context-budget.js';
 import { compactLiveGroups, compactSession } from './compaction.js';
-import { DEFAULT_SCHEDULE_TIMEZONE } from './scheduler.js';
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
 import { runSubagent, subagentDefinitions, validateSubagentModel } from './subagent.js';
 import type { SubagentCoordinator } from './subagent-coordinator.js';
@@ -41,17 +40,13 @@ export interface AgentConfig {
   model: string;
   maxContextTokens?: number;
   modelContextTokens?: Record<string, number>;
-  fetcher?: typeof fetch;
   timeoutMs: number;
-  signal?: AbortSignal;
   askId?: string; traceId?: string;
-  consumeSteer?: () => { content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined | Promise<{ content: string; source?: MessageSource; attachments?: MessageInputAttachment[]; stored?: StoredMessage } | undefined>;
-  initialAttachments?: MessageInputAttachment[];
+  consumeSteer?: () => StoredMessage | undefined | Promise<StoredMessage | undefined>;
   attachmentDir?: string;
   transcription?: import('./audio-transcription.js').AudioTranscriptionConfig;
   onSteerPersisted?: (storedMessageId: string) => void;
   onAskFinishing?: () => void;
-  messageSource?: MessageSource;
   storedInput?: StoredMessage;
   consumedSteerMessageIds?: ReadonlySet<string>;
   openingContext?: SessionOpeningContext;
@@ -90,19 +85,8 @@ interface ResponsesBody {
   output_text?: string;
 }
 
-const historyPageSchema = {
-  type: 'object',
-  properties: { offset: { type: 'integer' }, limit: { type: 'integer' } },
-  required: [],
-  additionalProperties: false,
-};
-
-const transcriptPageSchema = {
-  type: 'object',
-  properties: { date: { type: 'string', description: '完整日期 YYYY-MM-DD' }, offset: { type: 'integer' }, limit: { type: 'integer' } },
-  required: ['date'],
-  additionalProperties: false,
-};
+const pageProperties = (maxLimit: number) => ({ offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: maxLimit } });
+const objectSchema = (properties: Record<string, unknown>, required: string[]) => ({ type: 'object', properties, required, additionalProperties: false });
 
 const MAX_REASONING_ONLY_CONTINUATIONS = 2;
 
@@ -112,20 +96,25 @@ export const tools = [
   knowledgePageCreateDefinition,
   {
     type: 'function', name: 'history_list', description: 'List stored tool-call records for a session, newest first; Omit session_id or pass an empty string ("") to use the current session; a non-empty string selects that session. Use this to locate earlier operations and their record IDs. offset counts records (default 0); limit defaults to 20, maximum 100. Each result contains a 500-character preview; use the page next_offset for more records and history_get with the record id for the remaining result.',
-    parameters: { type: 'object', properties: { ...historyPageSchema.properties, session_id: { type: 'string' } }, required: [], additionalProperties: false },
+    parameters: objectSchema({ ...pageProperties(100), session_id: { type: 'string' } }, []),
   },
   {
     type: 'function', name: 'history_get', description: 'Read a stored tool-call record by id, including its arguments, execution status, timestamps and paginated result text. offset counts result characters (default 0); limit defaults to 4000, maximum 100000. Continue with result.next_offset. discord_attach_to_reply, image_generate and image_save records also include delivery status. A historical operation result records the outcome at that time, not the current state of the external resource.',
-    parameters: { type: 'object', properties: { id: { type: 'string' }, offset: { type: 'integer' }, limit: { type: 'integer' } }, required: ['id'], additionalProperties: false },
+    parameters: objectSchema({ id: { type: 'string', minLength: 1 }, ...pageProperties(100_000) }, ['id']),
   },
   {
     type: 'function', name: 'history_search', description: 'Search stored tool-call records across sessions by tool name, arguments or result text using SQLite LIKE matching (% matches any sequence; _ matches one character). This searches operation records, not conversation messages or semantic memory. Results are newest first; offset counts records (default 0), limit defaults to 20, maximum 100. Results include 500-character previews; use the page next_offset for more records and history_get for complete result content.',
-    parameters: { type: 'object', properties: { query: { type: 'string' }, ...historyPageSchema.properties }, required: ['query'], additionalProperties: false },
+    parameters: objectSchema({ query: { type: 'string', minLength: 1 }, ...pageProperties(100) }, ['query']),
   },
-  { type: 'function', name: 'journal_transcript_by_date', description: 'Read Butler-recorded pure Discord conversation text for a complete YYYY-MM-DD date across all current and archived sessions in channels that currently allow memory writes, including human and third-party bot messages and Butler text actually delivered to Discord. The date uses the configured schedule timezone. This reads conversation, not tool calls/results or long-term memory; internal scheduled inputs are excluded. Results can change as later messages arrive. offset is a character offset (default 0), limit defaults to 4000 and maximum 100000; continue from next_offset until null. Records include only content Butler has captured.', parameters: { ...transcriptPageSchema, properties: { ...transcriptPageSchema.properties, date: { type: 'string', description: '完整日期 YYYY-MM-DD' } } } },
-  { type: 'function', name: 'memory_recall', description: 'Retrieve relevant memories from shared long-term conversation history across sessions. Use to remember past conversations, preferences, relationships, decisions, experiences, and ongoing activities. Include relevant people, topics, Discord account IDs, or time context in the query when useful. Returns matching memory records rather than a complete conversation log. Use remembered information naturally without unnecessary evidence disclaimers. An empty result does not establish that something never happened.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
-  { type: 'function', name: 'memory_reflect', description: 'Synthesize useful answers from shared long-term memories, including personal preferences, relationships, past decisions, changing circumstances, and connections across conversations. Ask a specific question identifying relevant people, topics, and dates when useful. Returns a generated synthesis with supporting memory references. Answer naturally and prioritize useful information over repetitive evidence qualifications. Preserve meaningful uncertainty, corrections, and contradictions without inventing missing facts. Use memory_recall when individual memory records are needed.', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
+  { type: 'function', name: 'journal_transcript_by_date', description: 'Read Butler-recorded pure Discord conversation text for a complete YYYY-MM-DD date across all current and archived sessions in channels that currently allow memory writes, including human and third-party bot messages and Butler text actually delivered to Discord. The date uses the configured schedule timezone. This reads conversation, not tool calls/results or long-term memory; internal scheduled inputs are excluded. Results can change as later messages arrive. offset is a character offset (default 0), limit defaults to 4000 and maximum 100000; continue from next_offset until null. Records include only content Butler has captured.', parameters: objectSchema({ date: { type: 'string', description: '完整日期 YYYY-MM-DD' }, ...pageProperties(100_000) }, ['date']) },
+  { type: 'function', name: 'memory_recall', description: 'Retrieve relevant memories from shared long-term conversation history across sessions. Use to remember past conversations, preferences, relationships, decisions, experiences, and ongoing activities. Include relevant people, topics, Discord account IDs, or time context in the query when useful. Returns matching memory records rather than a complete conversation log. Use remembered information naturally without unnecessary evidence disclaimers. An empty result does not establish that something never happened.', parameters: objectSchema({ query: { type: 'string', minLength: 1 } }, ['query']) },
+  { type: 'function', name: 'memory_reflect', description: 'Synthesize useful answers from shared long-term memories, including personal preferences, relationships, past decisions, changing circumstances, and connections across conversations. Ask a specific question identifying relevant people, topics, and dates when useful. Returns a generated synthesis with supporting memory references. Answer naturally and prioritize useful information over repetitive evidence qualifications. Preserve meaningful uncertainty, corrections, and contradictions without inventing missing facts. Use memory_recall when individual memory records are needed.', parameters: objectSchema({ query: { type: 'string', minLength: 1 } }, ['query']) },
 ];
+
+// Tools whose arguments agent.ts validates against their own schema; the other tool modules validate their own.
+const validatedSchemas = new Map<string, { properties: Record<string, unknown>; required: string[] }>(
+  [...tools.filter(tool => /^(history_|journal_|memory_re)/.test(tool.name)), ...subagentDefinitions].map(tool => [tool.name, tool.parameters as { properties: Record<string, unknown>; required: string[] }]),
+);
 
 export function subagentToolsForContext(config: Pick<AgentConfig, 'subagent' | 'subagentCoordinator' | 'subagentEvent'>): typeof subagentDefinitions {
   if (!config.subagentCoordinator) return [];
@@ -265,7 +254,6 @@ export async function ask(store: Store, session: string, prompt: string, config:
     const toolWork = new Map<string, unknown[]>([[fresh[0]!.id, initialAskContext]]);
     let toolOwnerId = fresh[0]!.id;
     let liveCompactionCandidate = '';
-    const fetcher = config.fetcher ?? fetch;
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
@@ -286,21 +274,21 @@ export async function ask(store: Store, session: string, prompt: string, config:
       recoveryReminders.clear();
     };
     const runtimeReminders: unknown[] = [];
+    const appendSteer = async (steer: StoredMessage): Promise<void> => {
+      fresh.push(steer);
+      contextMessages.push(steer);
+      const steerInput = { role: 'user', content: steer.attachments.length ? await messageAttachmentContent(steer, config.attachmentDir ?? '', config.model, config.transcription) : formatStoredMessageText(steer) };
+      input.push(steerInput);
+      liveGroups.push([steerInput]); liveGroupProtected.push(true);
+      config.onSteerPersisted?.(steer.id);
+      toolOwnerId = steer.id;
+    };
     for (let turn = 0; ; turn++) {
       const steered = await config.consumeSteer?.();
       if (steered) {
         clearRecoveryModeForSteer();
-        logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: steered.stored?.source?.discordMessageId ?? steered.stored?.id, status: 'consumed' });
-        if (!steered.stored) throw new Error('steer input must already be persisted');
-        const savedSteer = steered.stored;
-        fresh.push(savedSteer);
-        contextMessages.push(savedSteer);
-        const storedSteer = fresh[fresh.length - 1]!;
-        const steerInput = { role: 'user', content: storedSteer.attachments.length ? await messageAttachmentContent(storedSteer, config.attachmentDir ?? '', config.model, config.transcription) : formatStoredMessageText(storedSteer) };
-        input.push(steerInput);
-        liveGroups.push([steerInput]); liveGroupProtected.push(true);
-        config.onSteerPersisted?.(storedSteer.id);
-        toolOwnerId = storedSteer.id;
+        logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: steered.source.discordMessageId ?? steered.id, status: 'consumed' });
+        await appendSteer(steered);
       }
       const toolChoice: 'none' | { type: 'function'; name: string } | undefined = forceImageSave ? { type: 'function', name: 'image_save' } : recoveryFinalTextOnly ? 'none' : undefined;
       if (forceImageSave) imageSaveRequiredAttempted = true;
@@ -308,9 +296,10 @@ export async function ask(store: Store, session: string, prompt: string, config:
       let localCountEstimate = 0;
       let localCountSource: string = 'local-count-estimate';
       let priorUsage = store.contextUsage(session);
-      const limit = config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000;
+      const knownModelLimit = config.modelContextTokens?.[config.model];
+      const limit = knownModelLimit ?? config.maxContextTokens ?? 150000;
       const countAndCalibrate = async () => {
-        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: fullAvailableTools, fetcher });
+        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: fullAvailableTools });
         localCountEstimate = local.inputTokens;
         localCountSource = local.source;
         const attachmentSignature = nativeAttachmentSignature(input);
@@ -330,7 +319,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
           const progress = compactionProgress(config, 'compact_session');
           try {
             const previousCheckpoint = store.compactCheckpoint(session)?.throughMessageId;
-            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, throughMessageId: safeBoundary, onStart: progress.start });
+            const compactResult = await compactSession(store, session, { baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, throughMessageId: safeBoundary, onStart: progress.start });
             const checkpoint = store.compactCheckpoint(session);
             if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
               store.clearContextUsage(session);
@@ -371,7 +360,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
             const beforeGroups = liveGroups.length;
             const progress = compactionProgress(config, 'compact_live_groups');
             try {
-              const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, fetcher, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content, onStart: progress.start });
+              const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content, onStart: progress.start });
               if (compacted.summary) {
                 store.clearContextUsage(session);
                 priorUsage = undefined;
@@ -394,7 +383,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
           }
         }
       }
-      if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${config.modelContextTokens?.[config.model] ? 'model limit' : 'configured budget'}; stopping before request.`);
+      if (percent >= 100) throw new Error(`Context estimate is ${percent}% of the ${knownModelLimit ? 'model limit' : 'configured budget'}; stopping before request.`);
       // Every channel shares the same prompt start; a per-session key keeps its requests on the machine that holds its cache,
       // and extended retention keeps a channel's history cached between messages minutes apart.
       const requestBody = JSON.stringify({ model: config.model, input, tools: fullAvailableTools, prompt_cache_key: session, prompt_cache_retention: '24h', ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
@@ -402,7 +391,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
       let result: Awaited<ReturnType<typeof requestModel>>;
       try {
-        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs, fetcher, askId: config.askId, traceId: config.traceId, requestId });
+        result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs, askId: config.askId, traceId: config.traceId, requestId });
       } catch (error) {
         store.finishModelRequest(requestId, { errorType: error instanceof Error ? error.name : 'unknown' });
         throw error;
@@ -429,7 +418,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       if (isRecord(raw) && isRecord(raw.usage) && Number.isSafeInteger(raw.usage.input_tokens) && Number.isSafeInteger(raw.usage.output_tokens)) {
         const cachedTokens = isRecord(raw.usage.input_tokens_details) ? raw.usage.input_tokens_details.cached_tokens : undefined;
         logTrace('model_usage', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, inputTokens: raw.usage.input_tokens, cachedTokens: typeof cachedTokens === 'number' ? cachedTokens : null, outputTokens: raw.usage.output_tokens });
-        store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localCountEstimate, countSource: localCountSource, contextLimit: config.modelContextTokens?.[config.model] ?? config.maxContextTokens ?? 150000, limitSource: config.modelContextTokens?.[config.model] ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString(), attachmentSignature: nativeAttachmentSignature(input), checkpointThroughMessageId: store.compactCheckpoint(session)?.throughMessageId });
+        store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localCountEstimate, countSource: localCountSource, contextLimit: limit, limitSource: knownModelLimit ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString(), attachmentSignature: nativeAttachmentSignature(input), checkpointThroughMessageId: store.compactCheckpoint(session)?.throughMessageId });
       } else store.clearContextUsage(session);
       // Failed/cancelled/incomplete upstream turns must not enter recovery or execute tools.
       // Transport aborts and timeouts already throw from requestModel before this point.
@@ -478,16 +467,8 @@ export async function ask(store: Store, session: string, prompt: string, config:
             logTrace('response_selected', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, ...traceTextMetadata(text), decision: text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]') ? 'not_delivered' : 'selected', reason: 'draft_before_late_steer' });
             await config.onResponseReady?.(text);
           }
-          logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: lateSteer.stored?.source?.discordMessageId ?? lateSteer.stored?.id, status: 'consumed_late' });
-          if (!lateSteer.stored) throw new Error('late steer input must already be persisted');
-          const savedLateSteer = lateSteer.stored;
-          fresh.push(savedLateSteer);
-          contextMessages.push(savedLateSteer);
-            const steerInput = { role: 'user', content: savedLateSteer.attachments.length ? await messageAttachmentContent(savedLateSteer, config.attachmentDir ?? '', config.model, config.transcription) : formatStoredMessageText(savedLateSteer) };
-          input.push(steerInput);
-          liveGroups.push([steerInput]); liveGroupProtected.push(true);
-          config.onSteerPersisted?.(savedLateSteer.id);
-          toolOwnerId = savedLateSteer.id;
+          logTrace('steer_consume', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, inputMessageId: lateSteer.source.discordMessageId ?? lateSteer.id, status: 'consumed_late' });
+          await appendSteer(lateSteer);
           continue;
         }
         const emptyCompletedAfterSave = imageSaveSucceeded && isRecord(raw) && raw.status === 'completed' && !text.trim();
@@ -566,20 +547,21 @@ export async function ask(store: Store, session: string, prompt: string, config:
   }
 }
 
-function subagentExecutor(store: Store, session: string, id: string, task: { task: string; context: string; constraints: string; expected_output: string }, config: AgentConfig, model: string): (signal: AbortSignal, runId: string, taskText: string, resume: boolean) => Promise<unknown> {
-  return (signal, runId, taskText, resume) => {
+function subagentExecutor(store: Store, session: string, id: string, config: AgentConfig, model: string): (signal: AbortSignal, runId: string, taskText: string, resume: boolean) => Promise<string> {
+  return (signal, runId, _taskText, resume) => {
     if (!config.subagent || !config.subagentCoordinator) throw new Error('Subagent is unavailable in the current runtime');
     // A model switch queued during a run applies when the inbox resumes the thread.
     if (resume) model = store.getSubagentWindow(id, session)?.model ?? model;
     return runSubagent({
       baseUrl: config.baseUrl, apiKey: config.apiKey, store, parentSession: session, signal, model,
-      takeMessages: () => config.subagentCoordinator!.takeMessages(id, runId),
+      loadMessages: () => config.subagentCoordinator!.loadMessages(id, runId),
+      consumeMessages: ids => config.subagentCoordinator!.consumeMessages(id, runId, ids),
       onActivity: patch => config.subagentCoordinator!.updateActivity(id, runId, patch),
-    }, { ...task, task: taskText, subagent_id: id });
+    }, id);
   };
 }
 
-export async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime?: GoogleToolRuntime, availableToolNames?: ReadonlySet<string>, queueInput?: (item: unknown) => void): Promise<unknown> {
+async function executeCall(store: Store, session: string, call: FunctionCall, config: AgentConfig, googleRuntime: GoogleToolRuntime | undefined, availableToolNames: ReadonlySet<string>, queueInput: (item: unknown) => void): Promise<unknown> {
   logInfo('tool_call', { tool: call.name, source: 'agent', sessionId: session, callId: call.call_id });
   let args: Record<string, unknown>;
   try {
@@ -600,7 +582,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     const internalHandoffAllowed = config.subagentEvent && ['subagent_send', 'subagent_stop'].includes(call.name);
     if (!internalHandoffAllowed) throw new ToolUsageError('Subagent management tools are disabled');
   }
-  if (config.subagentEvent && config.subagent?.toolsEnabled === false && ['subagent_run', 'subagent_list', 'subagent_status'].includes(call.name)) throw new ToolUsageError('Only send/stop are allowed during internal subagent handoff');
   const id = store.beginTool(session, call.name, args);
   const label = typeof args.label === 'string' ? args.label.trim() : '';
   const { label: _label, ...runtimeArgs } = args;
@@ -608,55 +589,53 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   let result: unknown;
   try {
     if (config.toolFilter && !config.toolFilter(call.name, typeof runtimeArgs.action === 'string' ? runtimeArgs.action : undefined)) throw new ToolUsageError('Tool is not available in this channel');
+    const schema = validatedSchemas.get(call.name);
+    if (schema) validateToolArgs(schema.properties, schema.required, runtimeArgs);
     if (call.name === 'code_execute') {
-      if (!availableToolNames) throw new ToolUsageError('CodeMode is unavailable in this execution');
       result = await executeCode(runtimeArgs, {
-        available: name => availableToolNames.has(name), callId: call.call_id, signal: config.signal,
+        available: name => availableToolNames.has(name), callId: call.call_id,
         execute: (name, args, callId) => executeCall(store, session, { type: 'function_call', name, call_id: callId, arguments: JSON.stringify(args) }, config, googleRuntime, availableToolNames, queueInput),
       });
     } else if (call.name === 'subagent_run') {
       if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
-      const required = ['task', 'context', 'constraints', 'expected_output'];
-      if (Object.keys(runtimeArgs).some(key => ![...required, 'model', 'cwd'].includes(key)) || required.some(key => typeof runtimeArgs[key] !== 'string' || !(runtimeArgs[key] as string).trim())) throw new ToolUsageError('Invalid subagent task arguments');
-      const task = runtimeArgs as unknown as { task: string; context: string; constraints: string; expected_output: string };
-      const model = await validateSubagentModel(runtimeArgs.model, config.baseUrl, config.apiKey, config.fetcher);
-      const cwd = runtimeArgs.cwd;
-      if (typeof cwd !== 'string' || !isAbsolute(cwd)) throw new ToolUsageError('Subagent cwd must be an absolute path to an existing directory');
+      const task = { task: runtimeArgs.task as string, context: runtimeArgs.context as string, constraints: runtimeArgs.constraints as string, expected_output: runtimeArgs.expected_output as string };
+      const model = await validateSubagentModel(runtimeArgs.model as string, config.baseUrl, config.apiKey);
+      const cwd = runtimeArgs.cwd as string;
+      if (!isAbsolute(cwd)) throw new ToolUsageError('Subagent cwd must be an absolute path to an existing directory');
       try { if (!statSync(cwd).isDirectory()) throw new Error('Not a directory'); }
       catch { throw new ToolUsageError('Subagent cwd must be an absolute path to an existing directory'); }
-      const windowId = store.createSubagentWindow(session, model, cwd);
-      result = config.subagentCoordinator.start({ id: windowId, parentSession: session, task: task.task, origin: config.subagentOrigin, execute: subagentExecutor(store, session, windowId, task, config, model) });
+      const windowId = store.createSubagentWindow(session, model, cwd, task);
+      result = config.subagentCoordinator.start({ id: windowId, parentSession: session, task: task.task, origin: config.subagentOrigin, execute: subagentExecutor(store, session, windowId, config, model) });
     } else if (call.name === 'subagent_list') {
       if (!config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
-      result = { items: config.subagentCoordinator.list(session, safePage(runtimeArgs.offset, 0, Number.MAX_SAFE_INTEGER), safePage(runtimeArgs.limit, 20, 100, 1)) };
+      result = { items: config.subagentCoordinator.list(session, (runtimeArgs.offset ?? 0) as number, (runtimeArgs.limit ?? 20) as number) };
     } else if (call.name === 'subagent_status') {
-      if (!config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string') throw new ToolUsageError('Invalid subagent status request');
-      result = config.subagentCoordinator.status(runtimeArgs.subagent_id, session, safePage(runtimeArgs.offset, 0, Number.MAX_SAFE_INTEGER), safePage(runtimeArgs.limit, 20, 100, 1)) ?? { error: 'Unknown subagent window for this parent session' };
+      if (!config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
+      result = config.subagentCoordinator.status(runtimeArgs.subagent_id as string, session, (runtimeArgs.offset ?? 0) as number, (runtimeArgs.limit ?? 20) as number) ?? { error: 'Unknown subagent window for this parent session' };
     } else if (call.name === 'subagent_stop') {
-      if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.reason !== 'string' || !runtimeArgs.reason.trim() || Object.keys(runtimeArgs).some(key => !['subagent_id', 'reason'].includes(key))) throw new ToolUsageError('Invalid or unavailable subagent stop request');
-      result = config.subagentCoordinator.stop(runtimeArgs.subagent_id, session, runtimeArgs.reason);
+      if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
+      result = config.subagentCoordinator.stop(runtimeArgs.subagent_id as string, session, runtimeArgs.reason as string);
     } else if (call.name === 'subagent_send') {
-      if (!config.subagent || !config.subagentCoordinator || typeof runtimeArgs.subagent_id !== 'string' || !runtimeArgs.subagent_id.trim() || typeof runtimeArgs.message !== 'string' || !runtimeArgs.message.trim() || Object.keys(runtimeArgs).some(key => !['subagent_id', 'message', 'model'].includes(key))) throw new ToolUsageError('Invalid or unavailable subagent message');
-      const window = store.getSubagentWindow(runtimeArgs.subagent_id, session);
+      if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
+      const subagentId = runtimeArgs.subagent_id as string;
+      const window = store.getSubagentWindow(subagentId, session);
       if (!window) throw new ToolUsageError('Unknown subagent window for this parent session; use subagent_list to find the actual ID.');
-      const model = await validateSubagentModel(runtimeArgs.model ?? window.model, config.baseUrl, config.apiKey, config.fetcher);
+      const model = await validateSubagentModel((runtimeArgs.model as string | undefined) ?? window.model, config.baseUrl, config.apiKey);
       store.setSubagentModel(window.id, model);
-      const task = { task: 'Continue the existing task', context: 'Use the persisted window.', constraints: 'Do not repeat completed actions.', expected_output: 'Return the continuation result.' };
-      const resume = subagentExecutor(store, session, runtimeArgs.subagent_id, task, config, model);
-      result = config.subagentCoordinator.message(runtimeArgs.subagent_id, session, runtimeArgs.message, resume);
+      const resume = subagentExecutor(store, session, subagentId, config, model);
+      result = config.subagentCoordinator.message(subagentId, session, runtimeArgs.message as string, resume);
     } else if (call.name === 'memory_tags_list') {
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
       result = await listMemoryTagsTool(config.hindsight, runtimeArgs);
     } else if (call.name === 'knowledge_page_create') {
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
-      assertMemoryWriteAllowed(config.memoryWriteAllowed);
       result = await knowledgePageCreateTool(config.hindsight, runtimeArgs, config.memoryWriteAllowed);
     } else if (call.name === 'memory_recall' || call.name === 'memory_reflect') {
       if (!config.hindsight) throw new ToolUsageError('Shared memory is unavailable');
-      const query = requiredString(runtimeArgs.query, 'query');
+      const query = runtimeArgs.query as string;
       result = call.name === 'memory_recall'
         ? formatRecall(await config.hindsight.recall(query))
-        : await config.hindsight.reflect(query, config.signal);
+        : await config.hindsight.reflect(query);
     } else if (call.name.startsWith('hledger_')) {
       if (!config.hledgerTools) throw new ToolUsageError('hledger tools are unavailable');
       result = await config.hledgerTools.execute(call.name, runtimeArgs);
@@ -665,10 +644,10 @@ export async function executeCall(store: Store, session: string, call: FunctionC
       result = await config.weatherTools.execute(call.name, runtimeArgs);
     } else if (call.name.startsWith('web_')) {
       if (!config.webTools) throw new ToolUsageError('Web tools are unavailable in this entry point');
-      result = await config.webTools.execute(call.name, runtimeArgs, { signal: config.signal });
+      result = await config.webTools.execute(call.name, runtimeArgs);
     } else if (call.name === 'agent_reach') {
       if (!config.localTools) throw new ToolUsageError('Agent Reach is unavailable in this entry point');
-      result = await executeAgentReach(runtimeArgs, config.signal);
+      result = await executeAgentReach(runtimeArgs);
     } else if (call.name.startsWith('local_') || call.name === 'butler_deploy') {
       if (!config.localTools) throw new ToolUsageError('Local tools are unavailable in this entry point');
       result = await config.localTools.execute(call.name, runtimeArgs, { channelId: config.discordContext?.channelId ?? (config.subagentEvent ? config.discordTools?.context.channelId : undefined), queueInput });
@@ -688,8 +667,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     } else if (call.name === 'image_generate' || call.name === 'image_save') {
       if (!config.imageTools) throw new ToolUsageError('Image tools are unavailable in this entry point');
       result = await config.imageTools.execute(call.name, runtimeArgs);
-      const attachmentIds = config.discordTools?.context.attachmentToolCallIds;
-      if (attachmentIds && Array.isArray(attachmentIds)) attachmentIds.push(id);
+      config.discordTools?.context.attachmentToolCallIds?.push(id);
     } else {
       result = runTool(store, session, call.name, runtimeArgs, config.transcriptTimezone ?? DEFAULT_SCHEDULE_TIMEZONE);
     }
@@ -713,7 +691,6 @@ export async function executeCall(store: Store, session: string, call: FunctionC
   return { tool_history_id: id, ...asOutput(result) };
 }
 
-function assertMemoryWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new ToolUsageError('此頻道的 Hindsight 為只讀'); }
 function emitProgress(config: AgentConfig, event: ProgressEvent): void {
   try { config.onProgress?.(event); }
   catch (error) { logWarn('Agent progress callback failed', error); }
@@ -730,24 +707,23 @@ function compactionProgress(config: AgentConfig, toolName: string): { start: () 
 function runTool(store: Store, session: string, name: string, args: Record<string, unknown>, transcriptTimezone: string): unknown {
   if (name === 'journal_transcript_by_date') {
     const date = validateTranscriptDate(args.date);
-    const { offset, limit } = pageArgs(args, 4000, 100_000);
+    const { offset, limit } = pageArgs(args, 4000);
     return formatTranscript(store, date, transcriptTimezone, offset, limit);
   }
   if (name === 'history_list') {
-    const sessionId = args.session_id === undefined || args.session_id === '' ? session : requiredString(args.session_id, 'session_id');
+    const sessionId = (args.session_id as string | undefined) || session;
     const { offset, limit } = pageArgs(args);
     return toolPage(store.history(sessionId, offset, limit + 1), offset, limit);
   }
   if (name === 'history_search') {
-    const query = requiredString(args.query, 'query');
     const { offset, limit } = pageArgs(args);
-    return toolPage(store.search(query, offset, limit + 1), offset, limit);
+    return toolPage(store.search(args.query as string, offset, limit + 1), offset, limit);
   }
   if (name === 'history_get') {
-    const id = requiredString(args.id, 'id');
+    const id = args.id as string;
     const record = store.toolById(id);
     if (!record) throw new ToolUsageError(`No tool history record ${id}`);
-    const { offset, limit } = pageArgs(args, 4000, 100_000);
+    const { offset, limit } = pageArgs(args, 4000);
     return { ...record, result: resultPage(record.result, offset, limit), ...(['discord_attach_to_reply', 'image_generate', 'image_save'].includes(record.name) ? { delivery: store.attachmentDelivery(id) } : {}) };
   }
   throw new ToolUsageError(`Unknown tool: ${name}`);
@@ -778,30 +754,8 @@ function resultPage(result: string | null, offset: number, limit: number) {
   };
 }
 
-function pageArgs(args: Record<string, unknown>, defaultLimit = 20, maxLimit = 100): { offset: number; limit: number } {
-  return {
-    offset: integerArg(args.offset, 0, 'offset', 0, Number.MAX_SAFE_INTEGER),
-    limit: integerArg(args.limit, defaultLimit, 'limit', 1, maxLimit),
-  };
-}
-
-function integerArg(value: unknown, fallback: number, name: string, min: number, max: number): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
-    throw new ToolUsageError(`${name} must be an integer from ${min} to ${max}`);
-  }
-  return value as number;
-}
-
-function requiredString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || value.length === 0) throw new ToolUsageError(`${name} must be a non-empty string`);
-  return value;
-}
-
-function safePage(value: unknown, fallback: number, maximum: number, minimum = 0): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) throw new ToolUsageError(`Pagination must be an integer from ${minimum} to ${maximum}`);
-  return value as number;
+function pageArgs(args: Record<string, unknown>, defaultLimit = 20): { offset: number; limit: number } {
+  return { offset: (args.offset ?? 0) as number, limit: (args.limit ?? defaultLimit) as number };
 }
 
 function asOutput(value: unknown): Record<string, unknown> {
@@ -848,10 +802,6 @@ function responseText(body: ResponsesBody): string {
     if (!isRecord(item) || item.type !== 'message' || item.channel === 'commentary' || !Array.isArray(item.content)) return '';
     return item.content.map(part => isRecord(part) && part.type === 'output_text' && typeof part.text === 'string' ? part.text : '').join('');
   }).join('');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /** Tools such as Agent Reach return `error: null` on success; only a non-null error marks a failure. */

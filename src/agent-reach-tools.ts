@@ -29,7 +29,7 @@ export const agentReachDefinition = {
 // Channel declarations are static for an installed CLI; restart Butler after upgrading Agent Reach.
 let declaredChannels: Channel[] | undefined;
 
-export async function executeAgentReach(args: Record<string, unknown>, parentSignal?: AbortSignal): Promise<unknown> {
+export async function executeAgentReach(args: Record<string, unknown>): Promise<unknown> {
   if (Object.keys(args).some(key => !['action', 'platform', 'params', 'timeout_ms'].includes(key))) throw new ToolUsageError('Unknown agent_reach argument');
   const action = args.action, platform = args.platform;
   if (typeof action !== 'string' || (platform !== undefined && (typeof platform !== 'string' || !Object.hasOwn(actions, platform)))) throw new ToolUsageError('Invalid action or platform');
@@ -40,17 +40,17 @@ export async function executeAgentReach(args: Record<string, unknown>, parentSig
   if (!params || typeof params !== 'object' || Array.isArray(params)) throw new ToolUsageError('params must be an object');
   const values = params as Record<string, unknown>;
   if (action === 'capabilities' && Object.keys(values).length) throw new ToolUsageError('capabilities does not take params');
-  const signal = parentSignal ? AbortSignal.any([parentSignal, AbortSignal.timeout(Number(timeout))]) : AbortSignal.timeout(Number(timeout));
+  const signal = AbortSignal.timeout(Number(timeout));
   const started = Date.now();
   // Every CLI response is a JSON envelope whose `ok` decides success, whatever the exit status.
   const run = async (argv: string[]): Promise<any> => {
     signal.throwIfAborted();
     let stdout: string | undefined;
     try {
-      // No shell interpolation; the signal alone enforces cancellation and the deadline.
+      // No shell interpolation; the signal alone enforces the deadline.
       ({ stdout } = await exec('agent-reach', argv, { signal, maxBuffer: 2 * 1024 * 1024, encoding: 'utf8' }));
     } catch (error) {
-      if (signal.aborted) throw new Error('Agent Reach cancelled or deadline exceeded');
+      if (signal.aborted) throw new Error('Agent Reach deadline exceeded');
       stdout = (error as { stdout?: string }).stdout;
     }
     let result: any;

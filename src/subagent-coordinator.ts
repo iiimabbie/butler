@@ -3,31 +3,32 @@ import { randomUUID } from 'node:crypto';
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped';
 export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: 'completed' | 'failed' | 'interrupted' | 'stopped'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
 export type SubagentSnapshot = { id: string; parentSession: string; runId: string; status: SubagentStatus; task: string; createdAt: string; updatedAt: string; origin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled' | 'notification'; requesterId?: string; triggerInputId?: string }; result?: unknown; error?: string; turns?: number; currentTool?: string; currentCallId?: string; activity?: string; stopRequested?: { reason: string; requestedAt: string } };
-type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<unknown>;
-type Entry = { snapshot: SubagentSnapshot; abort: AbortController };
+type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<string>;
+// resumeAfterStop: a message arrived while stopping; the window resumes once the stopped run ends.
+type Entry = { snapshot: SubagentSnapshot; abort: AbortController; resumeAfterStop?: Execute };
 type Options = {
-  onEvent?: (event: SubagentEvent) => void | Promise<void>;
-  persistEvent?: (event: SubagentEvent) => void;
-  setEventStatus?: (id: string, expected: 'pending' | 'processing', status: Exclude<SubagentEvent['status'], 'pending'>) => boolean;
+  onEvent: (event: SubagentEvent) => void | Promise<void>;
+  persistEvent: (event: SubagentEvent) => void;
+  setEventStatus: (id: string, expected: 'pending' | 'processing', status: Exclude<SubagentEvent['status'], 'pending'>) => boolean;
+  getEventStatus: (id: string) => string | undefined;
+  pendingEvents: () => SubagentEvent[];
   persistMessage: (id: string, message: string) => string;
   loadMessages: (id: string) => Array<{ id: string; message: string }>;
   consumeMessages: (id: string, messages: string[]) => void;
-  onIdle?: () => void;
+  onIdle: () => void;
 };
 
 export class SubagentCoordinator {
   private readonly entries = new Map<string, Entry>();
   private readonly running = new Set<Promise<void>>();
-  private readonly events = new Map<string, SubagentEvent>();
   private frozen = false;
 
-  constructor(private readonly persist: (snapshot: SubagentSnapshot) => void, private readonly options: Options, restored: SubagentSnapshot[] = [], restoredEvents: SubagentEvent[] = []) {
+  constructor(private readonly persist: (snapshot: SubagentSnapshot) => void, private readonly options: Options, restored: SubagentSnapshot[] = []) {
     for (const snapshot of restored) {
       const recovered = { ...snapshot, status: ['queued', 'running', 'stopping'].includes(snapshot.status) ? 'interrupted' as const : snapshot.status };
       this.entries.set(snapshot.id, { snapshot: recovered, abort: new AbortController() });
       this.persist(recovered);
     }
-    for (const event of restoredEvents) this.events.set(event.id, event);
   }
 
   start(input: { id: string; parentSession: string; task: string; origin?: SubagentSnapshot['origin']; execute: Execute; resume?: boolean }): { subagent_id: string; run_id: string; accepted: true; status: SubagentStatus } {
@@ -45,7 +46,7 @@ export class SubagentCoordinator {
         entry.abort.signal.throwIfAborted();
         this.update(entry, 'running');
         let resume = input.resume ?? false;
-        let result: unknown;
+        let result: string;
         do {
           result = await input.execute(entry.abort.signal, runId, input.task, resume);
           entry.abort.signal.throwIfAborted();
@@ -53,7 +54,7 @@ export class SubagentCoordinator {
         } while (!entry.snapshot.stopRequested && this.options.loadMessages(input.id).length);
         entry.snapshot.result = result;
         this.update(entry, 'completed');
-        this.emit(entry, 'completed', typeof result === 'string' ? result : JSON.stringify(result));
+        this.emit(entry, 'completed', result);
       } catch (error) {
         entry.snapshot.error = error instanceof Error ? error.message : String(error);
         if (entry.snapshot.stopRequested) {
@@ -67,7 +68,11 @@ export class SubagentCoordinator {
       }
     });
     this.running.add(work);
-    void work.finally(() => { this.running.delete(work); this.options.onIdle?.(); }).catch(() => undefined);
+    void work.finally(() => {
+      this.running.delete(work);
+      if (entry.resumeAfterStop && !this.frozen) this.start({ id: input.id, parentSession: input.parentSession, task: entry.snapshot.task, origin: entry.snapshot.origin, execute: entry.resumeAfterStop, resume: true });
+      this.options.onIdle();
+    }).catch(() => undefined);
     return { subagent_id: input.id, run_id: runId, accepted: true, status: 'queued' };
   }
 
@@ -78,7 +83,7 @@ export class SubagentCoordinator {
   status(id: string, parentSession: string, offset = 0, limit = 20) {
     const snapshot = this.entries.get(id)?.snapshot;
     if (!snapshot || snapshot.parentSession !== parentSession) return undefined;
-    const text = typeof snapshot.result === 'string' ? snapshot.result : JSON.stringify(snapshot.result ?? snapshot.error ?? '');
+    const text = typeof snapshot.result === 'string' ? snapshot.result : typeof snapshot.result === 'object' && snapshot.result !== null && 'text' in snapshot.result && typeof snapshot.result.text === 'string' ? snapshot.result.text : snapshot.error ?? '';
     return { ...snapshot, result: text.slice(offset, offset + limit * 1000), resultLength: text.length, nextOffset: offset + limit * 1000 < text.length ? offset + limit * 1000 : undefined };
   }
 
@@ -87,7 +92,8 @@ export class SubagentCoordinator {
     const entry = this.entries.get(id);
     if (!entry || entry.snapshot.parentSession !== parentSession) throw new Error('Unknown subagent window for this parent session');
     this.options.persistMessage(id, message);
-    if (!['queued', 'running'].includes(entry.snapshot.status)) this.start({ id, parentSession, task: entry.snapshot.task, origin: entry.snapshot.origin, execute: resume, resume: true });
+    if (entry.snapshot.status === 'stopping') entry.resumeAfterStop = resume;
+    else if (!['queued', 'running'].includes(entry.snapshot.status)) this.start({ id, parentSession, task: entry.snapshot.task, origin: entry.snapshot.origin, execute: resume, resume: true });
     return { accepted: true, subagent_id: id };
   }
 
@@ -102,28 +108,24 @@ export class SubagentCoordinator {
     return { accepted: true, subagent_id: id, status: 'stopping' };
   }
 
-  takeMessages(id: string, runId: string): string[] {
-    if (this.entries.get(id)?.snapshot.runId !== runId) return [];
-    const rows = this.options.loadMessages(id);
-    this.options.consumeMessages(id, rows.map(row => row.id));
-    return rows.map(row => row.message);
+  loadMessages(id: string, runId: string): Array<{ id: string; message: string }> {
+    return this.entries.get(id)?.snapshot.runId === runId ? this.options.loadMessages(id) : [];
+  }
+  consumeMessages(id: string, runId: string, messages: string[]): void {
+    if (this.entries.get(id)?.snapshot.runId === runId) this.options.consumeMessages(id, messages);
   }
 
-  event(id: string) { const event = this.events.get(id); return event && { ...event }; }
+  event(id: string) { const status = this.options.getEventStatus(id); return status ? { status } : undefined; }
   updateEvent(id: string, status: Exclude<SubagentEvent['status'], 'pending'>) {
-    const event = this.events.get(id);
-    if (!event || !['pending', 'processing'].includes(event.status)) return;
-    if (this.options.setEventStatus && !this.options.setEventStatus(id, event.status as 'pending' | 'processing', status)) return;
-    event.status = status;
+    const expected = this.options.getEventStatus(id);
+    if (expected === 'pending' || expected === 'processing') this.options.setEventStatus(id, expected, status);
   }
-  pendingEvents() { return [...this.events.values()].filter(event => event.status === 'pending').map(event => ({ ...event })); }
+  pendingEvents() { return this.options.pendingEvents().filter(event => event.status === 'pending'); }
   prepareQueuedDeploy() {
-    if ([...this.entries.values()].some(entry => ['queued', 'running', 'stopping'].includes(entry.snapshot.status))) return false;
     return this.activeCount === 0;
   }
   freeze() { this.frozen = true; for (const entry of this.entries.values()) entry.abort.abort(); }
   async drain() { await Promise.allSettled([...this.running]); }
-  unfreeze() { this.frozen = false; }
   get activeCount() { return this.running.size; }
   updateActivity(id: string, runId: string, patch: Pick<SubagentSnapshot, 'turns' | 'currentTool' | 'currentCallId' | 'activity'>) {
     const entry = this.entries.get(id);
@@ -135,9 +137,8 @@ export class SubagentCoordinator {
     this.publish({ id: randomUUID(), runId: entry.snapshot.runId, subagentId: entry.snapshot.id, parentSession: entry.snapshot.parentSession, message, kind, status: 'pending' });
   }
   private publish(event: SubagentEvent) {
-    this.options.persistEvent?.(event);
-    this.events.set(event.id, event);
-    void Promise.resolve().then(() => this.options.onEvent?.(event)).catch(() => undefined);
+    this.options.persistEvent(event);
+    void Promise.resolve().then(() => this.options.onEvent(event)).catch(() => undefined);
   }
   private update(entry: Entry, status: SubagentStatus) { entry.snapshot.status = status; entry.snapshot.updatedAt = new Date().toISOString(); this.persist(entry.snapshot); }
 }

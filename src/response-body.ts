@@ -31,3 +31,12 @@ export async function readResponseBytes(response: Response, limit: number, signa
   }
   return Buffer.concat(chunks, size);
 }
+
+export async function readJsonResponse(response: Response, limit: number, signal?: AbortSignal): Promise<unknown> {
+  if (Number(response.headers.get('content-length')) > limit) {
+    await response.body?.cancel().catch(() => {});
+    throw new ResponseSizeLimitError();
+  }
+  if (!response.body) throw new Error('Missing response body');
+  return JSON.parse((await readResponseBytes(response, limit, signal)).toString('utf8'));
+}

@@ -5,8 +5,8 @@ import { readOnlyTools } from './code-mode.js';
  * read/write modes default to effectful.
  */
 const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([...readOnlyTools, 'local_process_output', 'subagent_list', 'subagent_status']);
-const ACTIVE_STATUSES = new Set(['queued', 'running', 'waiting', 'stopping', 'pending', 'in_progress', 'requires_action', 'requires_approval', 'awaiting_approval']);
-const UNCERTAIN_STATUSES = new Set(['failed', 'unknown', 'failed_unknown', 'interrupted', 'cancelled', 'canceled', 'handoff']);
+const ACTIVE_TOOL_STATUSES = new Set(['queued', 'running', 'waiting', 'stopping', 'pending', 'in_progress', 'requires_action', 'requires_approval', 'awaiting_approval']);
+const UNCERTAIN_TOOL_STATUSES = new Set(['failed', 'unknown', 'failed_unknown', 'interrupted', 'cancelled', 'canceled', 'handoff']);
 
 export class IncompleteTurnRecovery {
   private effects = false;
@@ -29,11 +29,11 @@ export class IncompleteTurnRecovery {
     }
     if (effectful || processTool) {
       if ((output.error !== undefined && output.error !== null) || output.ok === false || output.accepted === false || output.timed_out === true || output.stopped === true ||
-          (typeof output.status === 'string' && UNCERTAIN_STATUSES.has(output.status))) this.unsafe = true;
+          (typeof output.status === 'string' && UNCERTAIN_TOOL_STATUSES.has(output.status))) this.unsafe = true;
       // Background delegates are checked against the live coordinator at decision time.
       // Deployment acceptance deliberately waits for ask completion, so it may be
       // summarized as queued; it must never be represented as completed by this policy.
-      if (typeof output.status === 'string' && ACTIVE_STATUSES.has(output.status) && !processTool &&
+      if (typeof output.status === 'string' && ACTIVE_TOOL_STATUSES.has(output.status) && !processTool &&
           !['subagent_run', 'subagent_send', 'subagent_stop', 'butler_deploy'].includes(name)) this.unsafe = true;
     }
   }
@@ -46,7 +46,7 @@ export class IncompleteTurnRecovery {
 }
 
 export function unfinishedDelegateStatus(status: string): boolean {
-  return ACTIVE_STATUSES.has(status) || UNCERTAIN_STATUSES.has(status);
+  return status === 'queued' || status === 'running' || status === 'stopping';
 }
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : undefined;

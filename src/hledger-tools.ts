@@ -12,7 +12,7 @@ export const hledgerDefinitions = [
   tool('hledger_accounts', '查詢 hledger 科目 metadata 與指定日期各原幣餘額。', { as_of: date, account: str }, []),
   tool('hledger_account_manage', '建立或更新受控科目 metadata；hide 只隱藏不刪歷史。只接受結構化名稱、類型、幣別與備註，不接受 journal 片段。', { action:{type:'string',enum:['create','update','hide','show']}, name:str, type:{type:'string',enum:['asset','liability','equity','income','expense']}, currency:{type:'string',pattern:'^[A-Z][A-Z0-9]{2,11}$'}, note:{type:'string',maxLength:200} }, ['action','name']),
   tool('hledger_schedules_list', '查詢月／雙月 periodic 規劃與啟停狀態。規則只供 forecast/budget，不代表實際付款。', {}, []),
-  tool('hledger_schedule_manage', '新增、修改、啟用、停用或刪除月／雙月規劃。結構化生成 periodic 規則；不自動入帳為實際交易。', {action:{type:'string',enum:['create','update','enable','disable','delete']},schedule_id:{type:'string',pattern:'^[A-Za-z0-9._:-]{1,120}$'},name:str,frequency:{type:'string',enum:['monthly','bimonthly']},start_date:date,postings:{type:'array',minItems:2,maxItems:30,items:posting}},['action','schedule_id']),
+  tool('hledger_schedule_manage', '新增、修改、啟用、停用或刪除月／雙月規劃。結構化生成 periodic 規則；不自動入帳為實際交易。', {action:{type:'string',enum:['create','update','enable','disable','delete']},schedule_id:{type:'string',pattern:'^[A-Za-z0-9._:-]+$',minLength:1,maxLength:111},name:str,frequency:{type:'string',enum:['monthly','bimonthly']},start_date:date,postings:{type:'array',minItems:2,maxItems:30,items:posting}},['action','schedule_id']),
   tool('hledger_post', '新增、修改或刪除一筆多 postings 帳務交易。source_id 為穩定外部唯一識別；重複建立會拒絕。金額方向依帳戶類型確認。每 posting 一科目，可拆分帳單；換匯／證券以 cost_amount/cost_currency 表示成本，cost_type=unit 為單價（預設），total 為整筆總成本；證券代碼可含數字。', { action: { type: 'string', enum: ['create','update','delete'] }, source_id: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,120}$' }, date, description: str, postings: { type: 'array', minItems: 2, maxItems: 30, items: posting } }, ['action','source_id']),
   tool('hledger_reconcile', '核對某帳戶指定日期銀行餘額；差額以 equity:reconciliation 新增獨立調整分錄，並在同日 posting 上附 balance assertion。從不改寫既有歷史、絕不記收入/支出。需要來源識別碼。', { account: str, date, currency: { type: 'string', pattern: '^[A-Z][A-Z0-9]{2,11}$' }, target_balance: { type: 'string', pattern: '^-?(?:0|[1-9]\\d*)(?:\\.\\d+)?$' }, source_id: { type: 'string', pattern: '^[A-Za-z0-9._:-]{1,120}$' } }, ['account','date','currency','target_balance','source_id']),
   tool('hledger_reconciliation_reopen', '移除指定帳戶/幣別自 from_date 起由本工具建立的校正分錄，供重新對帳。', {account:str,currency:{type:'string',pattern:'^[A-Z][A-Z0-9]{2,11}$'},from_date:date,reason:{type:'string',minLength:1,maxLength:300}}, ['account','currency','from_date','reason']),
@@ -186,7 +186,7 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
     if(name==='hledger_schedules_list') { return {schedules:Object.values(await readSchedules()).map(({id,name,frequency,startDate,enabled})=>({id,name,frequency,start_date:startDate,enabled})).sort((a,b)=>a.id.localeCompare(b.id))}; }
     if(name==='hledger_schedule_manage') {
       const action=requiredString(args.action,'action'), id=requiredString(args.schedule_id,'schedule_id');
-      if(!['create','update','enable','disable','delete'].includes(action)||!ID.test(id)) throw new ToolUsageError('Invalid schedule action or id.');
+      if(!['create','update','enable','disable','delete'].includes(action)||!ID.test(id)||id.length>111) throw new ToolUsageError('Invalid schedule action or id.');
       const schedules=await readSchedules(), prior=schedules[id], updated={...schedules};
       let schedule: ScheduleMetadata;
       if(action==='delete') {
@@ -201,9 +201,12 @@ export function createHledgerToolRuntime(config: HledgerConfig): HledgerRuntime 
       } else {
         if(!prior) throw new ToolUsageError('Schedule not found.');
         if(action==='update') {
-          const scheduleName=requiredString(args.name,'name'), frequency=requiredString(args.frequency,'frequency'), startDate=requiredString(args.start_date,'start_date');
-          if(!validDate(startDate)||!['monthly','bimonthly'].includes(frequency)||!Array.isArray(args.postings)) throw new ToolUsageError('Invalid periodic schedule fields.');
-          schedule={...prior,name:scheduleName,frequency:frequency as ScheduleMetadata['frequency'],startDate,postings:args.postings as Posting[]};
+          const scheduleName=args.name === undefined ? prior.name : requiredString(args.name,'name');
+          const frequency=args.frequency === undefined ? prior.frequency : requiredString(args.frequency,'frequency');
+          const startDate=args.start_date === undefined ? prior.startDate : requiredString(args.start_date,'start_date');
+          const postings=args.postings === undefined ? prior.postings : args.postings;
+          if(!validDate(startDate)||!['monthly','bimonthly'].includes(frequency)||!Array.isArray(postings)) throw new ToolUsageError('Invalid periodic schedule fields.');
+          schedule={...prior,name:scheduleName,frequency:frequency as ScheduleMetadata['frequency'],startDate,postings:postings as Posting[]};
         } else schedule={...prior,enabled:action==='enable'};
         periodicRule(schedule); updated[id]=schedule;
       }
