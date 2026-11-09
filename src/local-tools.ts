@@ -73,13 +73,13 @@ export class LocalToolRuntime {
       return;
     }
     // The runner gets its own transient unit: stopping butler.service ends every process in Butler's cgroup.
-    const runner = spawn('sudo', ['-n', 'systemd-run', '--quiet', '--wait', '--collect', '--unit=butler-deploy', `--uid=${process.getuid!()}`, `--working-directory=${this.root}`, `--setenv=PATH=${process.env.PATH ?? ''}`, process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, stdio: ['ignore', 'ignore', 'pipe'] });
+    const runner = spawn('sudo', ['-n', 'systemd-run', '--quiet', '--collect', '--unit=butler-deploy', `--uid=${process.getuid!()}`, `--working-directory=${this.root}`, `--setenv=PATH=${process.env.PATH ?? ''}`, process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     runner.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     runner.once('error', error => { stderr ||= error.message; });
     runner.once('close', code => {
-      this.deployRunning = undefined;
       if (code === 0) return;
+      this.deployRunning = undefined;
       void this.deployNotify(channelId, `部署失敗：無法啟動部署程序：${stderr.trim() || `exit ${code}`}`).catch(() => undefined);
     });
   }
