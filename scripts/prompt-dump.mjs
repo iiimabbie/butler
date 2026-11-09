@@ -26,7 +26,7 @@ const prefix = await promptPrefix({
   baseUrl: '', model,
   hindsight: settings.memory ? {} : undefined,
   subagentCoordinator: {}, subagent: settings.subagent,
-  discordTools: createDiscordToolRuntime({ token: '', context: {} }),
+  discordTools: createDiscordToolRuntime({ token: '', attachmentDir: path.join(root, '.data/attachments'), context: { channelId: '', attachmentFiles: [] } }),
   googleTools: settings.google ? { definitions: googleDefinitions, available: async () => true } : undefined,
   localTools,
   webTools: createWebToolRuntime({ ...settings.web, reserveRequest: () => true }),

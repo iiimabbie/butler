@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { StringDecoder } from 'node:string_decoder';
+import { ToolUsageError } from './tool-errors.js';
 
 export const OUTPUT_PAGE_BYTES = 128 * 1024;
 const OUTPUT_BYTES = 10 * 1024 * 1024;
@@ -14,7 +15,7 @@ interface Job {
   id: string; cwd: string; file: string; child: ChildProcess; records: number; bytes: number;
   state: 'running' | 'completed' | 'failed'; exit_code: number | null; signal: string | null;
   timed_out: boolean; output_limited: boolean; error?: string; stopped: boolean;
-  done: Promise<void>; stopping?: Promise<void>;
+  done: Promise<void>; stopping?: Promise<void>; expiry?: ReturnType<typeof setTimeout>;
 }
 
 export class LocalProcesses {
@@ -27,7 +28,7 @@ export class LocalProcesses {
   async shell(command: string, cwd: string, timeout: number | undefined, background: boolean) {
     if (this.closed) throw new Error('Local runtime is closing');
     cwd = await realpath(cwd);
-    if (!(await stat(cwd)).isDirectory()) throw new Error('cwd must be a directory');
+    if (!(await stat(cwd)).isDirectory()) throw new ToolUsageError('cwd must be a directory');
     if (this.closed) throw new Error('Local runtime is closing');
     const id = randomUUID();
     const file = join(this.directory, `${id}.jsonl`);
@@ -73,6 +74,8 @@ export class LocalProcesses {
         await this.terminate(job);
         job.state = job.error ? 'failed' : 'completed';
         finish();
+        job.expiry = setTimeout(() => { this.jobs.delete(id); void rm(file, { force: true }).catch(() => {}); }, 60 * 60_000);
+        job.expiry.unref();
       })();
     });
     await new Promise<void>(resolve => { child.once('spawn', resolve); child.once('error', () => resolve()); });
@@ -117,9 +120,11 @@ export class LocalProcesses {
   async close() {
     this.closed = true;
     await Promise.all([...this.jobs.values()].map(async job => { if (job.state === 'running') await this.stop(job.id); }));
+    for (const job of this.jobs.values()) if (job.expiry) clearTimeout(job.expiry);
+    this.jobs.clear();
     await rm(this.directory, { recursive: true, force: true });
   }
-  private get(id: string) { const job = this.jobs.get(id); if (!job) throw new Error(`Unknown local task_id: ${id}`); return job; }
+  private get(id: string) { const job = this.jobs.get(id); if (!job) throw new ToolUsageError(`Unknown local task_id: ${id}`); return job; }
   private status(job: Job) {
     return { task_id: job.id, cwd: job.cwd, status: job.state, exit_code: job.exit_code, signal: job.signal, timed_out: job.timed_out, output_limited: job.output_limited, stopped: job.stopped, ...(job.error ? { error: job.error } : {}) };
   }
@@ -133,8 +138,7 @@ export class LocalProcesses {
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') job.error = String(error); return false; }
       };
       const signalled = send('SIGTERM');
-      await new Promise(resolve => setTimeout(resolve, 500));
-      if (signalled) send('SIGKILL');
+      if (signalled) { await new Promise(resolve => setTimeout(resolve, 500)); send('SIGKILL'); }
       // Detached descendants may inherit pipes; do not let those pipes hang shutdown.
       job.child.stdout?.destroy();
       job.child.stderr?.destroy();

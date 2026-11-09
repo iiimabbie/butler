@@ -1,4 +1,6 @@
+import { stripNative } from './context-budget.js';
 import type { Store, ReasoningEffort, StoredMessage } from './store.js';
+import { isRecord } from './tool-schema.js';
 
 /** Messages kept verbatim after a session is compacted. */
 export const KEEP_RECENT_MESSAGES = 5;
@@ -8,9 +10,6 @@ export interface CompactOptions {
   apiKey?: string;
   model: string;
   reasoningEffort?: ReasoningEffort;
-  fetcher?: typeof fetch;
-  timeoutMs?: number;
-  keepRecent?: number;
   throughMessageId?: string;
   onStart?: () => void;
 }
@@ -36,8 +35,7 @@ export async function compactSession(store: Store, sessionId: string, options: C
   if (checkpoint && eligibleBoundary < 0) return { compressedMessages: 0, retainedMessages: eligibleMessages.length, throughMessageId: checkpoint.throughMessageId };
   const uncompressedMessages = checkpoint ? eligibleMessages.slice(eligibleBoundary + 1) : eligibleMessages;
   const uncompressed = opening ? uncompressedMessages.filter(message => message.source.discordMessageId !== opening.messageId) : uncompressedMessages;
-  const keepRecent = options.keepRecent ?? KEEP_RECENT_MESSAGES;
-  const compressible = uncompressed.slice(0, Math.max(0, uncompressed.length - keepRecent));
+  const compressible = uncompressed.slice(0, Math.max(0, uncompressed.length - KEEP_RECENT_MESSAGES));
   if (!compressible.length) return { compressedMessages: 0, retainedMessages: uncompressed.length, throughMessageId: checkpoint?.throughMessageId ?? '' };
 
   options.onStart?.();
@@ -48,14 +46,14 @@ export async function compactSession(store: Store, sessionId: string, options: C
   return { compressedMessages: compressible.length, retainedMessages: uncompressed.length - compressible.length, throughMessageId: compressible[compressible.length - 1]!.id };
 }
 
-export async function compactLiveGroups(options: Omit<LiveCompactOptions, 'baseUrl' | 'apiKey' | 'model' | 'reasoningEffort' | 'fetcher' | 'timeoutMs'> & Pick<CompactOptions, 'baseUrl' | 'apiKey' | 'model' | 'reasoningEffort' | 'fetcher' | 'timeoutMs'>): Promise<{ summary: string; retained: unknown[][] }> {
+export async function compactLiveGroups(options: LiveCompactOptions): Promise<{ summary: string; retained: unknown[][] }> {
   const keep = options.keepRecent ?? 10;
   const recentStart = Math.max(0, options.groups.length - keep);
   const protectedGroups = options.protectedGroups ?? [];
   const compactedIndexes = options.groups.slice(0, recentStart).flatMap((_, index) => protectedGroups[index] ? [] : [index]);
   if (!compactedIndexes.length) return { summary: '', retained: options.groups };
   options.onStart?.();
-  const history = JSON.stringify(compactedIndexes.map(index => stripNativeAttachments(options.groups[index])));
+  const history = JSON.stringify(compactedIndexes.map(index => stripNative(options.groups[index])));
   const summary = await requestSummary(options, history, options.existingSummary);
   if (!summary) throw new Error('Live compaction response was empty; existing request context was preserved');
   const compacted = new Set(compactedIndexes);
@@ -68,7 +66,7 @@ async function requestSummary(options: CompactOptions, history: string, existing
   if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
   let response: Response;
   try {
-    response = await (options.fetcher ?? fetch)(`${options.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(options.timeoutMs ?? 60_000), body: JSON.stringify({ model: options.model, input: [{ role: 'user', content: prompt }], tools: [], ...(options.reasoningEffort === undefined || options.reasoningEffort === 'auto' ? {} : { reasoning: { effort: options.reasoningEffort } }), store: false }) });
+    response = await fetch(`${options.baseUrl.replace(/\/$/, '')}/responses`, { method: 'POST', headers, signal: AbortSignal.timeout(60_000), body: JSON.stringify({ model: options.model, input: [{ role: 'user', content: prompt }], tools: [], ...(options.reasoningEffort === undefined || options.reasoningEffort === 'auto' ? {} : { reasoning: { effort: options.reasoningEffort } }), store: false }) });
   } catch { throw new Error('Compaction request outcome is unknown; existing context was preserved and it was not retried'); }
   const raw: unknown = await response.json().catch(() => null);
   if (!response.ok) throw new Error(`Compaction request failed with HTTP ${response.status}; existing context was preserved`);
@@ -76,14 +74,6 @@ async function requestSummary(options: CompactOptions, history: string, existing
   const summary = responseText(raw).trim();
   if (!summary) throw new Error('Compaction response was empty or incomplete; existing context was preserved');
   return summary;
-}
-
-function stripNativeAttachments(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripNativeAttachments);
-  if (!isRecord(value)) return value;
-  if (value.type === 'input_image') return { type: value.type, image_url: '[native image omitted from summary]' };
-  if (value.type === 'input_file') return { type: value.type, filename: value.filename, file_data: '[native file omitted from summary]' };
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, stripNativeAttachments(item)]));
 }
 
 function formatMessage(message: StoredMessage): string {
@@ -105,8 +95,4 @@ function responseText(value: unknown): string {
   if (!Array.isArray(value.output)) return '';
   return value.output.flatMap(item => isRecord(item) && Array.isArray(item.content) ? item.content : [])
     .map(part => isRecord(part) && typeof part.text === 'string' ? part.text : '').join('');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

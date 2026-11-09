@@ -88,6 +88,6 @@ const requests = db.prepare('SELECT count(*) AS n FROM model_requests').get().n;
 db.close();
 if (free > 50 * 1048576) report('database', `${mb(free)} reclaimable; run the VACUUM procedure in docs/project-tidy.md`);
 
-console.log(`project ${mb(size(path.join(root, '.data')))} .data, ${mb(size(path.join(root, 'backups')))} backups, ${mb(size(path.join(root, 'workspace')))} workspace; database free ${mb(free)}, model_requests ${requests}`);
+console.log(`project ${mb(size(path.join(root, '.data')))} .data, ${mb(existsSync(path.join(root, 'backups')) ? size(path.join(root, 'backups')) : 0)} backups, ${mb(size(path.join(root, 'workspace')))} workspace; database free ${mb(free)}, model_requests ${requests}`);
 for (const dir of existsSync(path.join(root, 'backups')) ? readdirSync(path.join(root, 'backups')) : []) console.log(`  backups/${dir} ${mb(size(path.join(root, 'backups', dir)))}`);
 console.log(findings.length ? findings.join('\n') : 'clean');

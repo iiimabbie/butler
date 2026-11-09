@@ -1,3 +1,4 @@
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import type { ConversationRetainPayload } from './hindsight.js';
 import type { MessageSource, StoredMessage } from './store.js';
 
@@ -23,7 +24,7 @@ export function buildConversationPayload(operationId: string, channelId: string,
   });
   const combined = mergeBotTurns(turns);
   const clean = combined.map(({ _authorId, _actualChannelId, _replyTarget, _bot, _mergeable, ...turn }) => turn);
-  return { async: true, operation_id: operationId, items: [{ document_id: `butler:discord:${channelId}:${sessionId}`, update_mode: 'append', timestamp: 'unset', context: CONVERSATION_CONTEXT, metadata: { document_type: 'discord_conversation', default_channel_id: channelId, session_id: sessionId, format_version: '4', timezone: 'Asia/Taipei' }, tags: ['butler', 'discord'], observation_scopes: 'shared', content: JSON.stringify(clean) }] };
+  return { async: true, operation_id: operationId, items: [{ document_id: `butler:discord:${channelId}:${sessionId}`, update_mode: 'append', timestamp: 'unset', context: CONVERSATION_CONTEXT, metadata: { document_type: 'discord_conversation', default_channel_id: channelId, session_id: sessionId, format_version: '4', timezone: DEFAULT_SCHEDULE_TIMEZONE }, tags: ['butler', 'discord'], observation_scopes: 'shared', content: JSON.stringify(clean) }] };
 }
 
 function externalTurn(message: StoredMessage, defaultChannelId: string): Turn {
@@ -58,7 +59,7 @@ function mergeBotTurns(turns: Turn[]): Turn[] {
 }
 function isBotSource(source: MessageSource): boolean { return source.isBot === true || source.sourceKind === 'butler_reply' || source.sourceKind === 'butler_tool_message'; }
 function formatTime(value: string): string {
-  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value));
+  const parts = new Intl.DateTimeFormat('en-CA', { timeZone: DEFAULT_SCHEDULE_TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date(value));
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(item => item.type === type)?.value ?? '';
   return `${part('year')}-${part('month')}-${part('day')}, ${part('hour')}:${part('minute')}`;
 }

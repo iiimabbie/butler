@@ -1,5 +1,6 @@
-import { isHttp429 } from './tool-errors.js';
+import { ToolUsageError, isHttp429 } from './tool-errors.js';
 import type { LogMethods } from './log.js';
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { Cron } from 'croner';
 
 export type ScheduleKind = 'cron' | 'reminder';
@@ -75,35 +76,39 @@ export interface SchedulerOptions {
   store: SchedulerStore;
   enqueue: (request: ScheduledTaskRequest) => Promise<unknown>;
   log: LogMethods;
-  pollIntervalMs?: number;
-  now?: () => Date;
 }
 
-export const DEFAULT_SCHEDULE_TIMEZONE = 'Asia/Taipei';
+const POLL_INTERVAL_MS = 15_000;
+
+export function validateTimezone(timezone: string, label: string): void {
+  try { new Intl.DateTimeFormat('en', { timeZone: timezone }); } catch { throw new ToolUsageError(`${label} is invalid`); }
+}
 
 export function nextCronRun(expression: string, timezone = DEFAULT_SCHEDULE_TIMEZONE, from = new Date()): Date {
   validateCronExpression(expression);
+  validateTimezone(timezone, 'Timezone');
   const cron = new Cron(expression, { timezone, paused: true });
   const next = cron.nextRun(from);
   cron.stop();
-  if (!next) throw new Error('Cron expression has no future occurrence');
+  if (!next) throw new ToolUsageError('Cron expression has no future occurrence');
   return next;
 }
 
 export function validateCronExpression(expression: string): void {
-  if (expression.trim().split(/\s+/).length !== 5) throw new Error('Cron expression must contain exactly five fields');
+  if (expression.trim().split(/\s+/).length !== 5) throw new ToolUsageError('Cron expression must contain exactly five fields');
   let cron: Cron | undefined;
-  try { cron = new Cron(expression, { timezone: DEFAULT_SCHEDULE_TIMEZONE, paused: true }); }
-  catch { throw new Error('Invalid five-field cron expression'); }
+  try { cron = new Cron(expression, { timezone: DEFAULT_SCHEDULE_TIMEZONE, paused: true }); if (!cron.nextRun()) throw new ToolUsageError('Cron expression has no future occurrence'); }
+  catch (error) { if (error instanceof ToolUsageError) throw error; throw new ToolUsageError('Invalid five-field cron expression'); }
   finally { cron?.stop(); }
 }
 
 export function scheduleNextRun(input: { kind: ScheduleKind; cron?: string | null; runAt?: string | null; timezone?: string }, from = new Date()): string | null {
+  validateTimezone(input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, 'Timezone');
   if (input.kind === 'reminder') {
-    if (!input.runAt || !Number.isFinite(Date.parse(input.runAt))) throw new Error('Reminder runAt must be a valid ISO date/time');
+    if (!input.runAt || !Number.isFinite(Date.parse(input.runAt))) throw new ToolUsageError('Reminder runAt must be a valid ISO date/time');
     return new Date(input.runAt).toISOString();
   }
-  if (!input.cron) throw new Error('Cron schedule requires an expression');
+  if (!input.cron) throw new ToolUsageError('Cron schedule requires an expression');
   return nextCronRun(input.cron, input.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, from).toISOString();
 }
 
@@ -113,18 +118,13 @@ export class Scheduler {
   private readonly inFlight = new Set<string>();
   private stopped = true;
   private polling = false;
-  private readonly now: () => Date;
-  private readonly interval: number;
 
-  constructor(private readonly options: SchedulerOptions) {
-    this.now = options.now ?? (() => new Date());
-    this.interval = options.pollIntervalMs ?? 15_000;
-  }
+  constructor(private readonly options: SchedulerOptions) {}
 
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
-    const now = this.now().toISOString();
+    const now = new Date().toISOString();
     for (const run of this.options.store.markRunningScheduleRunsUnknown(now)) {
       this.options.log.logWarn('Scheduled execution was running at restart; marked unknown and not replayed', undefined, { runId: run.id });
     }
@@ -132,31 +132,11 @@ export class Scheduler {
     // caused by ordinary polling/queue delays after this startup reconciliation.
     for (const job of this.options.store.dueSchedules(now)) {
       if (job.kind !== 'cron' || !job.nextRun || Date.parse(job.nextRun) > Date.parse(now)) continue;
-      try {
-        const nextRun = scheduleNextRun(job, new Date(Date.parse(now) + 1));
-        this.options.store.updateSchedule(job.id, { nextRun });
-      } catch (error) {
-        this.options.log.logError('Could not advance missed cron schedule; disabling it', error, { mention: !isHttp429(error), fields: { scheduleId: job.id } });
-        this.options.store.updateSchedule(job.id, { enabled: false });
-      }
+      const nextRun = this.advanceCron(job, new Date(Date.parse(now) + 1));
+      if (nextRun !== undefined) this.options.store.updateSchedule(job.id, { nextRun });
     }
     void this.poll();
-    this.timer = setInterval(() => { void this.poll(); }, this.interval);
-  }
-
-  async pause(): Promise<void> {
-    this.stopped = true;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    while (this.polling) await new Promise(resolve => setTimeout(resolve, 5));
-    await Promise.allSettled([...this.pending]);
-  }
-
-  resume(): void {
-    if (!this.stopped) return;
-    this.stopped = false;
-    void this.poll();
-    this.timer = setInterval(() => { void this.poll(); }, this.interval);
+    this.timer = setInterval(() => { void this.poll(); }, POLL_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
@@ -171,20 +151,17 @@ export class Scheduler {
     if (this.stopped || this.polling) return;
     this.polling = true;
     try {
-      const nowDate = this.now();
+      const nowDate = new Date();
       const now = nowDate.toISOString();
       for (const job of this.options.store.dueSchedules(now)) {
         if (this.stopped) break;
         const scheduled = job.nextRun;
         if (!scheduled || Date.parse(scheduled) > nowDate.getTime()) continue;
+        const nextRun = job.kind === 'cron' ? this.advanceCron(job, new Date(Math.max(nowDate.getTime(), Date.parse(scheduled)) + 1)) : null;
+        if (nextRun === undefined) continue;
         if (this.inFlight.has(job.id)) {
-          if (job.kind === 'cron') this.options.store.updateSchedule(job.id, { nextRun: scheduleNextRun(job, new Date(nowDate.getTime() + 1)) });
+          if (job.kind === 'cron') this.options.store.updateSchedule(job.id, { nextRun });
           continue;
-        }
-        let nextRun: string | null = null;
-        if (job.kind === 'cron') {
-          try { nextRun = scheduleNextRun({ kind: 'cron', cron: job.cron ?? undefined, timezone: job.timezone }, new Date(Math.max(nowDate.getTime(), Date.parse(scheduled)) + 1)); }
-          catch (error) { this.options.log.logError('Could not calculate next run for schedule; disabling it', error, { mention: !isHttp429(error), fields: { scheduleId: job.id } }); this.options.store.updateSchedule(job.id, { enabled: false }); continue; }
         }
         const claimed = this.options.store.claimScheduleRun(job.id, scheduled, nextRun, now);
         if (!claimed) continue;
@@ -194,6 +171,15 @@ export class Scheduler {
       }
     } catch (error) { this.options.log.logError('Scheduler polling failed', error, { mention: !isHttp429(error) }); }
     finally { this.polling = false; }
+  }
+
+  private advanceCron(job: ScheduleJob, from: Date): string | undefined {
+    try { return scheduleNextRun(job, from) ?? undefined; }
+    catch (error) {
+      this.options.log.logError('Could not calculate next run for schedule; disabling it', error, { mention: !isHttp429(error), fields: { scheduleId: job.id } });
+      this.options.store.updateSchedule(job.id, { enabled: false });
+      return undefined;
+    }
   }
 
   private async execute(job: ScheduleJob, run: ScheduleRun): Promise<void> {

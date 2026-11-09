@@ -35,11 +35,11 @@ export class LocalToolRuntime {
   private readonly processes = new LocalProcesses();
   private closed = false;
   private pendingDeploy?: { channelId: string };
-  private deployRunning = false;
+  private deployRunning?: string;
   private deployTimer?: ReturnType<typeof setTimeout>;
-  private deployIdle: () => boolean = () => false;
-  private deployNotify: (channelId: string, text: string) => Promise<void> = async () => undefined;
-  constructor(private readonly root = ROOT) {}
+  private deployIdle!: () => boolean;
+  private deployNotify!: (channelId: string, text: string) => Promise<void>;
+  private readonly root = ROOT;
   setDeployHooks(hooks: { idle: () => boolean; notify: (channelId: string, text: string) => Promise<void> }) { this.deployIdle = hooks.idle; this.deployNotify = hooks.notify; }
   startQueuedDeploy() {
     if (!this.pendingDeploy || this.deployRunning || this.closed || !this.deployIdle()) return;
@@ -49,9 +49,9 @@ export class LocalToolRuntime {
     }
     const { channelId } = this.pendingDeploy;
     this.pendingDeploy = undefined;
-    this.deployRunning = true;
+    this.deployRunning = channelId;
     void this.runDeploy(channelId).catch(async error => {
-      this.deployRunning = false;
+      this.deployRunning = undefined;
       await this.deployNotify(channelId, `部署失敗：${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
     });
   }
@@ -68,18 +68,18 @@ export class LocalToolRuntime {
     });
     if (code !== 0) {
       await rm(build, { recursive: true, force: true });
-      this.deployRunning = false;
+      this.deployRunning = undefined;
       await this.deployNotify(channelId, `部署失敗：建置錯誤，未重啟。\n\`\`\`\n${output.trim().slice(-1500)}\n\`\`\``).catch(() => undefined);
       return;
     }
     // The runner gets its own transient unit: stopping butler.service ends every process in Butler's cgroup.
-    const runner = spawn('sudo', ['-n', 'systemd-run', '--quiet', '--collect', '--unit=butler-deploy', `--uid=${process.getuid!()}`, `--working-directory=${this.root}`, `--setenv=PATH=${process.env.PATH ?? ''}`, process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, stdio: ['ignore', 'ignore', 'pipe'] });
+    const runner = spawn('sudo', ['-n', 'systemd-run', '--quiet', '--wait', '--collect', '--unit=butler-deploy', `--uid=${process.getuid!()}`, `--working-directory=${this.root}`, `--setenv=PATH=${process.env.PATH ?? ''}`, process.execPath, join(this.root, 'scripts/butler-deploy.mjs'), channelId], { cwd: this.root, stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     runner.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
     runner.once('error', error => { stderr ||= error.message; });
     runner.once('close', code => {
+      this.deployRunning = undefined;
       if (code === 0) return;
-      this.deployRunning = false;
       void this.deployNotify(channelId, `部署失敗：無法啟動部署程序：${stderr.trim() || `exit ${code}`}`).catch(() => undefined);
     });
   }
@@ -90,7 +90,7 @@ export class LocalToolRuntime {
     if (name === 'butler_deploy') {
       if (!deploy?.channelId) throw new ToolUsageError('Deployment needs a Discord channel to report to');
       if (!this.pendingDeploy && !this.deployRunning) this.pendingDeploy = { channelId: deploy.channelId };
-      return { accepted: true, status: 'queued', starts_after: 'this reply and other queued work finish', steps: 'build, then restart', result_reported_in: 'this channel' };
+      return { accepted: true, status: 'queued', starts_after: 'this reply and other queued work finish', steps: 'build, then restart', result_reported_in: this.pendingDeploy?.channelId ?? this.deployRunning };
     }
     if (name === 'local_shell') {
       const background = bool(args.background, false, 'background');

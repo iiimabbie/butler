@@ -1,13 +1,16 @@
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { isRecord } from './tool-schema.js';
 import { randomUUID } from 'node:crypto';
-import { Document, isMap, isScalar, parseDocument, type YAMLMap } from 'yaml';
-import { validateCronExpression, type ScheduleJob } from './scheduler.js';
+import { Document, isMap, isScalar, parseDocument } from 'yaml';
+import { validateCronExpression, validateTimezone, type ScheduleJob } from './scheduler.js';
 
 export type ChannelOverrides = Record<string, unknown>;
+type ScheduleDefinition = Omit<ScheduleJob, 'nextRun'>;
 export interface SettingsSnapshot {
-  crons: ScheduleJob[];
-  reminders: ScheduleJob[];
+  crons: ScheduleDefinition[];
+  reminders: ScheduleDefinition[];
   channels: Record<string, ChannelOverrides>;
 }
 
@@ -22,16 +25,12 @@ const channelFields = new Set(['botReply', 'hindsightWrite', 'replyMode', 'mode'
 type SettingsKey = 'crons' | 'reminders' | 'channels';
 type SettingsBytes = Record<SettingsKey, Buffer>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${field} must be a nonempty string`);
   return value;
 }
 
-function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: number, timezone: string): ScheduleJob {
+function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: number, timezone: string): ScheduleDefinition {
   const label = `${kind === 'cron' ? 'crons.yaml' : 'reminders.yaml'}[${index}]`;
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
   const allowed = new Set(['id', 'creatorId', 'outputChannelId', 'content', 'timezone', 'createdAt', 'updatedAt', 'notify', 'model', 'enabled', kind === 'cron' ? 'cron' : 'runAt']);
@@ -43,7 +42,7 @@ function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: numb
   if (value.model !== undefined && value.model !== null) requiredString(value.model, `${label}.model`);
   if (!channelIdPattern.test(value.creatorId as string) || !channelIdPattern.test(value.outputChannelId as string)) throw new Error(`${label}: creatorId and outputChannelId must be Discord IDs`);
   const zone = value.timezone === undefined ? timezone : requiredString(value.timezone, `${label}.timezone`);
-  try { new Intl.DateTimeFormat('en', { timeZone: zone }); } catch { throw new Error(`${label}.timezone is invalid`); }
+  validateTimezone(zone, `${label}.timezone`);
   if (!Number.isFinite(Date.parse(value.createdAt as string))) throw new Error(`${label}.createdAt must be a valid date-time`);
   if (value.updatedAt !== undefined && (typeof value.updatedAt !== 'string' || !Number.isFinite(Date.parse(value.updatedAt)))) throw new Error(`${label}.updatedAt must be a valid date-time`);
   let cron: string | null = null;
@@ -56,10 +55,10 @@ function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: numb
     if (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(time) || !Number.isFinite(Date.parse(time))) throw new Error(`${label}.runAt must be an ISO date-time with a timezone`);
     runAt = new Date(time).toISOString();
   }
-  return { id: value.id as string, creatorId: value.creatorId as string, outputChannelId: value.outputChannelId as string, content: value.content as string, kind, cron, runAt, timezone: zone, enabled, notify: (value.notify as ScheduleJob['notify'] | undefined) ?? 'always', model: (value.model as string | null | undefined) ?? null, nextRun: null, createdAt: value.createdAt as string, updatedAt: (value.updatedAt as string | undefined) ?? value.createdAt as string };
+  return { id: value.id as string, creatorId: value.creatorId as string, outputChannelId: value.outputChannelId as string, content: value.content as string, kind, cron, runAt, timezone: zone, enabled, notify: (value.notify as ScheduleJob['notify'] | undefined) ?? 'always', model: (value.model as string | null | undefined) ?? null, createdAt: value.createdAt as string, updatedAt: (value.updatedAt as string | undefined) ?? value.createdAt as string };
 }
 
-export function validateSettings(crons: unknown, reminders: unknown, channels: unknown, timezone = 'Asia/Taipei'): SettingsSnapshot {
+export function validateSettings(crons: unknown, reminders: unknown, channels: unknown, timezone = DEFAULT_SCHEDULE_TIMEZONE): SettingsSnapshot {
   if (!Array.isArray(crons)) throw new Error('crons.yaml must contain an array');
   if (!Array.isArray(reminders)) throw new Error('reminders.yaml must contain an array');
   if (!isRecord(channels) || !isRecord(channels.channels) || Object.keys(channels).some(key => key !== 'channels')) throw new Error('channels.yaml must contain a top-level channels map');
@@ -87,8 +86,8 @@ export function validateSettings(crons: unknown, reminders: unknown, channels: u
   return { crons: cronJobs, reminders: reminderJobs, channels: channelMap };
 }
 
-function serializeJob(job: ScheduleJob): Record<string, unknown> {
-  return { id: job.id, creatorId: job.creatorId, outputChannelId: job.outputChannelId, content: job.content, ...(job.kind === 'cron' ? { cron: job.cron } : { runAt: job.runAt }), timezone: job.timezone, notify: job.notify, ...(job.model ? { model: job.model } : {}), enabled: job.enabled, createdAt: job.createdAt };
+function serializeJob(job: ScheduleDefinition): Record<string, unknown> {
+  return { id: job.id, creatorId: job.creatorId, outputChannelId: job.outputChannelId, content: job.content, ...(job.kind === 'cron' ? { cron: job.cron } : { runAt: job.runAt }), timezone: job.timezone, notify: job.notify, ...(job.model ? { model: job.model } : {}), enabled: job.enabled, createdAt: job.createdAt, updatedAt: job.updatedAt };
 }
 
 export class FileBackedSettings {
@@ -101,7 +100,7 @@ export class FileBackedSettings {
   private apply?: (next: SettingsSnapshot, previous: SettingsSnapshot) => void;
   private validate?: (next: SettingsSnapshot, previous: SettingsSnapshot) => void;
 
-  constructor(directory: string, private timezone = 'Asia/Taipei') {
+  constructor(directory: string, private timezone = DEFAULT_SCHEDULE_TIMEZONE) {
     this.directory = directory;
     this.paths = { crons: join(directory, 'crons.yaml'), reminders: join(directory, 'reminders.yaml'), channels: join(directory, 'channels.yaml') };
   }
@@ -133,8 +132,6 @@ export class FileBackedSettings {
     catch (error) { throw new Error(`${this.directory}: ${error instanceof Error ? error.message : String(error)}`); }
   }
 
-  load(): SettingsSnapshot { return this.read().snapshot; }
-
   initialize(snapshot: SettingsSnapshot): void {
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
     if (Object.values(this.paths).some(existsSync)) throw new SettingsConflictError(`Refusing to overwrite existing settings in ${this.directory}`);
@@ -165,16 +162,15 @@ export class FileBackedSettings {
     this.accept(loaded.snapshot, loaded.bytes);
   }
 
-  private accept(next: SettingsSnapshot, bytes: SettingsBytes): void {
+  private accept(next: SettingsSnapshot, bytes: SettingsBytes, validated = false): void {
     const previous = this.snapshot;
     if (previous && JSON.stringify(next) !== JSON.stringify(previous)) {
-      this.validate?.(next, previous);
+      if (!validated) this.validate?.(next, previous);
       this.snapshot = next;
       try { this.apply?.(next, previous); }
       catch (error) {
         this.snapshot = previous;
         const fatal = new SettingsApplyError(`Could not apply file-backed settings: ${error instanceof Error ? error.message : String(error)}`);
-        queueMicrotask(() => { throw fatal; });
         throw fatal;
       }
     } else this.snapshot = next;
@@ -198,19 +194,18 @@ export class FileBackedSettings {
     this.watcher.on('error', error => { throw error; });
   }
 
-  upsertSchedule(job: ScheduleJob): void {
+  upsertSchedule(job: ScheduleDefinition): void {
     this.refresh();
     const snapshot = this.current();
     const key = job.kind === 'cron' ? 'crons' : 'reminders';
     const other = job.kind === 'cron' ? snapshot.reminders : snapshot.crons;
     if (other.some(item => item.id === job.id)) throw new SettingsConflictError(`Schedule ID ${job.id} already exists`);
-    const rows = snapshot[key];
-    const index = rows.findIndex(item => item.id === job.id);
-    if (index < 0) rows.push(job); else rows[index] = job;
+    if (snapshot[key].some(item => item.id === job.id)) throw new SettingsConflictError(`Schedule ID ${job.id} already exists`);
+    snapshot[key].push(job);
     this.save(key, snapshot);
   }
 
-  patchSchedule(id: string, patch: Partial<ScheduleJob>): ScheduleJob | undefined {
+  patchSchedule(id: string, patch: Partial<ScheduleDefinition>): ScheduleDefinition | undefined {
     this.refresh();
     const snapshot = this.current();
     const job = [...snapshot.crons, ...snapshot.reminders].find(item => item.id === id);
@@ -221,7 +216,7 @@ export class FileBackedSettings {
     return [...this.current().crons, ...this.current().reminders].find(item => item.id === id);
   }
 
-  deleteSchedule(id: string): ScheduleJob | undefined {
+  deleteSchedule(id: string): ScheduleDefinition | undefined {
     this.refresh();
     const snapshot = this.current();
     const job = [...snapshot.crons, ...snapshot.reminders].find(item => item.id === id);
@@ -259,10 +254,10 @@ export class FileBackedSettings {
       if (existsSync(temp)) unlinkSync(temp);
       throw error;
     }
-    this.accept(next, { ...this.bytes!, [key]: Buffer.from(content) });
+    this.accept(next, { ...this.bytes!, [key]: Buffer.from(content) }, true);
   }
 
-  private scheduleDocument(jobs: ScheduleJob[]): string {
+  private scheduleDocument(jobs: ScheduleDefinition[]): string {
     const document = new Document(jobs.map(serializeJob));
     for (let index = 0; index < jobs.length; index++) {
       const content = document.getIn([index, 'content'], true);

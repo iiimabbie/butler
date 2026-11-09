@@ -32,7 +32,6 @@ export async function executeCode(args: Record<string, unknown>, options: {
   available: (name: string) => boolean;
   execute: (name: string, args: Record<string, unknown>, callId: string) => Promise<unknown>;
   callId: string;
-  signal?: AbortSignal;
 }): Promise<unknown> {
   if (typeof args.code !== 'string' || !args.code.trim()) throw new ToolUsageError('code must be a nonempty JavaScript function body');
   const timeoutMs = args.timeout_ms ?? 30000;
@@ -41,13 +40,9 @@ export async function executeCode(args: Record<string, unknown>, options: {
   const worker = new Worker(new URL('./code-mode-worker.js', import.meta.url), { workerData: { code: args.code, timeoutMs } });
   let calls = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort = () => {};
   try {
     return await new Promise((resolve, reject) => {
       timer = setTimeout(() => reject(new ToolUsageError(`Script timed out after ${timeoutMs} ms`)), timeoutMs as number);
-      onAbort = () => reject(new ToolUsageError('Script cancelled'));
-      options.signal?.addEventListener('abort', onAbort, { once: true });
-      if (options.signal?.aborted) onAbort();
       worker.on('error', reject);
       worker.on('exit', code => reject(new Error(`Script worker exited (${code})`)));
       worker.on('message', async (message: { type: 'result' | 'error' | 'call'; id?: number; json?: string; error?: string; name?: string; args?: unknown }) => {
@@ -70,7 +65,6 @@ export async function executeCode(args: Record<string, unknown>, options: {
     });
   } finally {
     clearTimeout(timer);
-    options.signal?.removeEventListener('abort', onAbort);
     await worker.terminate();
   }
 }

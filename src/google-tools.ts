@@ -1,38 +1,41 @@
 import { ToolUsageError } from './tool-errors.js';
-import { open, realpath } from 'node:fs/promises';
-import { constants } from 'node:fs';
+import { realpath } from 'node:fs/promises';
+import { readSafeFile } from './safe-file.js';
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { decodeHTML, escapeUTF8 } from 'entities';
 import { GoogleClient, GOOGLE_FILE_LIMIT } from './google-client.js';
+import { validateToolArgs } from './tool-schema.js';
 
-const str = { type: 'string' };
+const str = { type: 'string', minLength: 1 };
+// Fields where an empty string is meaningful (clearing a value, an empty body or the first page).
+const anyString = { type: 'string' };
 const count = (max: number, fallback: number) => ({ type: 'integer', minimum: 1, maximum: max, default: fallback });
-const account = { type: 'string', description: 'Account email; omit to use the default account. Use google_accounts_list to list accounts.' };
-const messageIds = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true };
-const recipients = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true, description: 'Email addresses without display names.' };
-const replyToMessageId = { type: 'string', description: 'Gmail message ID to reply to in the same thread. For replies, subject is usually Re: followed by the original subject.' };
+const account = { type: 'string', minLength: 1, description: 'Account email; omit to use the default account. Use google_accounts_list to list accounts.' };
+const messageIds = { type: 'array', items: str, minItems: 1, maxItems: 100, uniqueItems: true };
+const recipients = { type: 'array', items: str, minItems: 1, maxItems: 100, uniqueItems: true, description: 'Email addresses without display names.' };
+const replyToMessageId = { type: 'string', minLength: 1, description: 'Gmail message ID to reply to in the same thread. For replies, subject is usually Re: followed by the original subject.' };
 const schemas: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
   google_accounts_list: { description: 'List Google accounts, default status, connection status and gmail.modify permission.', properties: {}, required: [] },
   gmail_trash: { description: 'Move messages to Trash, not permanent deletion. Gmail automatically permanently deletes them after 30 days. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
   gmail_untrash: { description: 'Restore messages from Trash. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
-  google_gmail_search: { description: 'Search Gmail and return message metadata. Omit account to use the default; use google_accounts_list to list accounts.', properties: { query: str, max_results: count(100, 10), page_token: str, account }, required: ['query'] },
+  google_gmail_search: { description: 'Search Gmail and return message metadata. Omit account to use the default; use google_accounts_list to list accounts.', properties: { query: str, max_results: count(100, 10), page_token: anyString, account }, required: ['query'] },
   google_gmail_read: { description: 'Read plain text when available, otherwise raw HTML, plus attachment metadata; attachments are not downloaded. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_id: str, account }, required: ['message_id'] },
-  gmail_send: { description: 'Send an email to multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
-  gmail_draft: { description: 'Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
-  google_calendar_list_events: { description: 'List calendar events; defaults to the primary calendar, start=now, and end=start+7 days. Timed values need timezone offsets.', properties: { calendar_id: str, start: str, end: str, max_results: count(250, 20), page_token: str }, required: [] },
-  calendar_create: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str, recurrence: { type: 'array', items: { type: 'string' } }, time_zone: str }, required: ['summary', 'start', 'end'] },
-  calendar_update: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, recurrence: { type: 'array', items: { type: 'string' } }, time_zone: str }, required: ['event_id'] },
+  gmail_send: { description: 'Send an email to multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: anyString, body: anyString, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
+  gmail_draft: { description: 'Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: anyString, body: anyString, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
+  google_calendar_list_events: { description: 'List calendar events; defaults to the primary calendar, start=now, and end=start+7 days. Timed values need timezone offsets.', properties: { calendar_id: str, start: str, end: str, max_results: count(250, 20), page_token: anyString }, required: [] },
+  calendar_create: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: anyString, location: anyString, calendar_id: str, recurrence: { type: 'array', items: anyString }, time_zone: str }, required: ['summary', 'start', 'end'] },
+  calendar_update: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: anyString, location: anyString, recurrence: { type: 'array', items: anyString }, time_zone: str }, required: ['event_id'] },
   calendar_delete: { description: 'Delete a calendar event. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str }, required: ['event_id'] },
-  tasks_lists: { description: "List the authenticated user's Google Tasks task lists (the lists themselves, not the tasks inside a list). Returns each list's name and ID; use page_token to fetch another page.", properties: { max_results: count(1000, 20), page_token: str }, required: [] },
-  tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: str }, required: [] },
-  tasks_create: { description: 'Create a task in task_list_id (list IDs come from tasks_lists); defaults to @default.', properties: { title: str, notes: str, task_list_id: str }, required: ['title'] },
-  tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: str, task_list_id: str }, required: ['task_id'] },
+  tasks_lists: { description: "List the authenticated user's Google Tasks task lists (the lists themselves, not the tasks inside a list). Returns each list's name and ID; use page_token to fetch another page.", properties: { max_results: count(1000, 20), page_token: anyString }, required: [] },
+  tasks_list: { description: 'List tasks; defaults to @default and excludes completed tasks.', properties: { task_list_id: str, show_completed: { type: 'boolean', default: false }, max_results: count(100, 20), page_token: anyString }, required: [] },
+  tasks_create: { description: 'Create a task in task_list_id (list IDs come from tasks_lists); defaults to @default.', properties: { title: str, notes: anyString, task_list_id: str }, required: ['title'] },
+  tasks_update: { description: 'Update supplied task fields; empty notes clears notes. Defaults to @default.', properties: { task_id: str, title: str, notes: anyString, task_list_id: str }, required: ['task_id'] },
   tasks_complete: { description: 'Mark a task completed; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
   tasks_delete: { description: 'Delete a task; defaults to @default.', properties: { task_id: str, task_list_id: str }, required: ['task_id'] },
-  google_drive_search: { description: 'Search Drive by filename substring, excluding trash.', properties: { query: str, max_results: count(100, 10), page_token: str }, required: ['query'] },
+  google_drive_search: { description: 'Search Drive by filename substring, excluding trash.', properties: { query: str, max_results: count(100, 10), page_token: anyString }, required: ['query'] },
   google_drive_read: { description: 'Read text files, export Docs/Slides as plain text, or export the first sheet of Sheets as CSV. Folders, shortcuts, binary files, and other types are unsupported.', properties: { file_id: str }, required: ['file_id'] },
-  google_drive_upload: { description: 'Create a new Drive file; never overwrite. Provide content or file_path, not both. file_path must be inside the configured attachment directory; relative paths use that directory.', properties: { name: str, content: str, file_path: str, mime_type: str, folder_id: str }, required: ['name'] },
+  google_drive_upload: { description: 'Create a new Drive file; never overwrite. Provide content or file_path, not both. file_path must be inside the configured attachment directory; relative paths use that directory.', properties: { name: str, content: anyString, file_path: str, mime_type: str, folder_id: str }, required: ['name'] },
 };
 const googleGroups: Record<string, Record<string, string>> = {
   google_gmail_manage: { send: 'gmail_send', create_draft: 'gmail_draft', trash: 'gmail_trash', untrash: 'gmail_untrash' },
@@ -68,8 +71,10 @@ export function createGoogleToolRuntime(client: GoogleClient, attachmentDir?: st
 }
 
 async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, attachmentDir?: string): Promise<unknown> {
-  validate(n, a);
-  const s = (k: string, fallback?: string): string => a[k] === undefined ? fallback ?? '' : a[k] as string;
+  const schema = schemas[n];
+  if (!schema) throw new ToolUsageError('Unknown Google tool');
+  validateToolArgs(schema.properties, schema.required, a);
+  const s =(k: string, fallback?: string): string => a[k] === undefined ? fallback ?? '' : a[k] as string;
   const number = (k: string, fallback: number): number => a[k] === undefined ? fallback : a[k] as number;
   const calendar = `/calendar/v3/calendars/${encodeURIComponent(s('calendar_id', 'primary'))}/events`;
   const tasks = `/tasks/v1/lists/${encodeURIComponent(s('task_list_id', '@default'))}/tasks`;
@@ -148,7 +153,7 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
       }
     }
     if (a.recurrence !== undefined) {
-      if (!Array.isArray(a.recurrence) || a.recurrence.some(line => typeof line !== 'string' || !/^(RRULE|EXRULE|RDATE|EXDATE)[:;]/.test(line))) throw new ToolUsageError('recurrence must be RFC 5545 lines such as RRULE:FREQ=YEARLY');
+      if ((a.recurrence as string[]).some(line => !/^(RRULE|EXRULE|RDATE|EXDATE)[:;]/.test(line))) throw new ToolUsageError('recurrence must be RFC 5545 lines such as RRULE:FREQ=YEARLY');
       body.recurrence = a.recurrence;
     }
     // Google requires an IANA zone on timed recurring events; it also pins wall-clock time across DST.
@@ -210,21 +215,6 @@ function withoutTaskDue(task: Record<string, unknown>): Record<string, unknown> 
   return result;
 }
 
-function validate(name: string, args: Record<string, unknown>): void {
-  const schema = schemas[name];
-  if (!schema) throw new ToolUsageError('Unknown Google tool');
-  for (const key of schema.required) if (args[key] === undefined) throw new ToolUsageError(`${key} is required`);
-  for (const [key, value] of Object.entries(args)) {
-    const rule = schema.properties[key] as { type: string; minimum?: number; maximum?: number; minItems?: number; maxItems?: number } | undefined;
-    if (!rule) throw new ToolUsageError('Unknown Google tool argument');
-    if (rule.type === 'string') {
-      const emptyAllowed = ['body', 'subject', 'content', 'notes', 'description', 'location', 'page_token'].includes(key);
-      if (typeof value !== 'string' || (!value && !emptyAllowed)) throw new ToolUsageError(`${key} must be a ${emptyAllowed ? '' : 'non-empty '}string`);
-    } else if (rule.type === 'array' && (!Array.isArray(value) || value.length < rule.minItems! || value.length > rule.maxItems! || value.some(item => typeof item !== 'string' || !item.trim()) || new Set(value).size !== value.length)) throw new ToolUsageError(`${key} must contain 1–100 unique non-empty strings`);
-    else if (rule.type === 'boolean' && typeof value !== 'boolean') throw new ToolUsageError(`${key} must be boolean`);
-    else if (rule.type === 'integer' && (!Number.isSafeInteger(value) || (value as number) < rule.minimum! || (value as number) > rule.maximum!)) throw new ToolUsageError(`${key} must be an integer from ${rule.minimum} to ${rule.maximum}`);
-  }
-}
 function dateOnly(value: string): void {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) throw new ToolUsageError('Date must be a valid YYYY-MM-DD');
 }
@@ -240,26 +230,13 @@ function timeRange(start: string, end: string, all: boolean): void {
 }
 async function attachment(file: string, directory?: string): Promise<Buffer> {
   if (!directory) throw new Error('Attachment directory is not configured');
-  let handle;
   try {
     const root = await realpath(directory);
     const target = await realpath(isAbsolute(file) ? file : resolve(root, file));
     const rel = relative(root, target);
     if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw new Error();
-    handle = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const info = await handle.stat();
-    if (!info.isFile() || info.size > GOOGLE_FILE_LIMIT) throw new Error();
-    const bytes = Buffer.alloc(info.size + 1);
-    let size = 0;
-    while (size < bytes.length) {
-      const read = await handle.read(bytes, size, bytes.length - size, null);
-      if (!read.bytesRead) break;
-      size += read.bytesRead;
-    }
-    if (size > info.size) throw new Error();
-    return bytes.subarray(0, size);
+    return await readSafeFile(target, GOOGLE_FILE_LIMIT);
   } catch { throw new Error('Attachment must be an accessible regular file inside the configured attachment directory, no larger than 10 MiB; symlink escapes are rejected'); }
-  finally { await handle?.close(); }
 }
 function headers(rows: any[] = []): Record<string, string> {
   const out: Record<string, string> = {};

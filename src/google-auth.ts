@@ -1,17 +1,18 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { isRecord } from './tool-schema.js';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { GoogleClientConfig } from './config.js';
 
-export const GMAIL_MODIFY = 'https://www.googleapis.com/auth/gmail.modify';
+const GMAIL_MODIFY = 'https://www.googleapis.com/auth/gmail.modify';
 // Connection only requires the base scopes; gmail.modify is checked by the tools that need it.
 const BASE_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose',
   'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks',
   'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file',
 ];
-export const GOOGLE_SCOPES = [...BASE_SCOPES, GMAIL_MODIFY];
+const GOOGLE_SCOPES = [...BASE_SCOPES, GMAIL_MODIFY];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const TOKEN_PATH = fileURLToPath(new URL('../.data/google/tokens.json', import.meta.url));
 
@@ -25,10 +26,8 @@ export class GoogleAuth {
   private pending = new Map<string, Pending>();
   private refreshFlights = new Map<string, Promise<Token>>();
   private writes: Promise<unknown> = Promise.resolve();
-  constructor(private readonly options: { client?: GoogleClientConfig; tokenPath?: string; fetcher?: typeof fetch } = {}) {}
-  private get tokenPath() { return this.options.tokenPath ?? TOKEN_PATH; }
-  // Single-account token file from before multi-account support; read only to migrate it once.
-  private get legacyPath() { return join(dirname(this.tokenPath), 'token.json'); }
+  constructor(private readonly options: { client?: GoogleClientConfig } = {}) {}
+
 
   async status(): Promise<'not_configured' | 'not_connected' | 'connected' | 'reauthorization_required'> {
     try { await this.readClient(); } catch { return 'not_configured'; }
@@ -64,7 +63,7 @@ export class GoogleAuth {
       if (store.default_account === account) store.default_account = Object.keys(store.accounts)[0] ?? '';
     });
     try {
-      const response = await (this.options.fetcher ?? fetch)('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: token!.refresh_token ?? token!.access_token }), redirect: 'error', signal: AbortSignal.timeout(15_000) });
+      const response = await fetch('https://oauth2.googleapis.com/revoke', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ token: token!.refresh_token ?? token!.access_token }), redirect: 'error', signal: AbortSignal.timeout(15_000) });
       return { revoked: response.ok };
     } catch { return { revoked: false }; }
   }
@@ -96,8 +95,6 @@ export class GoogleAuth {
     const token: Token = { access_token: body.access_token as string, refresh_token: body.refresh_token, scope: body.scope, expiry_date: expiry(body) };
     const email = await this.profile(token.access_token);
     await this.mutate(store => { store.accounts[email] = token; if (!store.default_account) store.default_account = email; });
-    // A legacy token still present here failed migration; the new store supersedes it.
-    await rm(this.legacyPath, { force: true });
   }
 
   async accessToken(account?: string): Promise<string> {
@@ -118,25 +115,24 @@ export class GoogleAuth {
     await this.mutate(store => { const token = store.accounts[email]; if (token) store.accounts[email] = { ...token, reauthorization_required: true }; });
   }
 
-  // Without email the refreshed token is only returned (legacy migration); with email it is stored for that account.
-  private async refresh(old: Token, email?: string): Promise<Token> {
+  private async refresh(old: Token, email: string): Promise<Token> {
     const client = await this.readClient();
     let body: Record<string, unknown>;
     try { body = await this.exchange({ ...client, refresh_token: old.refresh_token!, grant_type: 'refresh_token' }); }
     catch (error) {
-      if (email && error instanceof GoogleAuthError && error.message === 'Google 需要重新授權') await this.markReauthorizationRequired(email);
+      if (error instanceof GoogleAuthError && error.message === 'Google 需要重新授權') await this.markReauthorizationRequired(email);
       throw error;
     }
     const scope = typeof body.scope === 'string' ? body.scope : old.scope;
-    if (!scopesPresent(scope)) { if (email) await this.markReauthorizationRequired(email); throw new GoogleAuthError('Google 需要重新授權'); }
+    if (!scopesPresent(scope)) { await this.markReauthorizationRequired(email); throw new GoogleAuthError('Google 需要重新授權'); }
     const next: Token = { access_token: body.access_token as string, refresh_token: typeof body.refresh_token === 'string' ? body.refresh_token : old.refresh_token, scope, expiry_date: expiry(body) };
-    if (email) await this.mutate(store => { if (store.accounts[email]) store.accounts[email] = next; });
+    await this.mutate(store => { if (store.accounts[email]) store.accounts[email] = next; });
     return next;
   }
 
   private async profile(accessToken: string): Promise<string> {
     let response: Response;
-    try { response = await (this.options.fetcher ?? fetch)('https://www.googleapis.com/gmail/v1/users/me/profile', { headers: { authorization: `Bearer ${accessToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000) }); }
+    try { response = await fetch('https://www.googleapis.com/gmail/v1/users/me/profile', { headers: { authorization: `Bearer ${accessToken}` }, redirect: 'error', signal: AbortSignal.timeout(15_000) }); }
     catch { throw new GoogleAuthError('無法取得 Gmail 帳號'); }
     const body: unknown = await response.json().catch(() => null);
     if (!response.ok || !isRecord(body) || typeof body.emailAddress !== 'string' || !body.emailAddress) throw new GoogleAuthError('無法取得 Gmail 帳號');
@@ -145,43 +141,29 @@ export class GoogleAuth {
 
   private async exchange(fields: Record<string, string>): Promise<Record<string, unknown>> {
     let response: Response;
-    try { response = await (this.options.fetcher ?? fetch)(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields), redirect: 'error', signal: AbortSignal.timeout(15_000) }); }
+    try { response = await fetch(TOKEN_URL, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(fields), redirect: 'error', signal: AbortSignal.timeout(15_000) }); }
     catch { throw new GoogleAuthError('Google 授權連線失敗；結果未確認，請重新開始'); }
     const body: unknown = await response.json().catch(() => null);
     if (isRecord(body) && body.error === 'invalid_grant') throw new GoogleAuthError('Google 需要重新授權');
     if (!response.ok || !isRecord(body) || typeof body.access_token !== 'string' || !body.access_token) throw new GoogleAuthError('Google 授權失敗，請重新開始');
     return body;
   }
-  private async readClient(): Promise<OAuthClient> {
+  private readClient(): OAuthClient {
     const client = this.options.client;
     if (!client?.clientId || !client.clientSecret) throw new GoogleAuthError('Google client 尚未設定或格式錯誤');
     return { client_id: client.clientId, client_secret: client.clientSecret };
   }
 
   private async readStore(): Promise<Store> {
-    return await this.loadStore() ?? await this.serialize(() => this.migrate());
+    return await this.loadStore() ?? { default_account: '', accounts: {} };
   }
   private async loadStore(): Promise<Store | undefined> {
     let text: string;
-    try { text = await readFile(this.tokenPath, 'utf8'); }
+    try { text = await readFile(TOKEN_PATH, 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw new GoogleAuthError('Google 憑證讀取失敗'); }
     let store: unknown;
     try { store = JSON.parse(text); } catch { /* reported below */ }
     if (!validStore(store)) throw new GoogleAuthError('Google 憑證格式錯誤');
-    return store;
-  }
-  private async migrate(): Promise<Store> {
-    const current = await this.loadStore(); // An earlier queued call may have migrated already.
-    if (current) return current;
-    let old: unknown;
-    try { old = JSON.parse(await readFile(this.legacyPath, 'utf8')); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { default_account: '', accounts: {} }; throw new GoogleAuthError('Google 需要重新授權'); }
-    if (!validToken(old) || unusable(old)) throw new GoogleAuthError('Google 需要重新授權');
-    const token = await this.refresh(old);
-    const email = await this.profile(token.access_token);
-    const store: Store = { default_account: email, accounts: { [email]: token } };
-    await this.saveStore(store);
-    await rm(this.legacyPath, { force: true });
     return store;
   }
   // Every account shares one file, so read-modify-write runs one at a time.
@@ -198,13 +180,13 @@ export class GoogleAuth {
     });
   }
   private async saveStore(store: Store): Promise<void> {
-    const temp = `${this.tokenPath}.${randomBytes(8).toString('hex')}.tmp`;
+    const temp = `${TOKEN_PATH}.${randomBytes(8).toString('hex')}.tmp`;
     try {
-      await mkdir(dirname(this.tokenPath), { recursive: true, mode: 0o700 });
-      await chmod(dirname(this.tokenPath), 0o700);
+      await mkdir(dirname(TOKEN_PATH), { recursive: true, mode: 0o700 });
+      await chmod(dirname(TOKEN_PATH), 0o700);
       await writeFile(temp, JSON.stringify(store), { mode: 0o600, flag: 'wx' });
       await chmod(temp, 0o600);
-      await rename(temp, this.tokenPath);
+      await rename(temp, TOKEN_PATH);
     } catch {
       await rm(temp, { force: true }).catch(() => undefined);
       throw new GoogleAuthError('Google 憑證保存失敗；請重新開始，不會重試授權交換');
@@ -224,7 +206,6 @@ function scopesPresent(scope: string): boolean { const set = new Set(scope.split
 function hasScope(token: Token, scope: string): boolean { return token.scope.split(/\s+/).includes(scope); }
 function unusable(token: Token): boolean { return !!token.reauthorization_required || !token.refresh_token || !scopesPresent(token.scope); }
 function safeEqual(a: string, b: string): boolean { const x = Buffer.from(a); const y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
 function validToken(x: unknown): x is Token { return isRecord(x) && typeof x.access_token === 'string' && !!x.access_token && typeof x.scope === 'string' && typeof x.expiry_date === 'number' && Number.isFinite(x.expiry_date) && (x.refresh_token === undefined || typeof x.refresh_token === 'string'); }
 function validStore(x: unknown): x is Store {
   if (!isRecord(x) || typeof x.default_account !== 'string' || !isRecord(x.accounts) || !Object.values(x.accounts).every(validToken)) return false;

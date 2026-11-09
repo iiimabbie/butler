@@ -1,3 +1,4 @@
+import { isRecord } from './tool-schema.js';
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,8 @@ import type { ImageConfig } from './image-tools.js';
 import type { AudioTranscriptionConfig } from './audio-transcription.js';
 import type { LogMethods } from './log.js';
 import { projectPath } from './paths.js';
+import { validateTimezone } from './scheduler.js';
+import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 
 export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type NotificationConfig = { host: string; port: number; bearerToken: string };
@@ -126,17 +129,17 @@ function validateConfig(raw: unknown): ButlerConfig {
     } else if (name === 'image') {
       const baseUrl = requireSetting(string('baseUrl'), 'image.baseUrl');
       validateHttpUrl(baseUrl, 'image.baseUrl');
-      if (section.protocol !== 'images') throw new Error('Butler config image.protocol must be images');
       const timeoutMs = section.timeoutMs;
       if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 1 || (timeoutMs as number) > 300000)) throw new Error('Butler config image.timeoutMs must be an integer from 1 to 300000');
       const identityReference = string('identityReferencePath');
       const identityReferencePath = identityReference === undefined ? undefined : projectPath(identityReference);
-      config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), protocol: 'images', timeoutMs: timeoutMs as number | undefined, identityReferencePath };
+      config.image = { baseUrl: baseUrl.replace(/\/$/, ''), apiKey: string('apiKey'), model: requireSetting(string('model'), 'image.model'), timeoutMs: timeoutMs as number | undefined, identityReferencePath };
     } else if (name === 'transcription') {
-      if (section.provider !== 'groq') throw new Error('Butler config transcription.provider must be groq');
-      config.transcription = { provider: 'groq', apiKey: requireSetting(string('apiKey'), 'transcription.apiKey') };
+      config.transcription = { apiKey: requireSetting(string('apiKey'), 'transcription.apiKey') };
     } else if (name === 'schedule') {
-      config.schedule = { timezone: string('timezone') ?? 'Asia/Taipei' };
+      const timezone = string('timezone') ?? DEFAULT_SCHEDULE_TIMEZONE;
+      validateTimezone(timezone, 'Butler config schedule.timezone');
+      config.schedule = { timezone };
     } else if (name === 'subagent') {
       for (const key of Object.keys(section)) if (key !== 'toolsEnabled') throw new Error(`Butler config subagent.${key} is not supported`);
       const toolsEnabled = section.toolsEnabled;
@@ -176,10 +179,6 @@ function validateHttpUrl(value: string, field: string): URL {
   return url;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 
 const coldPaths = [
   'discord.token', 'discord.ownerId', 'discord.notificationChannelId', 'ui', 'google', 'notifications',
@@ -201,9 +200,9 @@ function validateCandidate(current: ButlerConfig, candidate: ButlerConfig): void
   if (cold.length) throw new ConfigConflictError(`Config changes require restart: ${cold.join(', ')}`, cold);
 }
 
-export function watchConfig(options: { prepareCandidate(config: ButlerConfig): () => void; log: LogMethods; path?: string; initial?: ButlerConfig; debounceMs?: number }): { close(): void } {
-  const path = options.path ?? CONFIG_PATH;
-  let current = options.initial ?? readConfig(path);
+export function watchConfig(options: { prepareCandidate(config: ButlerConfig): () => void; log: LogMethods; initial: ButlerConfig }): { close(): void } {
+  const path = CONFIG_PATH;
+  let current = options.initial;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let watcher: FSWatcher | undefined;
   let closed = false;
@@ -226,7 +225,7 @@ export function watchConfig(options: { prepareCandidate(config: ButlerConfig): (
       else options.log.logWarn('Config reload rejected', error);
     }
   };
-  const schedule = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { void reload(); }, options.debounceMs ?? 250); };
+  const schedule = () => { if (timer) clearTimeout(timer); timer = setTimeout(() => { void reload(); }, 250); };
   try {
     watcher = watch(dirname(path), { persistent: false }, (_event, filename) => {
       if (filename === null || filename.toString() === basename(path)) schedule();

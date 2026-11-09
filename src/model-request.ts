@@ -17,14 +17,13 @@ export function logTrace(event: string, fields: Record<string, unknown>): void {
 /** Metadata only: never log prompts, responses, credentials or endpoint URLs. */
 export async function requestModel(options: {
   url: string; headers: Record<string, string>; body: string; session: string;
-  model: string; turn: number; timeoutMs: number; fetcher: typeof fetch;
-  emit?: (event: Record<string, unknown>) => void;
+  model: string; turn: number; timeoutMs: number;
   askId?: string; traceId?: string; requestId?: string;
 }): Promise<{ response: Response; raw: unknown; requestId: string }> {
   const requestId = options.requestId ?? randomUUID();
   const started = performance.now();
   const signal = AbortSignal.timeout(options.timeoutMs);
-  const emit = options.emit ?? (event => { const { event: name, timestamp: _timestamp, ...fields } = event; if (name === 'failed') logError('Model HTTP request failed', undefined, { notify: false, fields }); else logInfo(`model_http_${String(name)}`, fields); });
+  const emit = (event: Record<string, unknown>) => { const { event: name, timestamp: _timestamp, ...fields } = event; if (name === 'failed') logError('Model HTTP request failed', undefined, { notify: false, fields }); else logInfo(`model_http_${String(name)}`, fields); };
   const metadata = { instanceId: traceInstanceId, requestId, ...(options.askId ? { askId: options.askId } : {}), ...(options.traceId ? { traceId: options.traceId } : {}), session: options.session, model: options.model, turn: options.turn, timeoutMs: options.timeoutMs, requestBytes: Buffer.byteLength(options.body) };
   const log = (event: Record<string, unknown>) => {
     try { emit({ timestamp: new Date().toISOString(), ...metadata, elapsedMs: Math.round(performance.now() - started), ...event }); } catch { /* Logging cannot alter HTTP or delivery outcomes. */ }
@@ -35,7 +34,7 @@ export async function requestModel(options: {
   let bodyMs: number | null = null;
   log({ event: 'start' });
   try {
-    response = await options.fetcher(options.url, { method: 'POST', headers: options.headers, body: options.body, signal, dispatcher: modelDispatcher } as RequestInit);
+    response = await fetch(options.url, { method: 'POST', headers: options.headers, body: options.body, signal, dispatcher: modelDispatcher } as RequestInit);
     headersMs = Math.round(performance.now() - started);
     const upstreamRequestId = response.headers.get('x-request-id') ?? response.headers.get('request-id');
     stage = 'body';

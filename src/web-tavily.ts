@@ -1,8 +1,7 @@
 import { ToolUsageError, WebFetchExtractionError, WebProviderError } from './tool-errors.js';
-import { readResponseBytes, ResponseSizeLimitError } from './response-body.js';
+import { isRecord } from './tool-schema.js';
+import { readJsonResponse, ResponseSizeLimitError } from './response-body.js';
 const RESPONSE_LIMIT = 5 * 1024 * 1024;
-// Leave room for the agent's tool_history_id envelope.
-const OUTPUT_LIMIT = 64 * 1024 - 256;
 const SEARCH_DEPTH = ['basic', 'advanced'] as const;
 const EXTRACT_DEPTH = ['basic', 'advanced'] as const;
 const TOPICS = ['general', 'news', 'finance'] as const;
@@ -23,16 +22,15 @@ export const webDefinitions: { type: 'function'; name: string; description: stri
   { type: 'function', name: 'web_usage', description: 'Read-only Tavily API key and account usage for the current billing cycle.', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false } },
 ];
 
-export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
+export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, prepared: ReturnType<typeof prepareWebRequest>): Promise<unknown> };
 export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: string; fetcher?: typeof fetch; signal?: AbortSignal; onUsage?: (credits: number) => void } = {}): WebToolRuntime {
   const apiKey = config.apiKey?.trim();
   const fetcher = config.fetcher ?? fetch;
   const baseUrl = (config.baseUrl?.trim() || 'https://api.tavily.com').replace(/\/+$/, '');
   return {
     definitions: apiKey ? webDefinitions : [],
-    async execute(name, args) {
+    async execute(name, prepared) {
       if (!apiKey) throw new Error('Web API key is not configured');
-      const prepared = prepareWebRequest(name, args);
       const redact = (value: string) => value.replaceAll(apiKey, '[redacted]');
       if (name === 'web_search') {
         const body = prepared.body!;
@@ -43,9 +41,9 @@ export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: str
         if (!Array.isArray(response.results) || response.results.length > maxResults) throw new Error('Tavily search: invalid response');
         const results = response.results.map(item => {
           if (!isRecord(item) || typeof item.title !== 'string' || typeof item.url !== 'string' || typeof item.content !== 'string' || typeof item.score !== 'number' || !Number.isFinite(item.score)) throw new Error('Tavily search: invalid response');
-          return { title: redact(item.title), url: redact(item.url), content: redact(item.content), score: item.score, truncated: false };
+          return { title: item.title, url: item.url, content: item.content, score: item.score, truncated: false };
         });
-        return boundedOutput({ query: redact(query), result_count: results.length, results, truncated: false }, results);
+        return { query, result_count: results.length, results, truncated: false };
       }
       if (name === 'web_fetch' || name === 'web_extract') {
         const body = prepared.body!;
@@ -61,7 +59,7 @@ export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: str
         });
         const results = response.results.map(item => {
           if (!isRecord(item) || typeof item.url !== 'string' || typeof item.raw_content !== 'string') throw new Error('Tavily extract: invalid response');
-          return { url: redact(item.url), content: redact(item.raw_content), provider: 'tavily', completeness: 'unverified', truncated: false };
+          return { url: item.url, content: item.raw_content, provider: 'tavily', completeness: 'unverified', truncated: false };
         });
         if (!results.length && failed.some(item => /\b(?:HTTP\s+(?:404|410)|status(?:\s+code)?[:\s]+(?:404|410))\b/i.test(item.error))) throw new WebProviderError('not_found');
         if (name === 'web_fetch') {
@@ -81,15 +79,15 @@ export function createTavilyToolRuntime(config: { baseUrl?: string; apiKey?: str
             throw new Error(`Tavily extract: URL extraction failed${details ? ` (${details})` : ''}`);
           }
           if (results.length !== 1) throw new Error('Tavily extract: invalid response');
-          return boundedOutput(results[0]!, [results[0]!]);
+          return results[0]!;
         }
-        const safeFailed = failed.map(item => ({ url: redact(item.url), error: redact(item.error) }));
+        const safeFailed = failed;
         const result = { result_count: results.length, failed_count: safeFailed.length, results, failed_results: safeFailed, truncated: false, ...(query !== undefined ? { content_scope: 'query_relevant_chunks' as const, content_scope_description: 'Content contains query-relevant chunks, not the full source content.' } : {}) };
-        return boundedOutput(result, results);
+        return result;
       }
       const response = await request('usage', undefined, apiKey, fetcher, baseUrl, config.signal);
       if (!isRecord(response.key) || !isRecord(response.account)) throw new Error('Tavily usage: invalid response');
-      return boundedUsageOutput(redactDeep(response, apiKey));
+      return response;
     },
   };
 }
@@ -114,52 +112,11 @@ async function request(endpoint: 'search' | 'extract' | 'usage', body: Record<st
     await response.body?.cancel().catch(() => {});
     throw new Error(`Tavily ${endpoint}: HTTP ${response.status}`);
   }
-  if (Number(response.headers.get('content-length')) > RESPONSE_LIMIT) {
-    await response.body?.cancel().catch(() => {});
-    throw new Error(`Tavily ${endpoint}: response exceeds 5 MiB limit`);
-  }
-  if (!response.body) throw new Error(`Tavily ${endpoint}: invalid response`);
-  let bytes: Buffer;
-  try { bytes = await readResponseBytes(response, RESPONSE_LIMIT, signal); }
-  catch (error) {
-    throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : error instanceof ResponseSizeLimitError ? 'response exceeds 5 MiB limit' : 'response read failed'}`);
-  }
   let result: unknown;
-  try { result = JSON.parse(bytes.toString('utf8')); }
-  catch { throw new Error(`Tavily ${endpoint}: invalid response`); }
+  try { result = await readJsonResponse(response, RESPONSE_LIMIT, signal); }
+  catch (error) { throw new Error(`Tavily ${endpoint}: ${signal.aborted ? 'request timed out' : error instanceof ResponseSizeLimitError ? 'response exceeds 5 MiB limit' : 'invalid or unreadable response'}`); }
   if (!isRecord(result)) throw new Error(`Tavily ${endpoint}: invalid response`);
   return result;
-}
-
-function boundedOutput<T extends { truncated: boolean }>(result: T, contents: { content: string; truncated: boolean }[]): T {
-  const size = () => Buffer.byteLength(JSON.stringify(result), 'utf8');
-  if (size() <= OUTPUT_LIMIT) return result;
-  result.truncated = true;
-  const originals = contents.map(item => item.content);
-  for (const item of contents) { item.truncated = item.content.length > 0; item.content = ''; }
-  if (size() > OUTPUT_LIMIT) throw new Error('Tavily: result metadata exceeds 64 KiB output limit');
-  for (let i = 0; i < contents.length; i++) {
-    const item = contents[i]!, original = originals[i]!;
-    let low = 0, high = original.length;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      item.content = original.slice(0, middle);
-      item.truncated = middle < original.length;
-      if (size() <= OUTPUT_LIMIT) low = middle;
-      else high = middle - 1;
-    }
-    if (low < original.length && /[\uD800-\uDBFF]/.test(original[low - 1] ?? '')) low--;
-    item.content = original.slice(0, low);
-    item.truncated = low < original.length;
-  }
-  result.truncated = true;
-  return result;
-}
-function boundedUsageOutput(value: unknown): unknown {
-  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > OUTPUT_LIMIT) {
-    throw new Error('Tavily usage: result metadata exceeds 64 KiB output limit');
-  }
-  return value;
 }
 
 function requiredString(value: unknown, name: string): string {
@@ -205,14 +162,6 @@ function validateUrls(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > 20) throw new ToolUsageError('urls must contain 1 to 20 HTTP(S) URLs');
   return value.map(validUrl);
 }
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value); }
-function redactDeep(value: unknown, apiKey: string): unknown {
-  if (typeof value === 'string') return value.replaceAll(apiKey, '[redacted]');
-  if (Array.isArray(value)) return value.map(item => redactDeep(item, apiKey));
-  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([child, item]) => [child, redactDeep(item, apiKey)]));
-  return value;
-}
-
 export function prepareWebRequest(name: string, args: Record<string, unknown>): { endpoint: "search" | "extract" | "usage"; body?: Record<string, unknown> } {
       const allowedByName: Record<string, string[]> = {
         web_search: ['query','max_results','search_depth','topic','include_domains','exclude_domains','include_domains_mode','time_range','start_date','end_date','country'],

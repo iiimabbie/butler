@@ -1,4 +1,5 @@
 import { ToolUsageError } from './tool-errors.js';
+import { logWarn } from './log.js';
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -6,12 +7,14 @@ import { execFile as execFileCallback } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { parse } from 'yaml';
 import { projectPath } from './paths.js';
+import { validateToolArgs } from './tool-schema.js';
 
 const execFile = promisify(execFileCallback);
-const string = { type: 'string' };
+const string = { type: 'string', minLength: 1 };
+const optionalPath = { type: 'string' };
 const definition = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 const definitions = [
-  definition('skills_read', 'List installed skills and their metadata when name is omitted; read a file in an installed skill directory when name is supplied. path defaults to SKILL.md and requires name.', { name: string, path: string }, []),
+  definition('skills_read', 'List installed skills and their metadata when name is omitted; read a file in an installed skill directory when name is supplied. path defaults to SKILL.md and requires name.', { name: string, path: optionalPath }, []),
   definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
 ];
 
@@ -34,16 +37,17 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
     },
     async execute(name, args) {
       if (name === 'skills_read') {
-        validateSkillArgs({ name: string, path: string }, [], args);
+        validateToolArgs({ name: string, path: optionalPath }, [], args);
         if (args.name === undefined) { if (args.path !== undefined) throw new ToolUsageError('path requires name'); return installedSkills(skillsDirectory); }
-        const skill = await installedSkill(stringArg(args.name, 'name'), skillsDirectory);
-        const path = args.path === undefined ? 'SKILL.md' : stringArg(args.path, 'path', true) || 'SKILL.md';
+        const skill = await installedSkill(args.name as string, skillsDirectory);
+        const path = (args.path as string | undefined) || 'SKILL.md';
         const target = resolve(skill.path, path);
         assertInside(skill.path, target);
-        const real = await realpath(target);
+        let real: string;
+        try { real = await realpath(target); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ToolUsageError('Skill file does not exist'); throw error; }
         assertInside(await realpath(skill.path), real);
-        const info = await stat(real);
-        if (!info.isFile()) throw new Error('Skill path must be a regular file');
+        const info = await stat(real).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ToolUsageError('Skill file does not exist'); throw error; });
+        if (!info.isFile()) throw new ToolUsageError('Skill path must be a regular file');
         return { path: relative(workspace, real), content: await readFile(real, 'utf8') };
       }
       if (name === 'skills_manage') {
@@ -51,11 +55,11 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         if (typeof action !== 'string' || !['prepare', 'install', 'update', 'check', 'remove'].includes(action)) throw new ToolUsageError('Unknown or missing action. Valid actions: prepare, install, update, check, remove');
         const { action: _action, ...operationArgs } = args;
         const actionSchemas: Record<string, { properties: Record<string, unknown>; required: string[] }> = { prepare: { properties: { source: string }, required: ['source'] }, install: { properties: { path: string, name: string }, required: ['path', 'name'] }, update: { properties: { name: string, force: { type: 'boolean' } }, required: [] }, check: { properties: { name: string }, required: [] }, remove: { properties: { name: string }, required: ['name'] } };
-        validateSkillArgs(actionSchemas[action]!.properties, actionSchemas[action]!.required, operationArgs); args = operationArgs;
-        if (action === 'prepare') return prepare(stringArg(args.source, 'source'), stagingDirectory);
+        validateToolArgs(actionSchemas[action]!.properties, actionSchemas[action]!.required, operationArgs); args = operationArgs;
+        if (action === 'prepare') return prepare(args.source as string, stagingDirectory);
         if (action === 'install') {
-          const skillName = validName(stringArg(args.name, 'name'));
-          const candidate = resolve(stringArg(args.path, 'path'));
+          const skillName = validName(args.name as string);
+          const candidate = resolve(args.path as string);
           const stagingReal = await realpath(stagingDirectory);
           const candidateReal = await realpath(candidate);
           assertInside(stagingReal, candidateReal);
@@ -79,13 +83,13 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
         }
         if (action === 'update' || action === 'check') {
           const lock = await readLock(lockPath);
-          const selectedName = args.name === undefined ? undefined : validName(stringArg(args.name, 'name'));
+          const selectedName = args.name === undefined ? undefined : validName(args.name as string);
           if (selectedName && !(selectedName in lock.skills)) throw new ToolUsageError(`Skill ${selectedName} has no recorded source`);
           const names = selectedName ? [selectedName] : Object.keys(lock.skills).sort();
           const results = [];
           for (const skillName of names) {
             try { results.push(action === 'update'
-              ? await updateOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory, workspace, args.force === true)
+              ? await updateOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory, args.force === true)
               : await checkOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory)); }
             catch (error) { results.push({ name: skillName, status: 'failed', error: error instanceof Error ? error.message : String(error) }); }
             // Persist after each skill so an interruption cannot leave replaced files with a stale hash.
@@ -98,7 +102,7 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
           return { results };
         }
         if (action === 'remove') {
-          const skill = await installedSkill(stringArg(args.name, 'name'), skillsDirectory);
+          const skill = await installedSkill(args.name as string, skillsDirectory);
           const trash = await trashDirectory();
           const destination = resolve(trash, `${skill.name}-${Date.now()}`);
           await rename(skill.path, destination);
@@ -125,11 +129,6 @@ async function trashDirectory(): Promise<string> {
   return trash;
 }
 
-function validateSkillArgs(properties: Record<string, unknown>, required: string[], args: Record<string, unknown>): void {
-  for (const key of required) if (!(key in args)) throw new ToolUsageError(`${key} is required`);
-  for (const [key, value] of Object.entries(args)) if (!(key in properties)) throw new ToolUsageError(`Invalid skill argument: ${key}`);
-}
-
 const STAGE_TTL_MS = 24 * 60 * 60 * 1000;
 
 // One prepare can offer several candidates, so a stage stays until it is a day old.
@@ -154,7 +153,7 @@ async function prepare(source: string, staging: string) {
       await writeFile(resolve(stage, 'source.json'), JSON.stringify({ url: source, commit: stdout.trim() }));
     } else {
       const local = await realpath(source);
-      if (!(await stat(local)).isDirectory()) throw new Error('Local skill source must be a directory');
+      if (!(await stat(local)).isDirectory()) throw new ToolUsageError('Local skill source must be a directory');
       root = resolve(stage, 'local');
       await cp(local, root, { recursive: true, dereference: false });
     }
@@ -163,7 +162,7 @@ async function prepare(source: string, staging: string) {
       const meta = await skillMetadata(dir);
       candidates.push({ path: dir, name: meta.name, description: meta.description, skill_md: meta.content });
     }
-    if (!candidates.length) throw new Error('No SKILL.md found in source');
+    if (!candidates.length) throw new ToolUsageError('No SKILL.md found in source');
     return { candidates };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
@@ -187,9 +186,10 @@ async function findSkillDirectories(root: string): Promise<string[]> {
 async function skillMetadata(directory: string) {
   const content = await readFile(resolve(directory, 'SKILL.md'), 'utf8');
   const match = content.match(/^---\s*\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
-  if (!match) throw new Error('SKILL.md must contain YAML frontmatter');
-  const frontmatter: unknown = parse(match[1]!);
-  if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) throw new Error('SKILL.md frontmatter must be a YAML mapping');
+  if (!match) throw new ToolUsageError('SKILL.md must contain YAML frontmatter');
+  let frontmatter: unknown;
+  try { frontmatter = parse(match[1]!); } catch { throw new ToolUsageError('SKILL.md frontmatter must be valid YAML'); }
+  if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) throw new ToolUsageError('SKILL.md frontmatter must be a YAML mapping');
   const fields = frontmatter as Record<string, unknown>;
   return { name: validName(typeof fields.name === 'string' ? fields.name : basename(directory)), description: typeof fields.description === 'string' ? fields.description : '', content };
 }
@@ -204,7 +204,7 @@ async function installedSkills(directory: string) {
       const path = resolve(directory, entry.name);
       const metadata = await skillMetadata(path);
       result.push({ name: entry.name, description: metadata.description, path: relative(workspaceRoot(directory), resolve(path, 'SKILL.md')) });
-    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error; }
+    } catch (error) { logWarn('Skipping invalid installed skill', error, { skill: entry.name }); }
   }
   return result;
 }
@@ -214,10 +214,10 @@ async function installedSkill(name: string, directory: string) {
   const safeName = validName(name);
   const path = resolve(directory, safeName);
   assertInside(directory, path);
-  const real = await realpath(path);
+  let real: string;
+  try { real = await realpath(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new ToolUsageError(`Skill not found: ${safeName}`); throw error; }
   assertInside(await realpath(directory), real);
-  const metadata = await skillMetadata(real);
-  return { name: safeName, path: real, metadata };
+  return { name: safeName, path: real };
 }
 function validName(name: string) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name) || name === '.' || name === '..') throw new ToolUsageError('Skill name must be a simple directory name');
@@ -227,7 +227,6 @@ function assertInside(root: string, target: string) {
   const rel = relative(root, target);
   if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) { if (rel !== '') throw new ToolUsageError('Path must remain inside its skill or staging directory'); }
 }
-function stringArg(value: unknown, name: string, empty = false) { if (typeof value !== 'string' || (!empty && !value.trim()) || value.includes('\0')) throw new ToolUsageError(`${name} must be a string`); return value; }
 
 async function readLock(path: string): Promise<SkillLock> {
   let content: string;
@@ -317,7 +316,7 @@ async function fetchSkill(entry: SkillLockEntry, name: string, staging: string):
   } catch (error) { await rm(temp, { recursive: true, force: true }); throw error; }
 }
 
-async function updateOne(name: string, entry: SkillLockEntry, skills: string, staging: string, workspace: string, force: boolean) {
+async function updateOne(name: string, entry: SkillLockEntry, skills: string, staging: string, force: boolean) {
   const safeName = validName(name);
   const installed = resolve(skills, safeName);
   try { await lstat(installed); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { name, status: 'missing' }; throw error; }

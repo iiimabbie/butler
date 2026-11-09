@@ -1,5 +1,7 @@
-import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync } from 'node:fs';
+import { chmodSync, closeSync, constants, fstatSync, mkdirSync, openSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { readSafeFile, MAX_ATTACHMENT_BYTES } from './safe-file.js';
+export { MAX_ATTACHMENT_BYTES } from './safe-file.js';
 import { randomUUID } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
@@ -11,7 +13,6 @@ import { AttachmentImageTypeConflictError, resolveSupportedImageType } from './a
 import { getVideoAttachmentResult, isVideoAttachment } from './video-attachments.js';
 
 export type DiscordAttachmentInput = { id: string; url: string; name: string; contentType?: string | null; size?: number };
-export const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export type AttachmentInputErrorCode = 'request_rejected';
 export class AttachmentInputError extends Error {
   constructor(readonly code: AttachmentInputErrorCode, readonly status?: number, options?: ErrorOptions) {
@@ -21,7 +22,7 @@ export class AttachmentInputError extends Error {
 }
 const ALLOWED_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net']);
 const MIME_EXTENSIONS: Record<string, string> = { '.pdf':'application/pdf','.doc':'application/msword','.docx':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','.docm':'application/vnd.ms-word.document.macroEnabled.12','.xls':'application/vnd.ms-excel','.xlsx':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet','.xlsm':'application/vnd.ms-excel.sheet.macroEnabled.12','.ppt':'application/vnd.ms-powerpoint','.pptx':'application/vnd.openxmlformats-officedocument.presentationml.presentation','.odt':'application/vnd.oasis.opendocument.text','.ods':'application/vnd.oasis.opendocument.spreadsheet','.odp':'application/vnd.oasis.opendocument.presentation','.rtf':'application/rtf','.txt':'text/plain','.csv':'text/csv','.tsv':'text/tab-separated-values','.json':'application/json','.xml':'application/xml','.html':'text/html','.htm':'text/html','.md':'text/markdown','.c':'text/plain','.h':'text/plain','.cc':'text/plain','.cpp':'text/plain','.hpp':'text/plain','.cs':'text/plain','.java':'text/plain','.kt':'text/plain','.kts':'text/plain','.go':'text/plain','.rs':'text/plain','.py':'text/plain','.pyw':'text/plain','.js':'text/javascript','.jsx':'text/javascript','.mjs':'text/javascript','.cjs':'text/javascript','.ts':'text/typescript','.tsx':'text/typescript','.mts':'text/typescript','.cts':'text/typescript','.sh':'text/x-shellscript','.bash':'text/x-shellscript','.zsh':'text/x-shellscript','.sql':'text/plain','.yaml':'text/yaml','.yml':'text/yaml','.toml':'text/plain','.ini':'text/plain','.css':'text/css','.scss':'text/plain','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.gif':'image/gif','.heic':'image/heic','.heif':'image/heif','.mp3':'audio/mpeg','.wav':'audio/wav','.m4a':'audio/mp4','.ogg':'audio/ogg','.opus':'audio/opus','.flac':'audio/flac','.mp4':'video/mp4','.mov':'video/quicktime','.webm':'video/webm','.mkv':'video/x-matroska','.avi':'video/x-msvideo' };
-export type InputAttachment = MessageInputAttachment & { localPath?: string };
+export type InputAttachment = MessageInputAttachment & { localPath?: string; storageFailed?: boolean };
 
 /** Longest edge of images sent to the model; image tokens scale with pixel count (same bound as umiro-agent-v1). */
 export const MODEL_IMAGE_EDGE = 768;
@@ -54,13 +55,8 @@ export async function modelImageInput(path: string, mimeType: string, raw?: Buff
 }
 
 export async function archiveOutgoingAttachment(sourcePath: string, filename: string, attachmentDir: string, mimeType?: string): Promise<{ localPath: string; mimeType: string }> {
-  let fd: number | undefined;
   try {
-    fd = openSync(sourcePath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > MAX_ATTACHMENT_BYTES) throw new Error();
-    const bytes = readFileSync(fd);
-    if (bytes.length !== stat.size) throw new Error();
+    const bytes = await readSafeFile(sourcePath);
     const actualMime = safeMime(mimeType) ?? MIME_EXTENSIONS[extension(filename)] ?? 'application/octet-stream';
     const category = attachmentCategory(actualMime, filename);
     const folder = join(resolve(attachmentDir), category);
@@ -69,7 +65,6 @@ export async function archiveOutgoingAttachment(sourcePath: string, filename: st
     await writeFile(localPath, bytes, { flag: 'wx', mode: 0o600 });
     return { localPath, mimeType: actualMime };
   } catch { throw new Error('Outgoing attachment could not be safely archived'); }
-  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 export async function prepareAttachments(items: DiscordAttachmentInput[], attachmentDir: string, transcription?: AudioTranscriptionConfig): Promise<InputAttachment[]> {
@@ -95,7 +90,7 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
       try {
         mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); chmodSync(dirname(path), 0o700);
         await writeFile(path, Buffer.concat(chunks), { flag: 'wx', mode: 0o600 });
-      } catch { throw new Error('storage'); }
+      } catch { throw new AttachmentStorageError(); }
       const prepared: InputAttachment = { ...base, filename: cleanFilename(item.name), mimeType: actualMime, status: 'ready', localPath: path, origin: 'discord_attachment' };
       if (isVideoAttachment(actualMime, item.name)) {
         try { await getVideoAttachmentResult({ path, filename: cleanFilename(item.name), attachmentDir: resolve(attachmentDir), transcription }); }
@@ -105,7 +100,7 @@ export async function prepareAttachments(items: DiscordAttachmentInput[], attach
         catch (error) { prepared.transcriptionError = error instanceof Error ? error.message : '語音轉錄失敗，原始音訊已保留。'; }
       }
       result.push(prepared);
-    } catch (error) { result.push({ ...base, error: safeDownloadError(error) }); }
+    } catch (error) { result.push({ ...base, error: safeDownloadError(error), ...(error instanceof AttachmentStorageError ? { storageFailed: true } : {}) }); }
   }
   return result;
 }
@@ -126,15 +121,15 @@ function extension(name: string): string { const dot = name.lastIndexOf('.'); re
 const AUDIO_EXTENSIONS = ['.mp3','.mpga','.m4a','.ogg','.opus','.wav','.flac','.oga','.aac','.aiff'];
 function isAudioAttachment(mimeType: string, filename: string): boolean {
   const mime = mimeType.toLowerCase();
-  if (mime.startsWith('video/')) return false;
   return mime.startsWith('audio/') || AUDIO_EXTENSIONS.includes(extension(filename));
 }
 function cleanFilename(name: string): string { return name.replace(/[\\/\0-\x1f\x7f]/g, '_').slice(0, 240) || 'attachment'; }
+class AttachmentStorageError extends Error {}
 function safeDownloadError(error: unknown): string {
+  if (error instanceof AttachmentStorageError) return '附件無法保存到受控目錄';
   if (!(error instanceof Error)) return '下載失敗';
   if (error.message === 'limit') return '超過單檔 20 MiB 限制';
   if (error.message === 'source') return '附件來源不是允許的 Discord CDN';
-  if (error.message === 'storage') return '附件無法保存到受控目錄';
   if (error.message === 'redirect') return '附件重新導向無效或超過限制';
   if (error.name === 'TimeoutError' || error.name === 'AbortError') return '附件下載逾時';
   return '附件下載失敗';
@@ -171,12 +166,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
     let inputMimeType = safeMime(attachment.mimeType) ?? MIME_EXTENSIONS[extension(attachment.filename)] ?? 'application/octet-stream';
     try {
       const path = localPath = safeLocalPath(attachment.localPath, attachmentDir);
-      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-      try {
-        const stat = fstatSync(fd);
-        if (!stat.isFile() || stat.size > MAX_ATTACHMENT_BYTES) throw new Error();
-        raw = readFileSync(fd);
-        if (raw.length !== stat.size) throw new Error();
+      raw = await readSafeFile(path);
         if (isOrdinaryZip(attachment, raw)) {
           const script = resolve(dirname(fileURLToPath(import.meta.url)), '../scripts/read-safe-zip.py');
           try {
@@ -202,7 +192,6 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
           content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；無法辨識檔案格式（application/octet-stream），不支援作為模型檔案輸入，原檔已保留，未上傳；不能據此聲稱已讀取內容。]` });
           continue;
         }
-      } finally { closeSync(fd); }
     } catch (error) {
       const detail = error instanceof AttachmentImageTypeConflictError ? `檔案簽章與來源名稱/MIME 不一致：${error.message}` : '附件原檔已不在本機（超過 90 天會清除）；需要時用 discord_read 的 message 動作，以這則訊息的 channel 與 msg 重新取得原始附件。';
       content.push({ type: 'input_text', text: `[附件未提供：${attachment.filename}；${detail}]` });
@@ -228,7 +217,7 @@ export async function messageAttachmentContent(message: StoredMessage, attachmen
   }
   return content;
 }
-export function isOrdinaryZip(attachment: MessageInputAttachment, bytes: Buffer): boolean {
+function isOrdinaryZip(attachment: MessageInputAttachment, bytes: Buffer): boolean {
   const name = attachment.filename.toLowerCase();
   const mime = attachment.mimeType.toLowerCase().split(';')[0]!.trim();
   const ooxml: Record<string, string> = {
@@ -245,9 +234,8 @@ export function isOrdinaryZip(attachment: MessageInputAttachment, bytes: Buffer)
 }
 function safeLocalPath(path: string | undefined, attachmentDir: string): string {
   if (!path) throw new Error();
-  const absolute = resolve(path); const incoming = resolve(attachmentDir, 'incoming'); const archive = resolve(attachmentDir);
+  const absolute = resolve(path); const archive = resolve(attachmentDir);
   const parent = dirname(absolute);
-  if (parent === incoming && /^[0-9a-f-]{36}\.bin$/i.test(absolute.slice(incoming.length + 1))) return absolute;
   const category = parent.slice(archive.length + 1);
   if (parent.startsWith(`${archive}/`) && ['images','audio','video','documents','spreadsheets','text','archives','other'].includes(category) && /^[0-9a-f-]{36}-[^/\\\\\0-\x1f\x7f]{1,240}$/.test(absolute.slice(parent.length + 1))) return absolute;
   throw new Error();

@@ -1,28 +1,19 @@
-import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { readSafeFile } from './safe-file.js';
 
 export interface AudioTranscriptionConfig {
-  provider: 'groq';
   apiKey: string;
 }
 
 const GROQ_TRANSCRIPTION_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_AUDIO_EXTENSIONS = new Set(['.flac', '.mp3', '.mp4', '.mpeg', '.mpga', '.m4a', '.ogg', '.wav', '.webm']);
 
-export async function transcribeAudio(input: { path: string; filename: string; config?: AudioTranscriptionConfig; fetcher?: typeof fetch }): Promise<string> {
+export async function transcribeAudio(input: { path: string; filename: string; config?: AudioTranscriptionConfig; timeoutMs?: number }): Promise<string> {
   if (!input.config) throw new Error('語音轉錄未設定，原始音訊已保留。');
-  const fetcher = input.fetcher ?? fetch;
   const ext = input.filename.toLowerCase().slice(input.filename.lastIndexOf('.'));
   if (!GROQ_AUDIO_EXTENSIONS.has(ext) && ext !== '.opus') throw new Error(`Groq 不支援此音訊格式（${ext || '無副檔名'}），原始音訊已保留。`);
   let bytes: Buffer;
   try {
-    const handle = await open(input.path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-    try {
-      const stat = await handle.stat();
-      if (!stat.isFile() || stat.size > 20 * 1024 * 1024) throw new Error();
-      bytes = await handle.readFile();
-      if (bytes.length !== stat.size) throw new Error();
-    } finally { await handle.close(); }
+    bytes = await readSafeFile(input.path);
   } catch { throw new Error('無法安全讀取已保存音訊，原始檔案仍保留。'); }
   const form = new FormData();
   const uploadName = ext === '.opus' ? `${input.filename.slice(0, -ext.length)}.ogg` : input.filename;
@@ -31,11 +22,11 @@ export async function transcribeAudio(input: { path: string; filename: string; c
   form.set('response_format', 'json');
   let response: Response;
   try {
-    response = await fetcher(GROQ_TRANSCRIPTION_URL, {
+    response = await fetch(GROQ_TRANSCRIPTION_URL, {
       method: 'POST',
       headers: { authorization: `Bearer ${input.config.apiKey}` },
       body: form,
-      signal: AbortSignal.timeout(120_000),
+      signal: AbortSignal.timeout(input.timeoutMs ?? 120_000),
     });
   } catch (error) {
     if (error instanceof Error && error.name === 'TimeoutError') throw new Error('Groq 語音轉錄逾時，原始音訊已保留。');

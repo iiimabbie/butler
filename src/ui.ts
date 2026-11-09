@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
+import { logError } from './log.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../ui');
 const assets = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']]] as const);
@@ -27,7 +28,7 @@ export function startUi(port: number, options: { googleAuth?: GoogleAuth; public
     try {
       if (pathname === '/api/google/status' && req.method === 'GET') {
         const status = options.googleAuth ? await options.googleAuth.status() : 'not_configured';
-        const accounts = options.googleAuth ? await options.googleAuth.accounts().catch(() => []) : [];
+        const accounts = options.googleAuth ? await options.googleAuth.accounts().catch(error => { if (!(error instanceof GoogleAuthError)) logError('Google UI account lookup failed', error); return []; }) : [];
         res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ status, accounts })); return;
       }
       if (['/api/google/start', '/api/google/complete', '/api/google/default', '/api/google/remove'].includes(pathname) && req.method === 'POST') {
@@ -54,6 +55,7 @@ export function startUi(port: number, options: { googleAuth?: GoogleAuth; public
             res.writeHead(200, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify(result));
           }
         } catch (error) {
+          if (!(error instanceof GoogleAuthError) && !(error instanceof URIError)) logError('Google UI operation failed', error);
           res.writeHead(400, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: error instanceof GoogleAuthError ? error.message : '操作失敗，請重新開始' }));
         }
         return;
@@ -65,6 +67,7 @@ export function startUi(port: number, options: { googleAuth?: GoogleAuth; public
       res.writeHead(200, { ...headers, 'Content-Type': asset[1] });
       if (req.method === 'HEAD') res.end(); else res.end(body);
     } catch (error) {
+      if (!(error instanceof URIError)) logError('UI request failed', error);
       if (!res.headersSent) {
         const status = error instanceof URIError ? 400 : 500;
         res.writeHead(status, { ...headers, 'Content-Type': 'application/json' }).end(JSON.stringify({ error: status === 400 ? '參數格式錯誤' : '讀取失敗' }));

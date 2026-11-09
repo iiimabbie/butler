@@ -11,7 +11,7 @@ class IntakeError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
 
-export function validateNotification(value: unknown): NotificationPayload {
+function validateNotification(value: unknown): NotificationPayload {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new IntakeError(400, 'Invalid notification');
   const input = value as Record<string, unknown>;
   const string = (key: string, empty = false) => {

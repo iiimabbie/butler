@@ -2,7 +2,9 @@ import { DiscordReactionInputError, ToolUsageError } from './tool-errors.js';
 import { fileURLToPath } from 'node:url';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { allowedReferencePath, detectImage } from './image-tools.js';
+import { allowedReferencePath } from './image-tools.js';
+import { detectSupportedImageType } from './attachment-image-type.js';
+import { isRecord, validateToolArgs } from './tool-schema.js';
 import { resolve, basename } from 'node:path';
 import type { DiscordPresence, DiscordPresenceInput, Store, StoredMessage } from './store.js';
 import { MessageFlags } from 'discord.js';
@@ -52,6 +54,7 @@ const discordGroupsByOperation = new Map(Object.entries(discordGroups).flatMap((
 function publicDefinition(name: string, members: ToolSpec[]): DiscordToolDefinition {
   const grouped = name in discordGroups;
   const properties = Object.assign({}, ...members.map(member => member.properties));
+  if (name === 'discord_read') { properties.limit = { type: 'integer', minimum: 1, maximum: 100 }; properties.before = { type: 'string', minLength: 1, maxLength: 40, description: 'Message ID for channel_messages; pinned_at timestamp for pins.' }; }
   return { type: 'function', name, description: grouped ? groupDescriptions[name]! : members[0]!.description, parameters: { type: 'object', properties: grouped ? { action: { type: 'string', enum: Object.keys(discordGroups[name]!) }, ...properties } : properties, required: grouped ? ['action'] : members[0]!.required, additionalProperties: false } };
 }
 export const discordMessageTools: DiscordToolDefinition[] = [
@@ -66,8 +69,7 @@ function safeDiscordDiagnostic(value: string, token: string): string {
   return redacted.replace(/https?:\/\/[^\s"<>]+/gi, '[url redacted]').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 500);
 }
 
-export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; fetcher?: typeof fetch; attachmentDir?: string; transcription?: AudioTranscriptionConfig }): DiscordToolRuntime {
-  const fetcher = options.fetcher ?? fetch;
+export function createDiscordToolRuntime(options: { token: string; context: DiscordToolContext; attachmentDir: string; transcription?: AudioTranscriptionConfig }): DiscordToolRuntime {
   const pendingInput: StoredMessage[] = [];
   const takeInputMessages = (): StoredMessage[] => pendingInput.splice(0, pendingInput.length);
   const addFetchFailureEvidence = (channelId: string, messageId: string): void => {
@@ -91,9 +93,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         if (typeof attachment.id !== 'string' || typeof attachment.url !== 'string' || typeof attachment.filename !== 'string') throw new Error('Discord returned invalid message attachment metadata');
         return { id: attachment.id, url: attachment.url, name: attachment.filename, contentType: typeof attachment.content_type === 'string' ? attachment.content_type : null, size: typeof attachment.size === 'number' ? attachment.size : undefined } satisfies DiscordAttachmentInput;
       });
-      if (rawAttachments.length && !options.attachmentDir) throw new Error('Attachment storage is unavailable');
-      const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir!, options.transcription) : [];
-      if (attachments.some(attachment => attachment.status === 'failed' && attachment.error === '附件無法保存到受控目錄')) throw new Error('Attachment storage is unavailable');
+      const attachments = rawAttachments.length ? await prepareAttachments(rawAttachments, options.attachmentDir, options.transcription) : [];
+      if (attachments.some(attachment => attachment.storageFailed)) throw new Error('Attachment storage is unavailable');
       const author = isRecord(record.author) ? record.author : {};
       const isBot = typeof author.bot === 'boolean' ? author.bot : undefined;
       const eventTime = typeof record.timestamp === 'string' && Number.isFinite(Date.parse(record.timestamp)) ? record.timestamp : undefined;
@@ -108,10 +109,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         attachments, preparationStatus: 'ready', discordSegments: [],
       };
       if (options.context.store && options.context.sessionId) {
-        const persisted = options.context.store.addMessageOnce(options.context.sessionId, 'user', evidence.content, { ...evidence.source, sourceKind: 'discord_fetched' }, attachments, options.context.memoryOriginChannelId !== undefined && options.context.store.memoryWriteAllowed(options.context.memoryOriginChannelId) && options.context.store.memoryWriteAllowed(channelId));
-        if (persisted.created) options.context.store.updateAttachments(persisted.message.id, attachments);
-        const storedEvidence = options.context.store.messagesWithSources(options.context.sessionId).find(item => item.id === persisted.message.id && item.role === 'user') ?? evidence;
-        pendingInput.push(storedEvidence);
+        const { message } = options.context.store.addReadyMessage(options.context.sessionId, 'user', evidence.content, { ...evidence.source, sourceKind: 'discord_fetched' }, attachments, memoryWriteAllowed(options.context, channelId));
+        pendingInput.push(message.role === 'user' ? message : evidence);
         options.context.onMessageDelivered?.(channelId, options.context.sessionId);
       } else pendingInput.push(evidence);
       return withoutAuthorClassification({ ...record, attachment_inputs: attachments });
@@ -122,7 +121,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
   };
   const api = async (method: string, path: string, body?: unknown, sanitize = true): Promise<unknown> => {
     let response: Response;
-    try { response = await fetcher(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
+    try { response = await fetch(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
     catch {
       throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} stage=transport; ${method === 'GET' ? 'read failed; no mutation was requested' : 'outcome is unknown; do not retry this tool automatically'}`);
     }
@@ -161,12 +160,12 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     if (!operation) throw new ToolUsageError(Object.hasOwn(discordGroups, name) ? `Unknown or missing action. Valid actions: ${Object.keys(discordGroups[name]!).join(', ')}` : `Unknown Discord tool: ${name}`);
     const operationArgs = name in discordGroups ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'action')) : args;
     const spec = specs.find(item => item.name === operation); if (!spec) throw new ToolUsageError(`Unknown Discord tool: ${name}`);
-    validateArgs(spec, operationArgs);
+    validateToolArgs(spec.properties, spec.required, operationArgs);
     args = operationArgs;
     name = operation;
-    const channelId = args.channelId === undefined ? undefined : stringArg(args.channelId, 'channelId');
-    const messageId = args.messageId === undefined ? undefined : stringArg(args.messageId, 'messageId');
-    const content = args.content === undefined ? undefined : stringArg(args.content, 'content');
+    const channelId = args.channelId as string | undefined;
+    const messageId = args.messageId as string | undefined;
+    const content = args.content as string | undefined;
     if (content !== undefined && name !== 'discord_handoff' && content.length > 2000) throw new ToolUsageError('Discord message exceeds 2000 characters');
     if (name === 'presence') {
       if (!channelId && !args.userId) throw new ToolUsageError('channelId or userId is required');
@@ -201,11 +200,10 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         const path = args[field] as string | undefined;
         if (path === undefined) continue;
         if (!path) { images[field] = null; continue; }
-        if (!options.attachmentDir) throw new ToolUsageError('Attachment storage is unavailable');
         const bytes = await readFile(await allowedReferencePath(path, options.attachmentDir));
-        const mime = detectImage(bytes)?.mime ?? (/^GIF8[79]a$/.test(bytes.toString('ascii', 0, 6)) ? 'image/gif' : undefined);
-        if (!mime) throw new ToolUsageError(`${field} must be a PNG, JPEG, GIF or WebP image`);
-        images[field] = `data:${mime};base64,${bytes.toString('base64')}`;
+        const image = detectSupportedImageType(bytes);
+        if (!image) throw new ToolUsageError(`${field} must be a PNG, JPEG, GIF or WebP image`);
+        images[field] = `data:${image.mimeType};base64,${bytes.toString('base64')}`;
       }
       if (Object.keys(images).length) {
         const user = asRecord(await api('PATCH', '/users/@me', images));
@@ -215,11 +213,12 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     }
     if (name === 'message') return fetchMessage(channelId!, messageId!);
     if (name === 'discord_attach_to_reply') {
-      const file = stringArg(args.file, 'file');
+      const file = args.file as string;
       if (/^[a-z]+:\/\//i.test(file) || file.includes('\0') || file.includes('\\')) throw new ToolUsageError('Attachment must be a local file path');
-      const absolute = resolve(projectRoot, file); const real = realpathSync(absolute);
-      if (!statSync(real).isFile()) throw new ToolUsageError('Attachment must be a regular file');
-      const name = args.filename === undefined ? basename(real) : stringArg(args.filename, 'filename');
+      const absolute = resolve(projectRoot, file); let real: string;
+      try { real = realpathSync(absolute); if (!statSync(real).isFile()) throw new ToolUsageError('Attachment must be a regular file'); }
+      catch (error) { if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw new ToolUsageError('Attachment file does not exist'); throw error; }
+      const name = (args.filename as string | undefined) ?? basename(real);
       if (name !== basename(name) || name.includes('\\') || name.includes('/') || name === '.' || name === '..') throw new ToolUsageError('filename must be a plain filename');
       options.context.attachmentFiles.push({ attachment: real, name });
       return { status: 'queued_for_final_reply', filename: name, delivery: 'pending' };
@@ -229,7 +228,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       if (!handoff) throw new ToolUsageError('Handoff is not available here');
       if (channelId === options.context.channelId) throw new ToolUsageError('Cannot hand off to the current channel');
       if (!options.context.store?.isTrackedChannel(channelId!)) throw new ToolUsageError('Target channel is not tracked by Butler');
-      const title = stringArg(args.title, 'title'); const originChannelId = options.context.channelId; const originMessageId = options.context.messageId; const requesterId = options.context.requesterId;
+      const title = args.title as string; const originChannelId = options.context.channelId; const originMessageId = options.context.messageId; const requesterId = options.context.requesterId;
       const origin = asRecord(await api('GET', `/channels/${originChannelId}`));
       const link = originMessageId ? `https://discord.com/channels/${typeof origin.guild_id === 'string' ? origin.guild_id : '@me'}/${originChannelId}/${originMessageId}` : undefined;
       const card = asRecord(await api('POST', `/channels/${channelId}/messages`, { allowed_mentions: { parse: [] }, embeds: [{ color: 0x8FBC8F, author: { name: '📨 交接' }, title, description: content, fields: [{ name: '來自', value: `<#${originChannelId}>${link ? ` · [原訊息](${link})` : ''}`, inline: true }, ...(requesterId ? [{ name: '交辦', value: `<@${requesterId}>`, inline: true }] : [])], footer: { text: 'Butler session handoff' }, timestamp: new Date().toISOString() }] }));
@@ -261,14 +260,13 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       const thread = await checkRootOrChild(messageId!, true); if (String(thread.parent_id) !== channelId) throw new ToolUsageError('Thread does not belong to the specified root');
       if (name === 'delete_thread') { method='DELETE'; path=`/channels/${messageId}`; } else { method='PATCH'; path=`/channels/${messageId}`; body={archived:true}; }
     } else if (name === 'rename_post') {
-      const target = await checkRootOrChild(stringArg(args.threadId,'threadId'),true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new ToolUsageError('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
+      const target = await checkRootOrChild(args.threadId as string,true); const parent=asRecord(await api('GET',`/channels/${String(target.parent_id)}`)); if (![15,16].includes(Number(parent.type))) throw new ToolUsageError('Target thread is not a forum post'); method='PATCH';path=`/channels/${args.threadId}`;body={name:args.name};
     } else if (name === 'rename_forum') {
       const channel=await checkRootOrChild(channelId!); if (![15,16].includes(Number(channel.type))) throw new ToolUsageError('Target is not a forum/media channel'); method='PATCH';path=`/channels/${channelId}`;body={name:args.name};
     } else {
       const base=`/channels/${channelId}`;
       switch(name) {
         case 'send':method='POST';path=`${base}/messages`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:['users','roles']}};break;
-        case 'message':path=`${base}/messages/${messageId}`;break;
         case 'channel_messages':{const limit=args.limit===undefined?50:args.limit as number;const query=new URLSearchParams({limit:String(limit)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages?${query}`;break;}
         case 'pins':{if(args.before!==undefined&&!Number.isFinite(Date.parse(String(args.before))))throw new ToolUsageError('before must be an ISO8601 pinned_at timestamp');const query=new URLSearchParams({limit:String(args.limit??50)});if(args.before!==undefined)query.set('before',String(args.before));path=`${base}/messages/pins?${query}`;break;}
         case 'edit':method='PATCH';path=`${base}/messages/${messageId}`;body={content,flags:MessageFlags.SuppressEmbeds,allowed_mentions:{parse:[]}};break;
@@ -278,7 +276,6 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       }
     }
     const result=await api(method,path,body);
-    if(name==='message')return asRecord(result);
     if(name==='channel_messages'){if(!Array.isArray(result))throw new Error('Discord returned an invalid message page');const limit=args.limit===undefined?50:args.limit as number;return {messages:result,limit,before:args.before??null,next_before:result.length===limit?(asRecord(result.at(-1)).id??null):null,may_have_more:result.length===limit};}
     if(name==='pins'){const page=asRecord(result);if(!Array.isArray(page.items)||typeof page.has_more!=='boolean')throw new Error('Discord returned an invalid pin page');return {pins:page.items,has_more:page.has_more,next_before:page.has_more?(asRecord(page.items.at(-1)).pinned_at??null):null};}
     const record = isRecord(result) ? result : null;
@@ -300,6 +297,10 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
   } };
 }
 
+function memoryWriteAllowed(context: DiscordToolContext, channelId: string): boolean {
+  return context.store !== undefined && context.memoryOriginChannelId !== undefined && context.store.memoryWriteAllowed(context.memoryOriginChannelId) && context.store.memoryWriteAllowed(channelId);
+}
+
 function persistDeliveredMessage(context: DiscordToolContext, channelId: string, sent: Record<string, unknown>, content: string): void {
   const messageId = sent.id;
   const eventTime = sent.timestamp;
@@ -307,46 +308,13 @@ function persistDeliveredMessage(context: DiscordToolContext, channelId: string,
     throw new Error('Discord message response lacks a valid message ID or timestamp; delivery cannot be recorded');
   }
   if (!context.store || !context.sessionId) throw new Error('Discord message was delivered but cannot be recorded without its session store');
-  const message = context.store.createOutgoing(context.sessionId, content, { sourceKind: 'butler_tool_message', authorId: context.botId, authorName: context.botName, channelId, discordMessageId: messageId, eventTime }, context.memoryOriginChannelId !== undefined && context.store.memoryWriteAllowed(context.memoryOriginChannelId) && context.store.memoryWriteAllowed(channelId));
+  const message = context.store.createOutgoing(context.sessionId, content, { sourceKind: 'butler_tool_message', authorId: context.botId, authorName: context.botName, channelId, discordMessageId: messageId, eventTime }, memoryWriteAllowed(context, channelId));
   context.store.saveOutgoingSegment(message, { channelId, messageId, content, createdAt: eventTime });
   context.store.finalizeOutgoing(message.id, content);
   context.onMessageDelivered?.(channelId, context.sessionId);
 }
 
-function validateArgs(spec: ToolSpec,args:Record<string,unknown>):void {
-  for(const required of spec.required) if(!(required in args)) throw new ToolUsageError(`${required} is required`);
-  validateValue({type:'object',properties:spec.properties,required:spec.required,additionalProperties:false},args,'arguments');
-}
-function validateValue(rule:Record<string,unknown>,value:unknown,path:string):void {
-  if (Array.isArray(rule.type)) {
-    if (value === null && rule.type.includes('null')) return;
-    rule = { ...rule, type: rule.type.find(type => type !== 'null') };
-  }
-  if (rule.type === 'boolean') { if (typeof value !== 'boolean') throw new ToolUsageError(`${path} is invalid`); return; }
-  if(rule.type==='string') {
-    if(typeof value!=='string'||value.length<Number(rule.minLength??0)||value.length>Number(rule.maxLength??Infinity)||(rule.pattern&&!new RegExp(String(rule.pattern)).test(value))||(Array.isArray(rule.enum)&&!rule.enum.includes(value))) throw new ToolUsageError(`${path} is invalid`);
-    return;
-  }
-  if(rule.type==='integer') { if(!Number.isSafeInteger(value)||Number(value)<Number(rule.minimum??-Infinity)||Number(value)>Number(rule.maximum??Infinity)) throw new ToolUsageError(`${path} is invalid`); return; }
-  if(rule.type==='array') {
-    if(!Array.isArray(value)||value.length<Number(rule.minItems??0)||value.length>Number(rule.maxItems??Infinity)||(rule.uniqueItems===true&&new Set(value).size!==value.length)) throw new ToolUsageError(`${path} is invalid`);
-    for(let index=0;index<value.length;index++) validateValue(rule.items as Record<string,unknown>,value[index],`${path}[${index}]`);
-    return;
-  }
-  if(rule.type==='object') {
-    if(!isRecord(value)) throw new ToolUsageError(`${path} is invalid`);
-    const properties=isRecord(rule.properties)?rule.properties:{};
-    if(Array.isArray(rule.required)) for(const key of rule.required) if(typeof key==='string'&&!(key in value)) throw new ToolUsageError(`${path}.${key} is required`);
-    for(const [key,item] of Object.entries(value)) {
-      const child=properties[key];
-      if(!child) { if(rule.additionalProperties!==true) throw new ToolUsageError(`Unexpected argument: ${path}.${key}`); continue; }
-      validateValue(child as Record<string,unknown>,item,`${path}.${key}`);
-    }
-  }
-}
-function stringArg(value:unknown,name:string):string{if(typeof value!=='string'||!value.length)throw new ToolUsageError(`${name} is invalid`);return value;}
 function asRecord(value:unknown):Record<string,unknown>{if(!isRecord(value))throw new Error('Discord returned an invalid object');return value;}
-function isRecord(value:unknown):value is Record<string,unknown>{return typeof value==='object'&&value!==null&&!Array.isArray(value);}
 
 function withoutAuthorClassification(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(withoutAuthorClassification);

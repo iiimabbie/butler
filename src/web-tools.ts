@@ -1,6 +1,6 @@
 import { createTavilyToolRuntime, prepareWebRequest, webDefinitions } from './web-tavily.js';
 import { ToolUsageError, WebFetchExtractionError, WebPoolError, WebProviderError } from './tool-errors.js';
-import { readResponseBytes } from './response-body.js';
+import { readJsonResponse } from './response-body.js';
 import { assertPublicWebUrl, withWebSignal } from './web-url.js';
 import { logInfo, logWarn } from './log.js';
 export { webDefinitions } from './web-tavily.js';
@@ -14,7 +14,7 @@ export type WebConfig = {
   firecrawl?: ProviderConfig;
   anysearch?: ProviderConfig;
 };
-export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, args: Record<string, unknown>, options?: { signal?: AbortSignal }): Promise<unknown> };
+export type WebToolRuntime = { definitions: typeof webDefinitions; execute(name: string, args: Record<string, unknown>): Promise<unknown> };
 type Kind = 'timeout' | 'network' | 'rate_limit' | 'upstream' | 'parse' | 'auth' | 'quota' | 'endpoint' | 'invalid_request' | 'source_unreadable' | 'encoding_suspect' | 'not_found' | 'empty' | 'cancelled' | 'budget' | 'cooldown' | 'unsupported' | 'unconfigured';
 type Attempt = { provider: Provider; outcome: string; duration_ms: number; credit_usage?: string; estimated_credits?: number; actual_credits?: number };
 class ProviderError extends WebProviderError { declare readonly kind: Kind; constructor(kind: Kind) { super(kind); } }
@@ -24,8 +24,8 @@ const technical = new Set<Kind>([...transient, 'auth','quota','endpoint']);
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
 const number = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 
-export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetch; reserveRequest: (provider: Provider, limit: number) => boolean }): WebToolRuntime {
-  const fetcher = config.fetcher ?? fetch;
+export function createWebToolRuntime(config: WebConfig & { reserveRequest: (provider: Provider, limit: number) => boolean }): WebToolRuntime {
+  const fetcher = fetch;
   const tavilyKey = config.tavily?.enabled === true ? config.tavily.apiKey?.trim() : undefined;
   const fireKey = config.firecrawl?.enabled === true ? config.firecrawl.apiKey?.trim() : undefined;
   const anyKey = config.anysearch?.enabled === true ? config.anysearch.apiKey?.trim() : undefined;
@@ -34,7 +34,7 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
   const providerKey = (provider: Provider) => keys[provider];
   const providerConfig = (provider: Provider) => config[provider];
   const providerBase = (provider: Provider) => providerConfig(provider)?.baseUrl ?? (provider === 'tavily' ? 'https://api.tavily.com' : provider === 'firecrawl' ? 'https://api.firecrawl.dev/v2' : 'https://api.anysearch.com/v1');
-  const redact = (text: string) => [config.tavily?.apiKey, config.firecrawl?.apiKey, config.anysearch?.apiKey].reduce<string>((value, key) => key ? value.replaceAll(key, '[redacted]') : value, text);
+  const redact = (text: string) => [config.tavily?.apiKey?.trim(), config.firecrawl?.apiKey?.trim(), config.anysearch?.apiKey?.trim()].reduce<string>((value, key) => key ? value.replaceAll(key, '[redacted]') : value, text);
   const reserve = (provider: Provider) => {
     const limit = providerConfig(provider)?.dailyRequestLimit ?? 0;
     if (!config.reserveRequest(provider, limit)) throw new ProviderError('budget');
@@ -48,18 +48,17 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
   const tavily = (signal?: AbortSignal, transport = fetcher, onUsage?: (credits: number) => void) => createTavilyToolRuntime({ baseUrl: config.tavily?.baseUrl, apiKey: tavilyKey, fetcher: transport, signal, onUsage });
   return {
     definitions: webDefinitions.filter(tool => tool.name === 'web_search' || tool.name === 'web_fetch' ? Boolean(tavilyKey || fireKey || anyKey) : Boolean(tavilyKey)),
-    async execute(name, args, options = {}) {
+    async execute(name, args) {
       const prepared = prepareWebRequest(name, args); // Invalid arguments stop before DNS, budget or providers.
       const pooled = name === 'web_search' || name === 'web_fetch' || (name === 'web_extract' && (prepared.body!.urls as string[]).length === 1 && !args.query && (args.extract_depth ?? 'basic') === 'basic' && (args.format ?? 'markdown') === 'markdown');
       const operation: Operation = name === 'web_search' ? 'search' : 'fetch';
       const totalMs = operation === 'search' ? config.pool?.searchTimeoutMs ?? 30_000 : config.pool?.fetchTimeoutMs ?? 45_000;
       const started = Date.now();
-      const total = AbortSignal.timeout(pooled ? totalMs : 35_000);
-      const signal = options.signal ? AbortSignal.any([options.signal, total]) : total;
+      const signal = AbortSignal.timeout(pooled ? totalMs : 35_000);
       const urls = prepared.endpoint === 'extract' ? prepared.body!.urls as string[] : [];
       for (const url of urls) {
         try { await assertPublicWebUrl(url, signal); }
-        catch (error) { if (error instanceof ToolUsageError) throw error; throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'URL validation failed or timed out', false); }
+        catch (error) { if (error instanceof ToolUsageError) throw error; throw new WebPoolError('URL validation failed or timed out', false); }
       }
       if (!pooled) {
         if (!tavilyKey) throw new ToolUsageError('This web operation requires enabled Tavily configuration');
@@ -69,14 +68,14 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
           if (healthFor('tavily', 'fetch').disabled) throw new WebPoolError('Tavily is disabled after a credential/account failure', false);
           try { reserve('tavily'); } catch { throw new WebPoolError('Tavily daily request budget', false); }
         }
-        const result = await withWebSignal(tavily(signal).execute(name, args), signal);
-        return record(result) ? redactObject(result, redact) : result;
+        const result = await withWebSignal(tavily(signal).execute(name, prepared), signal);
+        return record(result) ? boundPoolOutput(redactObject(result, redact)) : result;
       }
       const attempts: Attempt[] = [];
       const order = operation === 'search' ? config.pool?.searchOrder ?? ['tavily','anysearch','firecrawl'] : config.pool?.fetchOrder ?? ['tavily','anysearch','firecrawl'];
       let count = 0, empty: Record<string, unknown> | undefined, partial: Record<string, unknown> | undefined;
       for (const provider of [...new Set(order)]) {
-        if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+        if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError('deadline', false);
         if (count >= (config.pool?.maxAttempts ?? 3)) break;
         const skip = (kind: Kind) => attempts.push({ provider, outcome: kind, duration_ms: 0 });
         if (!providerKey(provider)) { skip('unconfigured'); continue; }
@@ -96,7 +95,7 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
         const transport: typeof fetch = async (input, init) => {
           let response: Response;
           try { response = await withWebSignal(fetcher(input, { ...init, signal: attemptSignal }), attemptSignal); }
-          catch { throw new ProviderError(options.signal?.aborted ? 'cancelled' : attemptSignal.aborted ? 'timeout' : 'network'); }
+          catch { throw new ProviderError(attemptSignal.aborted ? 'timeout' : 'network'); }
           if (!response.ok) {
             await response.body?.cancel().catch(() => {});
             throw new ProviderError(response.status === 401 || response.status === 403 ? 'auth' : response.status === 402 || response.status === 432 ? 'quota' : response.status === 404 || response.status === 410 ? 'endpoint' : response.status === 422 ? 'source_unreadable' : response.status === 429 ? 'rate_limit' : response.status >= 500 ? 'upstream' : 'invalid_request');
@@ -107,14 +106,14 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
         try {
           let result: unknown;
           if (provider === 'tavily') {
-            result = await withWebSignal(tavily(attemptSignal, transport, credits => { actualCredits = credits; }).execute(name, args), attemptSignal);
+            result = await withWebSignal(tavily(attemptSignal, transport, credits => { actualCredits = credits; }).execute(name, prepared), attemptSignal);
           } else if (provider === 'anysearch') {
             result = await anysearch(operation, prepared.body!, providerBase(provider), anyKey!, transport, attemptSignal);
           } else {
             const response = await firecrawl(operation, prepared.body!, providerBase(provider), fireKey!, transport, attemptSignal);
             actualCredits = response.actualCredits; result = response.result;
           }
-          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError('deadline', false);
           if (!record(result)) throw new ProviderError('parse');
           if (operation === 'fetch' && provider !== 'tavily' && name === 'web_extract') result = { result_count: 1, failed_count: 0, results: [result], failed_results: [], truncated: Boolean(result.truncated) };
           if (!record(result)) throw new ProviderError('parse');
@@ -139,7 +138,7 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
           if (attempts.some(item => technical.has(item.outcome as Kind) || ['source_unreadable','encoding_suspect','partial'].includes(item.outcome))) logWarn('Web pool fallback succeeded', undefined, { operation, provider, attempts: attempts.length });
           return boundPoolOutput(decorate(redactObject(result, redact), provider, attempts, operation));
         } catch (error) {
-          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+          if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError('deadline', false);
           const kind = classify(error, attemptSignal);
           if (attempts.at(-1)?.provider !== provider || !['not_found'].includes(attempts.at(-1)!.outcome)) {
             const entry: Attempt = { provider, outcome: kind, duration_ms: Date.now() - at, ...(estimate !== undefined ? { estimated_credits: estimate } : {}), credit_usage: actualCredits !== undefined ? 'reported' : estimate !== undefined ? 'estimated' : 'unknown', ...(actualCredits !== undefined ? { actual_credits: actualCredits } : {}) };
@@ -157,7 +156,7 @@ export function createWebToolRuntime(config: WebConfig & { fetcher?: typeof fetc
           }
         } finally { health.probe = false; }
       }
-      if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError(options.signal?.aborted ? 'cancelled' : 'deadline', false);
+      if (signal.aborted || Date.now() - started >= totalMs) throw new WebPoolError('deadline', false);
       if (partial) return boundPoolOutput({ ...partial, attempts });
       if (empty) return boundPoolOutput({ ...empty, attempts });
       const failed = attempts.some(item => technical.has(item.outcome as Kind));
@@ -173,9 +172,8 @@ function supportsAnySearch(operation: Operation, body: Record<string, unknown>):
 async function anysearch(operation: Operation, body: Record<string, unknown>, base: string, key: string, transport: typeof fetch, signal: AbortSignal): Promise<Record<string, unknown>> {
   const payload = operation === 'search' ? { query: body.query, max_results: body.max_results, format: 'json' } : { url: (body.urls as string[])[0] };
   const response = await transport(`${base.replace(/\/+$/, '')}/${operation === 'search' ? 'search' : 'extract'}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(payload), signal, redirect: 'error' });
-  if (Number(response.headers.get('content-length')) > 5 * 1024 * 1024) { await response.body?.cancel().catch(() => {}); throw new ProviderError('parse'); }
   let data: unknown;
-  try { data = JSON.parse((await withWebSignal(readResponseBytes(response, 5 * 1024 * 1024, signal), signal)).toString('utf8')); }
+  try { data = await withWebSignal(readJsonResponse(response, 5 * 1024 * 1024, signal), signal); }
   catch { throw new ProviderError(signal.aborted ? 'timeout' : 'parse'); }
   // Never log message: 402 responses may contain generated account credentials.
   if (!record(data) || data.code !== 0 || !record(data.data)) throw new ProviderError('parse');
@@ -202,9 +200,8 @@ async function firecrawl(operation: Operation, body: Record<string, unknown>, ba
   const payload = operation === 'search' ? { query: body.query, limit: body.max_results, sources: ['web'], highlights: false, ...(Array.isArray(body.include_domains) && body.include_domains.length ? { includeDomains: body.include_domains } : {}), ...(Array.isArray(body.exclude_domains) && body.exclude_domains.length ? { excludeDomains: body.exclude_domains } : {}), timeout: 15_000 }
     : { url: (body.urls as string[])[0], formats: ['markdown'], onlyMainContent: true, onlyCleanContent: false, proxy: 'basic', parsers: [], skipTlsVerification: false, timeout: 15_000, storeInCache: false };
   const response = await transport(`${base.replace(/\/+$/, '')}/${operation === 'search' ? 'search' : 'scrape'}`, { method: 'POST', headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' }, body: JSON.stringify(payload), signal, redirect: 'error' });
-  if (Number(response.headers.get('content-length')) > 5 * 1024 * 1024) { await response.body?.cancel().catch(() => {}); throw new ProviderError('parse'); }
   let data: unknown;
-  try { data = JSON.parse((await withWebSignal(readResponseBytes(response, 5 * 1024 * 1024, signal), signal)).toString('utf8')); }
+  try { data = await withWebSignal(readJsonResponse(response, 5 * 1024 * 1024, signal), signal); }
   catch { throw new ProviderError(signal.aborted ? 'timeout' : 'parse'); }
   if (!record(data)) throw new ProviderError('parse');
   if (data.success !== true) throw new ProviderError(data.code === 'insufficient_credits' ? 'quota' : 'parse');
@@ -238,12 +235,6 @@ function classify(error: unknown, signal: AbortSignal): Kind {
   if (error instanceof WebProviderError) return error.kind as Kind;
   if (signal.aborted) return 'timeout';
   if (error instanceof WebFetchExtractionError) return 'source_unreadable';
-  // Legacy adapter deliberately strips response bodies and underlying error messages.
-  const message = error instanceof Error ? error.message : '';
-  const status = /HTTP (\d+)/.exec(message)?.[1];
-  if (status) return ['401','403'].includes(status) ? 'auth' : ['402','432'].includes(status) ? 'quota' : ['404','410'].includes(status) ? 'endpoint' : status === '429' ? 'rate_limit' : Number(status) >= 500 ? 'upstream' : 'invalid_request';
-  if (message.includes('timed out')) return 'timeout';
-  if (message.includes('request failed')) return 'network';
   return 'parse';
 }
 function assess(result: Record<string, unknown>, operation: Operation): 'success' | 'partial' | 'empty' | 'source_unreadable' | 'encoding_suspect' | 'not_found' {
@@ -281,16 +272,14 @@ function boundPoolOutput(result: Record<string, unknown>): Record<string, unknow
   const pages = (Array.isArray(result.results) ? result.results : [result]).filter(record);
   if (size() <= limit) return result;
   result.truncated = true;
-  for (const page of pages) {
-    if (typeof page.content !== 'string') continue;
-    const original = page.content;
-    page.content = ''; page.truncated = true;
-    if ('status' in page) page.status = 'partial';
+  const originals = new Map(pages.filter(page => typeof page.content === 'string').map(page => [page, page.content as string]));
+  for (const page of originals.keys()) { page.content = ''; page.truncated = true; if ('status' in page) page.status = 'partial'; }
+  for (const [page, original] of originals) {
     let low = 0, high = original.length;
     while (low < high) { const mid = Math.ceil((low + high) / 2); page.content = original.slice(0,mid); if (size() <= limit) low = mid; else high = mid - 1; }
     if (low > 0 && /[\uD800-\uDBFF]/.test(original[low - 1]!)) low--;
     page.content = original.slice(0,low);
-    if (size() <= limit) break;
+    page.truncated = low < original.length;
   }
   if (size() > limit) throw new ProviderError('parse');
   if ('status' in result) result.status = 'partial';
