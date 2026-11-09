@@ -11,14 +11,15 @@ const count = (max: number, fallback: number) => ({ type: 'integer', minimum: 1,
 const account = { type: 'string', description: 'Account email; omit to use the default account. Use google_accounts_list to list accounts.' };
 const messageIds = { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 100, uniqueItems: true };
 const recipients = { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Email addresses without display names.' };
+const replyToMessageId = { type: 'string', description: 'Gmail message ID to reply to in the same thread. For replies, subject is usually Re: followed by the original subject.' };
 const schemas: Record<string, { description: string; properties: Record<string, unknown>; required: string[] }> = {
   google_accounts_list: { description: 'List Google accounts, default status, connection status and gmail.modify permission.', properties: {}, required: [] },
   gmail_trash: { description: 'Move messages to Trash, not permanent deletion. Gmail automatically permanently deletes them after 30 days. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
   gmail_untrash: { description: 'Restore messages from Trash. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_ids: messageIds, account }, required: ['message_ids'] },
   google_gmail_search: { description: 'Search Gmail and return message metadata. Omit account to use the default; use google_accounts_list to list accounts.', properties: { query: str, max_results: count(100, 10), page_token: str, account }, required: ['query'] },
   google_gmail_read: { description: 'Read plain text when available, otherwise raw HTML, plus attachment metadata; attachments are not downloaded. Omit account to use the default; use google_accounts_list to list accounts.', properties: { message_id: str, account }, required: ['message_id'] },
-  gmail_send: { description: 'Send an email to multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
-  gmail_draft: { description: 'Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account }, required: ['to', 'subject', 'body'] },
+  gmail_send: { description: 'Send an email to multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
+  gmail_draft: { description: 'Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature. Omit account to use the default; use google_accounts_list to list accounts.', properties: { to: recipients, cc: recipients, bcc: recipients, subject: str, body: str, account, reply_to_message_id: replyToMessageId }, required: ['to', 'subject', 'body'] },
   google_calendar_list_events: { description: 'List calendar events; defaults to the primary calendar, start=now, and end=start+7 days. Timed values need timezone offsets.', properties: { calendar_id: str, start: str, end: str, max_results: count(250, 20), page_token: str }, required: [] },
   calendar_create: { description: 'Create a calendar event. Set all_day=true for YYYY-MM-DD dates; end is the day after the last included day. Timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, calendar_id: str, recurrence: { type: 'array', items: { type: 'string' } }, time_zone: str }, required: ['summary', 'start', 'end'] },
   calendar_update: { description: 'Update supplied event fields only. Omit all_day to preserve the event type; setting it requires both start and end. All-day dates use YYYY-MM-DD with end one day after the last included day; timed values use RFC3339 with timezone offsets. Defaults to the primary calendar.', properties: { event_id: str, calendar_id: str, summary: str, start: str, end: str, all_day: { type: 'boolean' }, description: str, location: str, recurrence: { type: 'array', items: { type: 'string' } }, time_zone: str }, required: ['event_id'] },
@@ -40,7 +41,7 @@ const googleGroups: Record<string, Record<string, string>> = {
   google_tasks_manage: { create: 'tasks_create', update: 'tasks_update', complete: 'tasks_complete', delete: 'tasks_delete' },
 };
 const googleGroupDescriptions: Record<string, string> = {
-  google_gmail_manage: `Manage Gmail messages.\nsend — Send an email to multiple recipients, automatically appending the account’s Gmail signature; required to, subject, body; optional cc, bcc.\ncreate_draft — Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature; required to, subject, body; optional cc, bcc.\ntrash — Move messages to Trash, not permanent deletion; Gmail permanently deletes them after 30 days; required message_ids.\nuntrash — Restore messages from Trash; required message_ids.`,
+  google_gmail_manage: `Manage Gmail messages.\nsend — Send an email to multiple recipients, automatically appending the account’s Gmail signature; required to, subject, body; optional cc, bcc, reply_to_message_id.\ncreate_draft — Create an unsent email draft for multiple recipients, automatically appending the account’s Gmail signature; required to, subject, body; optional cc, bcc, reply_to_message_id.\nFor replies, subject is usually Re: followed by the original subject.\ntrash — Move messages to Trash, not permanent deletion; Gmail permanently deletes them after 30 days; required message_ids.\nuntrash — Restore messages from Trash; required message_ids.`,
   google_calendar_manage: `Create, update or delete calendar events.\ncreate — Create an event; required summary, start, end; all_day uses YYYY-MM-DD with exclusive end, timed values need RFC3339 offsets; optional recurrence as RFC 5545 lines (e.g. RRULE:FREQ=YEARLY), timed recurring events also need time_zone (IANA); defaults to primary calendar.\nupdate — Update supplied event fields only; required event_id; omit all_day to preserve type, setting it requires start and end; recurrence=[] removes repetition; defaults to primary calendar.\ndelete — Delete an event; required event_id; defaults to primary calendar.`,
   google_tasks_read: `Read Google Tasks lists and tasks.\nlists — List task lists, not their tasks; returns names and IDs; optional page_token.\nlist — List tasks; defaults to @default and excludes completed tasks; optional task_list_id, show_completed, max_results, page_token.`,
   google_tasks_manage: `Manage Google Tasks.\ncreate — Create a task; required title; optional notes and task_list_id (list IDs come from google_tasks_read action=lists); defaults to @default.\nupdate — Update supplied task fields; required task_id; empty notes clears notes; defaults to @default.\ncomplete — Mark a task completed; required task_id; defaults to @default.\ndelete — Delete a task; required task_id; defaults to @default.`,
@@ -101,14 +102,25 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
     const to = parseRecipients('to', a.to);
     const cc = a.cc === undefined ? [] : parseRecipients('cc', a.cc);
     const bcc = a.bcc === undefined ? [] : parseRecipients('bcc', a.bcc);
+    let reply: { messageId: string; references: string; threadId: string } | undefined;
+    if (a.reply_to_message_id !== undefined) {
+      const original = await c.request(`/gmail/v1/users/me/messages/${encodeURIComponent(s('reply_to_message_id'))}`, { account: gmailAccount, query: { format: 'metadata' } });
+      const originalHeaders = headers(original.payload?.headers);
+      const messageId = originalHeaders['message-id'];
+      const references = originalHeaders.references ?? '';
+      if (!messageId || !original.threadId) throw new Error('Original message must have a Message-ID and threadId to reply');
+      if (/[\r\n\x00]/.test(messageId) || /[\r\n\x00]/.test(references)) throw new Error('Original Message-ID and References cannot contain CR, LF or NUL');
+      reply = { messageId, references, threadId: original.threadId };
+    }
     let sendAs;
     try { sendAs = await c.request('/gmail/v1/users/me/settings/sendAs', { account: gmailAccount }); }
     catch { /* A signature lookup failure must not prevent sending or drafting. */ }
     const entries = sendAs?.sendAs as { isDefault?: boolean; isPrimary?: boolean; signature?: string }[] | undefined;
     const signature = (entries?.find(entry => entry.isDefault) ?? entries?.find(entry => entry.isPrimary))?.signature;
-    const raw = Buffer.from(makeMime(to, cc, bcc, s('subject'), s('body'), signature), 'utf8').toString('base64url');
+    const raw = Buffer.from(makeMime(to, cc, bcc, s('subject'), s('body'), signature, reply), 'utf8').toString('base64url');
     const draft = n === 'gmail_draft';
-    return c.request(draft ? '/gmail/v1/users/me/drafts' : '/gmail/v1/users/me/messages/send', { account: gmailAccount, method: 'POST', body: draft ? { message: { raw } } : { raw } });
+    const message = reply ? { raw, threadId: reply.threadId } : { raw };
+    return c.request(draft ? '/gmail/v1/users/me/drafts' : '/gmail/v1/users/me/messages/send', { account: gmailAccount, method: 'POST', body: draft ? { message } : message });
   }
   if (n === 'google_calendar_list_events') {
     const start = s('start', new Date().toISOString());
@@ -305,14 +317,14 @@ function parseRecipients(field: string, value: unknown): string[] {
   }
   return addresses;
 }
-function makeMime(to: string[], cc: string[], bcc: string[], subject: string, body: string, signature?: string): string {
+function makeMime(to: string[], cc: string[], bcc: string[], subject: string, body: string, signature?: string, reply?: { messageId: string; references: string }): string {
   if (/[\r\n\x00]/.test(subject)) throw new ToolUsageError('Subject cannot contain CR, LF or NUL');
   const encode = (text: string) => Buffer.from(text, 'utf8').toString('base64').match(/.{1,76}/g)?.join('\r\n') ?? '';
   const subjectWords = [];
   let chunk = '';
   for (const char of subject) { if (Buffer.byteLength(chunk + char) > 42) { subjectWords.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`); chunk = ''; } chunk += char; }
   if (chunk) subjectWords.push(`=?UTF-8?B?${Buffer.from(chunk).toString('base64')}?=`);
-  const header = `To: ${to.join(', ')}\r\n${cc.length ? `Cc: ${cc.join(', ')}\r\n` : ''}${bcc.length ? `Bcc: ${bcc.join(', ')}\r\n` : ''}Subject: ${subjectWords.join('\r\n ')}\r\nMIME-Version: 1.0\r\n`;
+  const header = `To: ${to.join(', ')}\r\n${cc.length ? `Cc: ${cc.join(', ')}\r\n` : ''}${bcc.length ? `Bcc: ${bcc.join(', ')}\r\n` : ''}Subject: ${subjectWords.join('\r\n ')}\r\n${reply ? `In-Reply-To: ${reply.messageId}\r\nReferences: ${reply.references ? `${reply.references} ` : ''}${reply.messageId}\r\n` : ''}MIME-Version: 1.0\r\n`;
   if (!signature) return `${header}Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${encode(body)}`;
   const plainSignature = decodeHTML(signature.replace(/<br\s*\/?>|<\/(?:div|p)\s*>/gi, '\n').replace(/<[^>]*>/g, ''))
     .replace(/\n[ \t\u00a0]*\n(?:[ \t\u00a0]*\n)+/g, '\n\n').trim();
