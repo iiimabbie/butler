@@ -222,6 +222,7 @@ export async function ask(store: Store, session: string, prompt: string, config:
       let items: unknown[];
       if (!inputMessage.attachments.length) items = [{ role: inputMessage.role, content: formatStoredMessageText(inputMessage) }];
       else {
+        // Attachments stay native until compaction removes the message; downgrading earlier history would rewrite the cached prefix.
         const content = await messageAttachmentContent(inputMessage, config.attachmentDir ?? '', config.model, config.transcription);
         if (inputMessage.role !== 'assistant') items = [{ role: inputMessage.role, content }];
         else {
