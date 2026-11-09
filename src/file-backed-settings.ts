@@ -254,7 +254,13 @@ export class FileBackedSettings {
       if (existsSync(temp)) unlinkSync(temp);
       throw error;
     }
-    this.accept(next, { ...this.bytes!, [key]: Buffer.from(content) }, true);
+    try { this.accept(next, { ...this.bytes!, [key]: Buffer.from(content) }, true); }
+    catch (error) {
+      // Apply rolled back; restore the previous file so disk matches memory and the database.
+      writeFileSync(temp, this.bytes![key], { mode: 0o600, flag: 'wx' });
+      renameSync(temp, this.paths[key]);
+      throw error;
+    }
   }
 
   private scheduleDocument(jobs: ScheduleDefinition[]): string {
