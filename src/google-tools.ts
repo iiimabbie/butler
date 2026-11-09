@@ -108,15 +108,12 @@ async function execute(c: GoogleClient, n: string, a: Record<string, unknown>, a
       const originalHeaders = headers(original.payload?.headers);
       const messageId = originalHeaders['message-id'];
       const references = originalHeaders.references ?? '';
-      if (!messageId || !original.threadId) throw new Error('Original message must have a Message-ID and threadId to reply');
+      if (!messageId) throw new Error('Original message has no Message-ID to reply to');
       if (/[\r\n\x00]/.test(messageId) || /[\r\n\x00]/.test(references)) throw new Error('Original Message-ID and References cannot contain CR, LF or NUL');
       reply = { messageId, references, threadId: original.threadId };
     }
-    let sendAs;
-    try { sendAs = await c.request('/gmail/v1/users/me/settings/sendAs', { account: gmailAccount }); }
-    catch { /* A signature lookup failure must not prevent sending or drafting. */ }
-    const entries = sendAs?.sendAs as { isDefault?: boolean; isPrimary?: boolean; signature?: string }[] | undefined;
-    const signature = (entries?.find(entry => entry.isDefault) ?? entries?.find(entry => entry.isPrimary))?.signature;
+    const sendAs = await c.request('/gmail/v1/users/me/settings/sendAs', { account: gmailAccount });
+    const signature = (sendAs.sendAs as { isDefault?: boolean; signature?: string }[]).find(entry => entry.isDefault)?.signature;
     const raw = Buffer.from(makeMime(to, cc, bcc, s('subject'), s('body'), signature, reply), 'utf8').toString('base64url');
     const draft = n === 'gmail_draft';
     const message = reply ? { raw, threadId: reply.threadId } : { raw };
