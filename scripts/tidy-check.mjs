@@ -71,8 +71,9 @@ for (const dir of ['skills-trash', 'memory-curation']) {
 }
 const work = path.join(root, 'workspace/memory-curation/work');
 if (existsSync(work)) for (const name of readdirSync(work)) {
-  const day = /^(?:monthly-)?(\d{4}-\d{2}-\d{2})/.exec(name)?.[1];
-  if (!day) report('curation-work', `workspace/memory-curation/work/${name} has no date prefix (one-off file?)`);
+  // Only the files the hindsight-curation scripts and procedure define; anything else is a one-off.
+  const day = /^(?:monthly-(\d{4}-\d{2}-\d{2})-\w+\.json|(\d{4}-\d{2}-\d{2})-\w+(?:\.recalled|\.review)?\.json|(\d{4}-\d{2}-\d{2})-\w+\.changes\.jsonl)$/.exec(name)?.slice(1).find(Boolean);
+  if (!day) report('curation-work', `workspace/memory-curation/work/${name} is not a curation work file (one-off file?)`);
   else if (Date.now() - Date.parse(day) > (CURATION_WORK_DAYS + 1) * DAY) report('retention', `workspace/memory-curation/work/${name} is older than ${CURATION_WORK_DAYS} days`);
 }
 
