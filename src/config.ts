@@ -14,6 +14,7 @@ export type GoogleClientConfig = { clientId: string; clientSecret: string };
 export type NotificationConfig = { host: string; port: number; bearerToken: string };
 export type ButlerConfig = {
   notifications?: NotificationConfig;
+  mail?: { accounts: Array<{ email: string; delaySeconds?: number }> };
   discord?: { token?: string; ownerId?: string; errorWebhookUrl?: string; errorWebhookMentionUserId?: string; errorWebhookThreadId?: string; errorWebhookModel?: string; notificationChannelId?: string; notificationModel?: string };
   llm?: { baseUrl?: string; apiKey?: string; model?: string; maxContextTokens?: number; modelContextTokens?: Record<string, number>; requestTimeoutMs?: number };
   web?: WebConfig;
@@ -50,7 +51,7 @@ export function readConfig(path = CONFIG_PATH): ButlerConfig {
 function validateConfig(raw: unknown): ButlerConfig {
   if (!isRecord(raw)) throw new Error('Butler config must be an object');
   const config: ButlerConfig = {};
-  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent', 'notifications'] as const) {
+  for (const name of ['discord', 'llm', 'web', 'hledger', 'ui', 'google', 'memory', 'image', 'transcription', 'schedule', 'subagent', 'notifications', 'mail'] as const) {
     if (raw[name] === undefined) continue;
     const section = name === 'subagent' && raw[name] === null ? {} : raw[name];
     if (!isRecord(section)) throw new Error(`Butler config ${name} must be an object`);
@@ -144,6 +145,16 @@ function validateConfig(raw: unknown): ButlerConfig {
       const toolsEnabled = section.toolsEnabled;
       if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
       config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
+    } else if (name === 'mail') {
+      if (!Array.isArray(section.accounts)) throw new Error('Butler config mail.accounts must be an array');
+      const accounts = section.accounts.map((account: unknown) => {
+        if (!isRecord(account) || typeof account.email !== 'string' || !account.email.trim()) throw new Error('Butler config mail.accounts email must be a nonempty string');
+        const delay = account.delaySeconds === undefined ? 0 : account.delaySeconds;
+        if (!Number.isInteger(delay) || Number(delay) < 0 || Number(delay) > 3600) throw new Error('Butler config mail.accounts delaySeconds must be an integer from 0 to 3600');
+        return { email: account.email.trim(), delaySeconds: delay as number };
+      });
+      if (new Set(accounts.map(account => account.email.toLowerCase())).size !== accounts.length) throw new Error('Butler config mail.accounts must contain unique emails');
+      config.mail = { accounts };
     } else if (name === 'notifications') {
       const host = requireSetting(string('host'), 'notifications.host');
       const port = section.port;
@@ -161,7 +172,7 @@ function validateConfig(raw: unknown): ButlerConfig {
       config.ui = { port, publicOrigin, cookiePath };
     }
   }
-  if (config.notifications && !config.discord?.notificationChannelId) throw new Error('Butler config discord.notificationChannelId is required when notifications is configured');
+  if ((config.notifications || config.mail?.accounts.length) && !config.discord?.notificationChannelId) throw new Error('Butler config discord.notificationChannelId is required when notifications or mail is configured');
   return config;
 }
 
@@ -180,7 +191,7 @@ function validateHttpUrl(value: string, field: string): URL {
 
 
 const coldPaths = [
-  'discord.token', 'discord.ownerId', 'discord.notificationChannelId', 'ui', 'google', 'notifications',
+  'discord.token', 'discord.ownerId', 'discord.notificationChannelId', 'ui', 'google', 'notifications', 'mail',
   'memory.enabled', 'memory.baseUrl', 'memory.bankId',
 ] as const;
 function valueAt(config: ButlerConfig, path: string): unknown {
