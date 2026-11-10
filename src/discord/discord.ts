@@ -1006,7 +1006,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     },
   });
   store.setExternalChannelStopHooks({ canStop: id => handler.canStopChannel(id), archive: id => { store.archiveChannelSession(id); } });
-  let closed = false;
   let discordReady = false;
   let notificationTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleNotificationBatch = () => {
@@ -1027,7 +1026,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   };
   client.on('guildCreate', guild => { if (discordReady) void syncGuildCommands([guild.id], 'guild_join').catch(error => reportCommandSyncFailure('guild_join', error)); });
   client.once('clientReady', readyClient => {
-    if (closed) return;
     discordReady = true;
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
     if (settings.notifications) scheduleNotificationBatch();
@@ -1069,6 +1067,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   });
   client.on('error', error => logError('Discord client error', error, { mention: !isHttp429(error) }));
 
+  let closed = false;
   let uiStartupFailed = false;
   let closeUi: (() => Promise<void>) | undefined;
   let closeNotifications: (() => Promise<void>) | undefined;
