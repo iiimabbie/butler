@@ -155,7 +155,7 @@ export class FileBackedSettings {
 
   current(): SettingsSnapshot {
     if (!this.snapshot) throw new Error('File-backed settings have not been initialized');
-    return structuredClone(this.snapshot);
+    return this.snapshot;
   }
 
   refresh(): void {
@@ -197,7 +197,7 @@ export class FileBackedSettings {
 
   upsertSchedule(job: ScheduleDefinition): void {
     this.refresh();
-    const snapshot = this.current();
+    const snapshot = structuredClone(this.current());
     const key = job.kind === 'cron' ? 'crons' : 'reminders';
     const other = job.kind === 'cron' ? snapshot.reminders : snapshot.crons;
     if (other.some(item => item.id === job.id)) throw new SettingsConflictError(`Schedule ID ${job.id} already exists`);
@@ -208,7 +208,7 @@ export class FileBackedSettings {
 
   patchSchedule(id: string, patch: Partial<ScheduleDefinition>): ScheduleDefinition | undefined {
     this.refresh();
-    const snapshot = this.current();
+    const snapshot = structuredClone(this.current());
     const job = [...snapshot.crons, ...snapshot.reminders].find(item => item.id === id);
     if (!job) return undefined;
     const key = job.kind === 'cron' ? 'crons' : 'reminders';
@@ -219,7 +219,7 @@ export class FileBackedSettings {
 
   deleteSchedule(id: string): ScheduleDefinition | undefined {
     this.refresh();
-    const snapshot = this.current();
+    const snapshot = structuredClone(this.current());
     const job = [...snapshot.crons, ...snapshot.reminders].find(item => item.id === id);
     if (!job) return undefined;
     const key = job.kind === 'cron' ? 'crons' : 'reminders';
@@ -230,7 +230,7 @@ export class FileBackedSettings {
 
   patchChannel(channelId: string, patch: Record<string, unknown>): void {
     this.refresh();
-    const snapshot = this.current();
+    const snapshot = structuredClone(this.current());
     if (!Object.hasOwn(snapshot.channels, channelId)) throw new SettingsConflictError(`Channel ${channelId} is not tracked`);
     const current = { ...snapshot.channels[channelId] };
     for (const [key, value] of Object.entries(patch)) {

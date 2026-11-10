@@ -43,7 +43,7 @@ export interface StoredMessage extends Message {
   id: string; sessionId: string; createdAt: string; source: MessageSource; attachments: MessageInputAttachment[]; preparationStatus: 'preparing' | 'ready'; discordSegments: DiscordSegment[];
 }
 export interface AddMessageResult { message: StoredMessage; created: boolean; }
-export interface MemoryBatch { operationId: string; payload: string; sourceMessageIds: string[]; documentId: string; sessionId: string; channelId: string; order: number; status: 'frozen' | 'submitting' | 'unknown' | 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'not_found' | 'needs_clarification' | 'suppressed'; pollAttempt: number; submitIntendedAt?: string; nextPollAt?: string; lastPollAt?: string; error?: string; }
+export interface MemoryBatch { operationId: string; payload: string; documentId: string; sessionId: string; channelId: string; order: number; status: 'frozen' | 'submitting' | 'unknown' | 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'not_found' | 'needs_clarification' | 'suppressed'; pollAttempt: number; submitIntendedAt?: string; nextPollAt?: string; lastPollAt?: string; error?: string; }
 
 export interface SessionOpeningContext { channelId: string; messageId: string; authorId: string; createdAt: string; content: string; attachments: Array<{ filename: string; mimeType: string }> }
 
@@ -77,7 +77,6 @@ export class Store implements SchedulerStore {
   private externalStopHooks?: { canStop: (channelId: string) => boolean };
   // Channel ID -> model override (undefined follows the default model).
   private fixedChannels = new Map<string, string | undefined>();
-  private closed = false;
 
   constructor(path: string, options: { settingsDirectory?: string; timezone?: string; fixedChannels?: FixedChannel[] } = {}) {
     const directory = dirname(path);
@@ -91,26 +90,22 @@ export class Store implements SchedulerStore {
     this.db.exec(`
       PRAGMA journal_mode=WAL;
       CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, created_at TEXT NOT NULL, last_model_request_at TEXT);
-      CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, author_id TEXT, author_name TEXT, is_bot INTEGER, webhook_id TEXT, source_kind TEXT, channel_id TEXT, discord_message_id TEXT, event_time TEXT, reply_to_message_id TEXT, reply_to_channel_id TEXT, forwarded_message_json TEXT, preparation TEXT NOT NULL CHECK(preparation IN ('preparing','ready')), memory_status TEXT CHECK(memory_status IN ('pending','suppressed','completed')), memory_error TEXT);
       CREATE TABLE IF NOT EXISTS message_input_attachments(message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, attachment_id TEXT NOT NULL, filename TEXT NOT NULL, mime_type TEXT NOT NULL, local_path TEXT, status TEXT NOT NULL CHECK(status IN ('ready','failed')), error TEXT, origin TEXT, memory_document_id TEXT, transcript TEXT, transcription_error TEXT, PRIMARY KEY(message_id,attachment_id));
       CREATE TABLE IF NOT EXISTS attachment_memory_jobs(message_id TEXT NOT NULL, attachment_id TEXT NOT NULL, document_id TEXT NOT NULL UNIQUE, state TEXT NOT NULL CHECK(state IN ('queued','submitting','converting','retaining','completed','failed','unknown','suppressed')), conversion_operation_id TEXT, retain_operation_id TEXT, attempted_at TEXT, next_poll_at TEXT, poll_attempt INTEGER NOT NULL DEFAULT 0, error TEXT, PRIMARY KEY(message_id,attachment_id));
-      CREATE TABLE IF NOT EXISTS message_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, author_id TEXT, channel_id TEXT, discord_message_id TEXT, event_time TEXT, reply_to_message_id TEXT, reply_to_channel_id TEXT, webhook_id TEXT, source_kind TEXT, author_name TEXT, forwarded_message_json TEXT, is_bot INTEGER);
-      CREATE TABLE IF NOT EXISTS hindsight_pending(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, status TEXT NOT NULL DEFAULT 'pending', updated_at TEXT NOT NULL, error TEXT);
       CREATE TABLE IF NOT EXISTS discord_outgoing_segments(id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE, channel_id TEXT NOT NULL, discord_message_id TEXT NOT NULL UNIQUE, content TEXT NOT NULL, created_at TEXT NOT NULL, reply_to_message_id TEXT, reply_to_channel_id TEXT);
-      CREATE TABLE IF NOT EXISTS message_preparation(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, status TEXT NOT NULL CHECK(status IN ('preparing','ready')), updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS memory_batches(operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, source_message_ids TEXT NOT NULL, document_id TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, batch_order INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('frozen','submitting','unknown','pending','processing','completed','failed','cancelled','not_found','needs_clarification','suppressed')), submit_intended_at TEXT, last_poll_at TEXT, next_poll_at TEXT, poll_attempt INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, UNIQUE(document_id,batch_order));
+      CREATE TABLE IF NOT EXISTS memory_batches(operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, document_id TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, batch_order INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('frozen','submitting','unknown','pending','processing','completed','failed','cancelled','not_found','needs_clarification','suppressed')), submit_intended_at TEXT, last_poll_at TEXT, next_poll_at TEXT, poll_attempt INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, UNIQUE(document_id,batch_order));
       CREATE TABLE IF NOT EXISTS memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id));
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
-      CREATE TABLE IF NOT EXISTS subagent_windows(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, thread_id TEXT, brief_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS subagent_runs(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagent_windows(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
+      CREATE TABLE IF NOT EXISTS subagents(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, thread_id TEXT, brief_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, run_id TEXT, status TEXT, snapshot_json TEXT);
+      CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagents(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, input_message_id TEXT REFERENCES messages(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','completed','unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL, channel_id TEXT);
       CREATE TABLE IF NOT EXISTS attachment_deliveries(tool_call_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS ask_context(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, items_json TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS model_requests(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ask_id TEXT, trace_id TEXT, turn INTEGER NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL, body_sha256 TEXT NOT NULL, finished_at TEXT, http_status INTEGER, usage_json TEXT, error_type TEXT);
+      CREATE TABLE IF NOT EXISTS model_requests(request_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, ask_id TEXT, trace_id TEXT, turn INTEGER NOT NULL, attempted_at TEXT NOT NULL, body_json TEXT NOT NULL, finished_at TEXT, http_status INTEGER, usage_json TEXT, error_type TEXT);
       CREATE INDEX IF NOT EXISTS model_requests_session_ask ON model_requests(session_id,ask_id,turn);
       CREATE TABLE IF NOT EXISTS schedule_runs(id TEXT PRIMARY KEY, job_id TEXT NOT NULL, scheduled_at TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('running','completed','failed','unknown')), claimed_at TEXT NOT NULL, finished_at TEXT, error TEXT, UNIQUE(job_id,scheduled_at));
       CREATE INDEX IF NOT EXISTS schedule_runs_status_idx ON schedule_runs(status);
@@ -121,10 +116,10 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS discord_presence(id INTEGER PRIMARY KEY CHECK(id=1), status TEXT NOT NULL, state TEXT, activity_type TEXT NOT NULL DEFAULT 'custom');
       CREATE TABLE IF NOT EXISTS hledger_schedules(id TEXT PRIMARY KEY, schedule_json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
-      CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
+      CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL);
     `);
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
-    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
+    this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON messages(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
     this.db.exec("UPDATE notification_events SET status='unknown',updated_at=datetime('now') WHERE status='processing'");
     this.initializeFileSettings();
@@ -199,7 +194,7 @@ export class Store implements SchedulerStore {
   }
 
   discordMessageId(discordMessageId: string): string | undefined {
-    return (this.db.prepare('SELECT message_id FROM message_sources WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(discordMessageId, discordMessageId) as { message_id: string } | undefined)?.message_id;
+    return (this.db.prepare('SELECT id AS message_id FROM messages WHERE discord_message_id=? UNION ALL SELECT message_id FROM discord_outgoing_segments WHERE discord_message_id=? LIMIT 1').get(discordMessageId, discordMessageId) as { message_id: string } | undefined)?.message_id;
   }
 
   addMessageOnce(session: string, role: string, content: string, source: MessageSource = {}, attachments: MessageInputAttachment[] = [], memoryWrite?:boolean): AddMessageResult {
@@ -212,10 +207,8 @@ export class Store implements SchedulerStore {
         const existing = this.discordMessageId(source.discordMessageId);
         if (existing) { this.db.exec('COMMIT'); return { message: this.message(existing)!, created: false }; }
       }
-      this.insertMessage(message);
-      if (source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input' && source.sourceKind !== 'notification' && source.sourceKind !== 'session_handoff' && source.sourceKind !== 'deployment_result') {
-        this.db.prepare("INSERT INTO hindsight_pending(message_id,status,updated_at,error) VALUES(?,?,?,?)").run(message.id,canWrite?'pending':'suppressed',message.createdAt,canWrite?null:'Memory writing is disabled for this channel');
-      }
+      const memoryTracked = source.sourceKind !== 'subagent_event' && source.sourceKind !== 'scheduled_input' && source.sourceKind !== 'notification' && source.sourceKind !== 'session_handoff' && source.sourceKind !== 'deployment_result';
+      this.insertMessage(message, memoryTracked ? (canWrite ? 'pending' : 'suppressed') : null);
       const insertAttachment = this.db.prepare('INSERT INTO message_input_attachments(message_id,attachment_id,filename,mime_type,local_path,status,error,origin,memory_document_id,transcript,transcription_error) VALUES(?,?,?,?,?,?,?,?,?,?,?)');
       for (const attachment of attachments) insertAttachment.run(message.id, attachment.attachmentId, attachment.filename, attachment.mimeType, storedPath(attachment.localPath), attachment.status, attachment.error ?? null, attachment.origin ?? null, attachment.memoryDocumentId ?? null, attachment.transcript ?? null, attachment.transcriptionError ?? null);
       this.db.exec('COMMIT');
@@ -231,13 +224,11 @@ export class Store implements SchedulerStore {
     return { message: this.message(result.message.id)!, created: true };
   }
 
-  // The message, its source and its preparation state are one record; every insertion goes through here.
-  private insertMessage(message: StoredMessage): void {
+  // Every message insertion goes through here. memoryStatus is null for messages that are never written to memory.
+  private insertMessage(message: StoredMessage, memoryStatus: 'pending' | 'suppressed' | null): void {
     const { id, sessionId, role, content, createdAt, source } = message;
-    this.db.prepare('INSERT INTO messages VALUES(?,?,?,?,?)').run(id, sessionId, role, content, createdAt);
-    this.db.prepare('INSERT INTO message_sources(message_id,author_id,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,webhook_id,source_kind,author_name,forwarded_message_json,is_bot) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
-      .run(id, source.authorId ?? null, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null, source.replyToMessageId ?? null, source.replyToChannelId ?? null, source.webhookId ?? null, source.sourceKind ?? null, source.authorName ?? null, source.forwardedMessage ? JSON.stringify(source.forwardedMessage) : null, source.isBot === undefined ? null : source.isBot ? 1 : 0);
-    this.db.prepare('INSERT INTO message_preparation(message_id,status,updated_at) VALUES(?,?,?)').run(id, message.preparationStatus, createdAt);
+    this.db.prepare('INSERT INTO messages(id,session_id,role,content,created_at,author_id,author_name,is_bot,webhook_id,source_kind,channel_id,discord_message_id,event_time,reply_to_message_id,reply_to_channel_id,forwarded_message_json,preparation,memory_status,memory_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+      .run(id, sessionId, role, content, createdAt, source.authorId ?? null, source.authorName ?? null, source.isBot === undefined ? null : source.isBot ? 1 : 0, source.webhookId ?? null, source.sourceKind ?? null, source.channelId ?? null, source.discordMessageId ?? null, source.eventTime ?? null, source.replyToMessageId ?? null, source.replyToChannelId ?? null, source.forwardedMessage ? JSON.stringify(source.forwardedMessage) : null, message.preparationStatus, memoryStatus, memoryStatus === 'suppressed' ? 'Memory writing is disabled for this channel' : null);
   }
 
   updateAttachments(messageId: string, attachments: MessageInputAttachment[]): void {
@@ -250,7 +241,7 @@ export class Store implements SchedulerStore {
         const documentId = a.status === 'ready' && a.localPath && !a.mimeType.startsWith('image/') ? a.memoryDocumentId ?? `attachment:${messageId}:${a.attachmentId}` : undefined;
         insert.run(messageId, a.attachmentId, a.filename, a.mimeType, storedPath(a.localPath), a.status, a.error ?? null, a.origin ?? null, documentId ?? null, a.transcript ?? null, a.transcriptionError ?? null);
         if (documentId) {
-          const channelId = (this.db.prepare('SELECT channel_id FROM message_sources WHERE message_id=?').get(messageId) as { channel_id: string | null } | undefined)?.channel_id ?? undefined;
+          const channelId = (this.db.prepare('SELECT channel_id FROM messages WHERE id=?').get(messageId) as { channel_id: string | null } | undefined)?.channel_id ?? undefined;
           const eligible = this.memoryWriteAllowed(channelId);
           this.db.prepare(`INSERT OR IGNORE INTO attachment_memory_jobs(message_id,attachment_id,document_id,state,error) VALUES(?,?,?,?,?)`).run(messageId,a.attachmentId,documentId,eligible?'queued':'suppressed',eligible?null:'Memory writing was disabled when this message was captured');
         }
@@ -261,8 +252,7 @@ export class Store implements SchedulerStore {
   }
 
   recoverMessagePreparations(): void {
-    const rows = this.db.prepare(`SELECT m.id,m.role,s.source_kind FROM messages m JOIN message_preparation p ON p.message_id=m.id LEFT JOIN message_sources s ON s.message_id=m.id WHERE p.status='preparing' ORDER BY m.rowid`).all() as Array<{ id: string; role: string; source_kind: MessageSource['sourceKind'] | null }>;
-    const now = new Date().toISOString();
+    const rows = this.db.prepare(`SELECT id,role,source_kind FROM messages WHERE preparation='preparing' ORDER BY rowid`).all() as Array<{ id: string; role: string; source_kind: MessageSource['sourceKind'] | null }>;
     this.db.exec('BEGIN IMMEDIATE');
     try {
       for (const row of rows) {
@@ -270,22 +260,22 @@ export class Store implements SchedulerStore {
           const segments = this.db.prepare('SELECT content FROM discord_outgoing_segments WHERE message_id=? ORDER BY rowid').all(row.id) as Array<{ content: string }>;
           if (segments.length) {
             this.db.prepare('UPDATE messages SET content=? WHERE id=?').run(segments.map(segment => segment.content).join('\n'), row.id);
-            this.markPreparationReady(row.id, now);
+            this.markPreparationReady(row.id);
           } else {
             logError(`Outgoing message ${row.id} remains preparing after restart; no successful Discord segments exist, so its actual delivered content needs manual clarification.`);
           }
           continue;
         }
         this.db.prepare("UPDATE message_input_attachments SET status='failed',error='Attachment preparation interrupted by process restart; file was not read or downloaded during recovery.' WHERE message_id=? AND status='ready'").run(row.id);
-        this.markPreparationReady(row.id, now);
+        this.markPreparationReady(row.id);
       }
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   attachmentMemoryJobs(): AttachmentMemoryJob[] {
-    const rows = this.db.prepare(`SELECT j.*,a.local_path,a.filename,a.mime_type,a.origin,s.author_id,s.author_name,s.channel_id,s.discord_message_id,s.event_time,s.source_kind,s.forwarded_message_json,m.created_at
-      FROM attachment_memory_jobs j JOIN message_input_attachments a USING(message_id,attachment_id) JOIN message_sources s ON s.message_id=j.message_id JOIN messages m ON m.id=j.message_id
+    const rows = this.db.prepare(`SELECT j.*,a.local_path,a.filename,a.mime_type,a.origin,m.author_id,m.author_name,m.channel_id,m.discord_message_id,m.event_time,m.source_kind,m.forwarded_message_json,m.created_at
+      FROM attachment_memory_jobs j JOIN message_input_attachments a USING(message_id,attachment_id) JOIN messages m ON m.id=j.message_id
       WHERE j.state IN ('queued','submitting','converting','retaining','unknown') ORDER BY j.rowid`).all() as Array<Record<string, unknown>>;
     return rows.flatMap(row => typeof row.local_path === 'string' ? [{ messageId: String(row.message_id), attachmentId: String(row.attachment_id), documentId: String(row.document_id), state: row.state as AttachmentMemoryState,
       ...(typeof row.conversion_operation_id === 'string' ? { conversionOperationId: row.conversion_operation_id } : {}), ...(typeof row.retain_operation_id === 'string' ? { retainOperationId: row.retain_operation_id } : {}),
@@ -298,8 +288,8 @@ export class Store implements SchedulerStore {
       .run(state, fields.conversionOperationId ?? null, fields.retainOperationId ?? null, fields.attemptedAt ?? null, fields.nextPollAt === undefined ? null : fields.nextPollAt, fields.pollAttempt ?? null, fields.error === undefined ? null : fields.error, messageId, attachmentId);
   }
 
-  private markPreparationReady(messageId: string, updatedAt = new Date().toISOString()): void {
-    this.db.prepare("UPDATE message_preparation SET status='ready',updated_at=? WHERE message_id=? AND status='preparing'").run(updatedAt, messageId);
+  private markPreparationReady(messageId: string): void {
+    this.db.prepare("UPDATE messages SET preparation='ready' WHERE id=? AND preparation='preparing'").run(messageId);
   }
 
   saveOutgoingSegment(message: StoredMessage, segment: { channelId: string; messageId: string; content: string; createdAt?: string; replyToMessageId?: string; replyToChannelId?: string }): void {
@@ -329,11 +319,11 @@ export class Store implements SchedulerStore {
       if (ids.size !== input.sourceMessageIds.length) throw new Error('Duplicate source message ID in batch');
       const alreadyBatched = this.db.prepare(`SELECT message_id FROM memory_batch_sources WHERE message_id IN (${input.sourceMessageIds.map(() => '?').join(',')}) LIMIT 1`).get(...input.sourceMessageIds) as { message_id: string } | undefined;
       if (alreadyBatched) throw new Error(`Source message ${alreadyBatched.message_id} is already in a frozen batch`);
-      const eligible = this.db.prepare(`SELECT m.id,mp.status FROM messages m LEFT JOIN message_preparation mp ON mp.message_id=m.id LEFT JOIN hindsight_pending hp ON hp.message_id=m.id WHERE m.id IN (${input.sourceMessageIds.map(() => '?').join(',')}) AND hp.status='pending'`).all(...input.sourceMessageIds) as Array<{ id: string; status: string | null }>;
-      if (eligible.length !== input.sourceMessageIds.length || eligible.some(row => row.status !== 'ready')) throw new Error('Batch sources must be pending and ready');
+      const eligible = this.db.prepare(`SELECT id,preparation FROM messages WHERE id IN (${input.sourceMessageIds.map(() => '?').join(',')}) AND memory_status='pending'`).all(...input.sourceMessageIds) as Array<{ id: string; preparation: string }>;
+      if (eligible.length !== input.sourceMessageIds.length || eligible.some(row => row.preparation !== 'ready')) throw new Error('Batch sources must be pending and ready');
       if (!this.memoryWriteAllowed(input.channelId)) throw new Error('Memory writing is disabled for this channel');
       const order = Number((this.db.prepare('SELECT COALESCE(MAX(batch_order),0)+1 AS next FROM memory_batches WHERE document_id=?').get(input.documentId) as { next: number }).next);
-      this.db.prepare("INSERT INTO memory_batches(operation_id,payload,source_message_ids,document_id,session_id,channel_id,batch_order,status,created_at) VALUES(?,?,?,?,?,?,?,'frozen',?)").run(operationId, input.payload, JSON.stringify(input.sourceMessageIds), input.documentId, input.sessionId, input.channelId, order, new Date().toISOString());
+      this.db.prepare("INSERT INTO memory_batches(operation_id,payload,document_id,session_id,channel_id,batch_order,status,created_at) VALUES(?,?,?,?,?,?,'frozen',?)").run(operationId, input.payload, input.documentId, input.sessionId, input.channelId, order, new Date().toISOString());
       const link = this.db.prepare('INSERT INTO memory_batch_sources(message_id,operation_id) VALUES(?,?)');
       for (const id of input.sourceMessageIds) link.run(id, operationId);
       this.db.exec('COMMIT');
@@ -347,25 +337,23 @@ export class Store implements SchedulerStore {
   }
 
   private batchFromRow(row: any): MemoryBatch {
-    return { operationId: row.operation_id, payload: row.payload, sourceMessageIds: JSON.parse(row.source_message_ids), documentId: row.document_id, sessionId: row.session_id, channelId: row.channel_id, order: row.batch_order, status: row.status, pollAttempt: row.poll_attempt, ...(row.submit_intended_at ? { submitIntendedAt: row.submit_intended_at } : {}), ...(row.next_poll_at ? { nextPollAt: row.next_poll_at } : {}), ...(row.last_poll_at ? { lastPollAt: row.last_poll_at } : {}), ...(row.error ? { error: row.error } : {}) };
+    return { operationId: row.operation_id, payload: row.payload, documentId: row.document_id, sessionId: row.session_id, channelId: row.channel_id, order: row.batch_order, status: row.status, pollAttempt: row.poll_attempt, ...(row.submit_intended_at ? { submitIntendedAt: row.submit_intended_at } : {}), ...(row.next_poll_at ? { nextPollAt: row.next_poll_at } : {}), ...(row.last_poll_at ? { lastPollAt: row.last_poll_at } : {}), ...(row.error ? { error: row.error } : {}) };
   }
 
+  // The oldest pending, prepared, not yet batched messages of each channel session; pending messages of a channel that no longer allows memory writes are suppressed here.
   readyMemoryPrefixes(): Array<{ documentId: string; sessionId: string; channelId: string; messages: StoredMessage[] }> {
-    const docs = this.db.prepare("SELECT DISTINCT s.channel_id,m.session_id FROM messages m JOIN message_sources s ON s.message_id=m.id JOIN hindsight_pending hp ON hp.message_id=m.id WHERE hp.status='pending' ORDER BY m.rowid").all() as Array<{ channel_id: string; session_id: string }>;
-    return docs.flatMap(({ channel_id, session_id }) => {
-      const all = this.messagesWithSources(session_id).filter(m => m.source.channelId === channel_id);
-      const messages: StoredMessage[] = [];
-      for (const m of all) {
-        const pending = this.db.prepare("SELECT hp.status,mp.status preparation FROM hindsight_pending hp LEFT JOIN message_preparation mp ON mp.message_id=hp.message_id WHERE hp.message_id=?").get(m.id) as { status: string; preparation: string | null } | undefined;
-        if (!pending || pending.status !== 'pending') continue;
-        if (this.db.prepare('SELECT message_id FROM memory_batch_sources WHERE message_id=?').get(m.id)) continue;
-        if (m.source.sourceKind === 'scheduled_input') { this.db.prepare("UPDATE hindsight_pending SET status='suppressed',updated_at=?,error='Scheduled instruction is not retained as conversation memory' WHERE message_id=? AND status='pending'").run(new Date().toISOString(),m.id); continue; }
-        if(!this.memoryWriteAllowed(m.source.channelId)){this.db.prepare("UPDATE hindsight_pending SET status='suppressed',updated_at=?,error='Memory writing is disabled for this channel' WHERE message_id=? AND status='pending'").run(new Date().toISOString(),m.id);continue;}
-        if (pending.preparation !== 'ready') break;
-        messages.push(m); if (messages.length >= 25) break;
+    const unbatched = "memory_status='pending' AND id NOT IN (SELECT message_id FROM memory_batch_sources)";
+    const groups = this.db.prepare(`SELECT DISTINCT channel_id,session_id FROM messages WHERE ${unbatched} ORDER BY rowid`).all() as Array<{ channel_id: string | null; session_id: string }>;
+    return groups.flatMap(({ channel_id, session_id }) => {
+      if (!this.memoryWriteAllowed(channel_id ?? undefined)) {
+        this.db.prepare(`UPDATE messages SET memory_status='suppressed',memory_error='Memory writing is disabled for this channel' WHERE ${unbatched} AND session_id=? AND channel_id IS ?`).run(session_id, channel_id);
+        return [];
       }
-      if (!messages.length) return [];
-      return [{ documentId: `butler:discord:${channel_id}:${session_id}`, sessionId: session_id, channelId: channel_id, messages }];
+      const rows = this.db.prepare(`SELECT id,preparation FROM messages WHERE ${unbatched} AND session_id=? AND channel_id=? ORDER BY rowid LIMIT 25`).all(session_id, channel_id) as Array<{ id: string; preparation: string }>;
+      const unprepared = rows.findIndex(row => row.preparation !== 'ready');
+      const ready = unprepared < 0 ? rows : rows.slice(0, unprepared);
+      if (!ready.length) return [];
+      return [{ documentId: `butler:discord:${channel_id}:${session_id}`, sessionId: session_id, channelId: channel_id!, messages: ready.map(row => this.message(row.id)!) }];
     });
   }
 
@@ -380,7 +368,7 @@ export class Store implements SchedulerStore {
     this.db.exec('BEGIN');
     try {
       this.db.prepare("UPDATE memory_batches SET status='completed',error=NULL,next_poll_at=NULL WHERE operation_id=?").run(operationId);
-      this.db.prepare("UPDATE hindsight_pending SET status='completed',updated_at=?,error=NULL WHERE message_id IN (SELECT message_id FROM memory_batch_sources WHERE operation_id=?)").run(new Date().toISOString(), operationId);
+      this.db.prepare("UPDATE messages SET memory_status='completed',memory_error=NULL WHERE id IN (SELECT message_id FROM memory_batch_sources WHERE operation_id=?)").run(operationId);
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -391,22 +379,22 @@ export class Store implements SchedulerStore {
 
   transcriptCandidates(start: string, end: string): TranscriptEntry[] {
     return this.db.prepare(`
-      SELECT m.id,m.session_id AS sessionId,COALESCE(s.channel_id,'') AS channelId,
-        COALESCE(s.discord_message_id,'') AS discordMessageId,COALESCE(s.author_id,'') AS authorId,
-        COALESCE(s.author_name,s.author_id,'未知作者') AS authorName,
-        COALESCE(s.event_time,m.created_at) AS timestamp,m.content,s.reply_to_message_id AS replyToMessageId
-      FROM messages m JOIN message_sources s ON s.message_id=m.id
-      WHERE m.role='user' AND s.source_kind IN ('discord_external','discord_fetched')
-        AND julianday(COALESCE(s.event_time,m.created_at)) >= julianday(?)
-        AND julianday(COALESCE(s.event_time,m.created_at)) < julianday(?)
-        AND s.discord_message_id IS NOT NULL
+      SELECT m.id,m.session_id AS sessionId,COALESCE(m.channel_id,'') AS channelId,
+        COALESCE(m.discord_message_id,'') AS discordMessageId,COALESCE(m.author_id,'') AS authorId,
+        COALESCE(m.author_name,m.author_id,'未知作者') AS authorName,
+        COALESCE(m.event_time,m.created_at) AS timestamp,m.content,m.reply_to_message_id AS replyToMessageId
+      FROM messages m
+      WHERE m.role='user' AND m.source_kind IN ('discord_external','discord_fetched')
+        AND julianday(COALESCE(m.event_time,m.created_at)) >= julianday(?)
+        AND julianday(COALESCE(m.event_time,m.created_at)) < julianday(?)
+        AND m.discord_message_id IS NOT NULL
       UNION ALL
       SELECT m.id,m.session_id AS sessionId,seg.channel_id AS channelId,
-        seg.discord_message_id AS discordMessageId,COALESCE(s.author_id,'') AS authorId,
-        COALESCE(s.author_name,s.author_id,'Butler') AS authorName,seg.created_at AS timestamp,seg.content,seg.reply_to_message_id AS replyToMessageId
-      FROM messages m JOIN message_sources s ON s.message_id=m.id
+        seg.discord_message_id AS discordMessageId,COALESCE(m.author_id,'') AS authorId,
+        COALESCE(m.author_name,m.author_id,'Butler') AS authorName,seg.created_at AS timestamp,seg.content,seg.reply_to_message_id AS replyToMessageId
+      FROM messages m
         JOIN discord_outgoing_segments seg ON seg.message_id=m.id
-      WHERE m.role='assistant' AND s.source_kind IN ('butler_reply','butler_tool_message')
+      WHERE m.role='assistant' AND m.source_kind IN ('butler_reply','butler_tool_message')
         AND julianday(seg.created_at) >= julianday(?) AND julianday(seg.created_at) < julianday(?)
       ORDER BY timestamp,sessionId,discordMessageId
     `).all(start, end, start, end) as unknown as TranscriptEntry[];
@@ -417,11 +405,10 @@ export class Store implements SchedulerStore {
   message(id: string): StoredMessage | undefined { return this.selectMessages('m.id=?', id)[0]; }
 
   private selectMessages(condition: string, param: string): StoredMessage[] {
-    const rows = this.db.prepare(`SELECT m.id,m.session_id,m.role,m.content,m.created_at,s.author_id,s.channel_id,s.discord_message_id,s.event_time,s.reply_to_message_id,s.reply_to_channel_id,s.webhook_id,s.source_kind,s.author_name,s.forwarded_message_json,s.is_bot,mp.status preparation
-      FROM messages m LEFT JOIN message_sources s ON s.message_id=m.id LEFT JOIN message_preparation mp ON mp.message_id=m.id WHERE ${condition} ORDER BY m.rowid`).all(param) as Array<{ id: string; session_id: string; role: string; content: string; created_at: string; author_id: string | null; channel_id: string | null; discord_message_id: string | null; event_time: string | null; reply_to_message_id: string | null; reply_to_channel_id: string | null; webhook_id: string | null; source_kind: MessageSource['sourceKind'] | null; author_name: string | null; forwarded_message_json: string | null; is_bot: number | null; preparation: 'preparing' | 'ready' | null }>;
+    const rows = this.db.prepare(`SELECT m.id,m.session_id,m.role,m.content,m.created_at,m.author_id,m.channel_id,m.discord_message_id,m.event_time,m.reply_to_message_id,m.reply_to_channel_id,m.webhook_id,m.source_kind,m.author_name,m.forwarded_message_json,m.is_bot,m.preparation FROM messages m WHERE ${condition} ORDER BY m.rowid`).all(param) as Array<{ id: string; session_id: string; role: string; content: string; created_at: string; author_id: string | null; channel_id: string | null; discord_message_id: string | null; event_time: string | null; reply_to_message_id: string | null; reply_to_channel_id: string | null; webhook_id: string | null; source_kind: MessageSource['sourceKind'] | null; author_name: string | null; forwarded_message_json: string | null; is_bot: number | null; preparation: 'preparing' | 'ready' }>;
     const attachments = this.db.prepare('SELECT message_id,attachment_id,filename,mime_type,local_path,status,error,origin,memory_document_id,transcript,transcription_error FROM message_input_attachments WHERE message_id=?');
     const segments = this.db.prepare('SELECT channel_id,discord_message_id,content,created_at,reply_to_message_id,reply_to_channel_id FROM discord_outgoing_segments WHERE message_id=? ORDER BY rowid');
-    return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at, preparationStatus: row.preparation ?? 'ready',
+    return rows.map(row => ({ id: row.id, sessionId: row.session_id, role: row.role, content: row.content, createdAt: row.created_at, preparationStatus: row.preparation,
       source: { ...(row.author_id === null ? {} : { authorId: row.author_id }), ...(row.author_name === null ? {} : { authorName: row.author_name }), ...(row.is_bot === null ? {} : { isBot: row.is_bot === 1 }), ...(row.webhook_id === null ? {} : { webhookId: row.webhook_id }), ...(row.source_kind === null ? {} : { sourceKind: row.source_kind }), ...(row.channel_id === null ? {} : { channelId: row.channel_id }), ...(row.discord_message_id === null ? {} : { discordMessageId: row.discord_message_id }), ...(row.event_time === null ? {} : { eventTime: row.event_time }), ...(row.reply_to_message_id === null ? {} : { replyToMessageId: row.reply_to_message_id }), ...(row.reply_to_channel_id === null ? {} : { replyToChannelId: row.reply_to_channel_id }), ...(row.forwarded_message_json === null ? {} : { forwardedMessage: JSON.parse(row.forwarded_message_json) as ForwardedMessage }) },
       attachments: (attachments.all(row.id) as Array<{ attachment_id: string; filename: string; mime_type: string; local_path: string | null; status: 'ready' | 'failed'; error: string | null; origin: 'discord_attachment' | 'butler_generated' | null; memory_document_id: string | null; transcript: string | null; transcription_error: string | null }>).map(item => ({ attachmentId: item.attachment_id, filename: item.filename, mimeType: item.mime_type, ...(item.local_path ? { localPath: projectPath(item.local_path) } : {}), status: item.status, ...(item.origin ? { origin: item.origin } : {}), ...(item.memory_document_id ? { memoryDocumentId: item.memory_document_id } : {}), ...(item.transcript ? { transcript: item.transcript } : {}), ...(item.transcription_error ? { transcriptionError: item.transcription_error } : {}), ...(item.error ? { error: item.error } : {}) })),
       discordSegments: (segments.all(row.id) as Array<{ channel_id: string; discord_message_id: string; content: string; created_at: string; reply_to_message_id: string | null; reply_to_channel_id: string | null }>).map(item => ({ channelId: item.channel_id, messageId: item.discord_message_id, content: item.content, eventTime: item.created_at, ...(item.reply_to_message_id ? { replyToMessageId: item.reply_to_message_id } : {}), ...(item.reply_to_channel_id ? { replyToChannelId: item.reply_to_channel_id } : {}) })) }));
@@ -449,13 +436,13 @@ export class Store implements SchedulerStore {
     return contexts;
   }
 
-  saveContextUsage(sessionId: string, usage: { model: string; baseUrl: string; inputTokens: number; outputTokens: number; localCount: number; countSource: string; contextLimit: number; limitSource: string; sampledAt: string; attachmentSignature: string; checkpointThroughMessageId?: string }): void {
-    this.db.prepare(`INSERT INTO session_context_usage(session_id,model,base_url,input_tokens,output_tokens,local_count,count_source,context_limit,limit_source,sampled_at,attachment_signature,checkpoint_through_message_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET model=excluded.model,base_url=excluded.base_url,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,local_count=excluded.local_count,count_source=excluded.count_source,context_limit=excluded.context_limit,limit_source=excluded.limit_source,sampled_at=excluded.sampled_at,attachment_signature=excluded.attachment_signature,checkpoint_through_message_id=excluded.checkpoint_through_message_id`).run(sessionId, usage.model, usage.baseUrl, usage.inputTokens, usage.outputTokens, usage.localCount, usage.countSource, usage.contextLimit, usage.limitSource, usage.sampledAt, usage.attachmentSignature, usage.checkpointThroughMessageId ?? null);
+  saveContextUsage(sessionId: string, usage: { model: string; baseUrl: string; inputTokens: number; outputTokens: number; localCount: number; contextLimit: number; limitSource: string; sampledAt: string }): void {
+    this.db.prepare(`INSERT INTO session_context_usage(session_id,model,base_url,input_tokens,output_tokens,local_count,context_limit,limit_source,sampled_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET model=excluded.model,base_url=excluded.base_url,input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,local_count=excluded.local_count,context_limit=excluded.context_limit,limit_source=excluded.limit_source,sampled_at=excluded.sampled_at`).run(sessionId, usage.model, usage.baseUrl, usage.inputTokens, usage.outputTokens, usage.localCount, usage.contextLimit, usage.limitSource, usage.sampledAt);
   }
 
-  contextUsage(sessionId: string): { model: string; baseUrl: string; inputTokens: number; outputTokens: number; localCount: number; countSource: string; contextLimit: number; limitSource: string; sampledAt: string; attachmentSignature: string; checkpointThroughMessageId: string | null } | undefined {
-    const row = this.db.prepare('SELECT model,base_url,input_tokens,output_tokens,local_count,count_source,context_limit,limit_source,sampled_at,attachment_signature,checkpoint_through_message_id FROM session_context_usage WHERE session_id=?').get(sessionId) as { model: string; base_url: string; input_tokens: number; output_tokens: number; local_count: number; count_source: string; context_limit: number; limit_source: string; sampled_at: string; attachment_signature: string; checkpoint_through_message_id: string | null } | undefined;
-    return row && { model: row.model, baseUrl: row.base_url, inputTokens: row.input_tokens, outputTokens: row.output_tokens, localCount: row.local_count, countSource: row.count_source, contextLimit: row.context_limit, limitSource: row.limit_source, sampledAt: row.sampled_at, attachmentSignature: row.attachment_signature, checkpointThroughMessageId: row.checkpoint_through_message_id };
+  contextUsage(sessionId: string): { model: string; baseUrl: string; inputTokens: number; outputTokens: number; localCount: number; contextLimit: number; limitSource: string; sampledAt: string } | undefined {
+    const row = this.db.prepare('SELECT model,base_url,input_tokens,output_tokens,local_count,context_limit,limit_source,sampled_at FROM session_context_usage WHERE session_id=?').get(sessionId) as { model: string; base_url: string; input_tokens: number; output_tokens: number; local_count: number; context_limit: number; limit_source: string; sampled_at: string } | undefined;
+    return row && { model: row.model, baseUrl: row.base_url, inputTokens: row.input_tokens, outputTokens: row.output_tokens, localCount: row.local_count, contextLimit: row.context_limit, limitSource: row.limit_source, sampledAt: row.sampled_at };
   }
 
   clearContextUsage(sessionId: string): void { this.db.prepare('DELETE FROM session_context_usage WHERE session_id=?').run(sessionId); }
@@ -485,21 +472,21 @@ export class Store implements SchedulerStore {
   createSubagentWindow(parentSessionId: string, model: string, cwd: string, brief: { task: string; context: string; constraints: string; expected_output: string }): string {
     const id = randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO subagent_windows(id,parent_session_id,model,cwd,brief_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(id, parentSessionId, model, cwd, JSON.stringify(brief), now, now);
+    this.db.prepare('INSERT INTO subagents(id,parent_session_id,model,cwd,brief_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(id, parentSessionId, model, cwd, JSON.stringify(brief), now, now);
     return id;
   }
 
   getSubagentWindow(id: string, parentSessionId: string): { id: string; parent_session_id: string; model: string; cwd: string; thread_id: string | null; brief_json: string | null; created_at: string; updated_at: string } | undefined {
-    return this.db.prepare('SELECT * FROM subagent_windows WHERE id=? AND parent_session_id=?').get(id, parentSessionId) as ReturnType<Store['getSubagentWindow']>;
+    return this.db.prepare('SELECT id,parent_session_id,model,cwd,thread_id,brief_json,created_at,updated_at FROM subagents WHERE id=? AND parent_session_id=?').get(id, parentSessionId) as ReturnType<Store['getSubagentWindow']>;
   }
 
   setSubagentThread(id: string, threadId: string): void {
-    const result = this.db.prepare('UPDATE subagent_windows SET thread_id=?,updated_at=? WHERE id=?').run(threadId, new Date().toISOString(), id);
+    const result = this.db.prepare('UPDATE subagents SET thread_id=?,updated_at=? WHERE id=?').run(threadId, new Date().toISOString(), id);
     if (Number(result.changes) !== 1) throw new Error(`Could not persist subagent thread ${id}`);
   }
 
   setSubagentModel(id: string, model: string): void {
-    const result = this.db.prepare('UPDATE subagent_windows SET model=?,updated_at=? WHERE id=?').run(model, new Date().toISOString(), id);
+    const result = this.db.prepare('UPDATE subagents SET model=?,updated_at=? WHERE id=?').run(model, new Date().toISOString(), id);
     if (Number(result.changes) !== 1) throw new Error(`Could not persist subagent model ${id}`);
   }
 
@@ -526,12 +513,12 @@ export class Store implements SchedulerStore {
   }
 
   saveSubagentRun(snapshot: { id: string; parentSession: string; runId: string; status: string; updatedAt: string }): void {
-    this.db.prepare('INSERT INTO subagent_runs(id,parent_session_id,run_id,status,snapshot_json,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id,status=excluded.status,snapshot_json=excluded.snapshot_json,updated_at=excluded.updated_at WHERE subagent_runs.parent_session_id=excluded.parent_session_id AND (subagent_runs.run_id=excluded.run_id OR excluded.status=\'queued\')')
-      .run(snapshot.id, snapshot.parentSession, snapshot.runId, snapshot.status, JSON.stringify(snapshot), snapshot.updatedAt);
+    this.db.prepare("UPDATE subagents SET run_id=?,status=?,snapshot_json=?,updated_at=? WHERE id=? AND parent_session_id=? AND (run_id IS NULL OR run_id=? OR ?='queued')")
+      .run(snapshot.runId, snapshot.status, JSON.stringify(snapshot), snapshot.updatedAt, snapshot.id, snapshot.parentSession, snapshot.runId, snapshot.status);
   }
 
   allSubagentRuns(): Array<Record<string, unknown>> {
-    return (this.db.prepare('SELECT snapshot_json FROM subagent_runs ORDER BY updated_at DESC').all() as Array<{ snapshot_json: string }>).map(row => JSON.parse(row.snapshot_json) as Record<string, unknown>);
+    return (this.db.prepare('SELECT snapshot_json FROM subagents WHERE snapshot_json IS NOT NULL ORDER BY updated_at DESC').all() as Array<{ snapshot_json: string }>).map(row => JSON.parse(row.snapshot_json) as Record<string, unknown>);
   }
 
   acceptNotification(payload: NotificationPayload): { duplicate: boolean; status: NotificationStatus } {
@@ -560,7 +547,7 @@ export class Store implements SchedulerStore {
       if (!this.hasSession(session)) throw new Error('Unknown notification session');
       const now = new Date().toISOString();
       const input: StoredMessage = { id: randomUUID(), sessionId: session, role: 'user', content: JSON.stringify(events.map(event => JSON.parse(event.payload_json) as NotificationPayload)), createdAt: now, source: { sourceKind: 'notification', channelId }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
-      this.insertMessage(input);
+      this.insertMessage(input, null);
       this.db.prepare("UPDATE notification_events SET status='processing',input_message_id=?,updated_at=? WHERE status='pending'").run(input.id, now);
       this.db.exec('COMMIT');
       return input;
@@ -594,7 +581,7 @@ export class Store implements SchedulerStore {
       if (!input) {
         const now = new Date().toISOString();
         input = { id: randomUUID(), sessionId: session, role: 'user', content, createdAt: now, source: { ...source, eventTime: now, sourceKind: 'subagent_event' }, attachments: [], preparationStatus: 'ready', discordSegments: [] };
-        this.insertMessage(input);
+        this.insertMessage(input, null);
       }
       this.db.prepare('UPDATE subagent_events SET parent_input_id=? WHERE id=?').run(input.id, eventId);
       this.db.exec('COMMIT');
@@ -670,12 +657,12 @@ export class Store implements SchedulerStore {
   }
 
   // Private diagnostic snapshots: retain at most 500 requests and 24 hours.
-  saveModelRequest(record: { requestId: string; sessionId: string; askId?: string; traceId?: string; turn: number; bodyJson: string; bodySha256: string }): void {
+  saveModelRequest(record: { requestId: string; sessionId: string; askId?: string; traceId?: string; turn: number; bodyJson: string }): void {
     const attemptedAt = new Date().toISOString();
     this.db.exec('BEGIN');
     try {
-      this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json,body_sha256) VALUES(?,?,?,?,?,?,?,?)')
-        .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson, record.bodySha256);
+      this.db.prepare('INSERT INTO model_requests(request_id,session_id,ask_id,trace_id,turn,attempted_at,body_json) VALUES(?,?,?,?,?,?,?)')
+        .run(record.requestId, record.sessionId, record.askId ?? null, record.traceId ?? null, record.turn, attemptedAt, record.bodyJson);
       this.db.prepare('UPDATE sessions SET last_model_request_at=? WHERE id=?').run(attemptedAt, record.sessionId);
       this.db.prepare('DELETE FROM model_requests WHERE attempted_at < ? OR rowid NOT IN (SELECT rowid FROM model_requests ORDER BY rowid DESC LIMIT 500)')
         .run(new Date(Date.parse(attemptedAt) - 24 * 60 * 60 * 1000).toISOString());
@@ -914,8 +901,6 @@ export class Store implements SchedulerStore {
   }
 
   close(): void {
-    if (this.closed) return;
-    this.closed = true;
     this.settings.close(); this.db.close();
   }
 }

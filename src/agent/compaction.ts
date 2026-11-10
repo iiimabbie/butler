@@ -14,7 +14,10 @@ export interface CompactOptions {
   onStart?: () => void;
 }
 
-export interface LiveCompactOptions extends CompactOptions { groups: unknown[][]; protectedGroups?: boolean[]; keepRecent?: number; existingSummary?: string; }
+/** Request items that are summarized or kept together; protected groups are never summarized. messageId is set for a group built from a stored message. */
+export type LiveGroup = { items: unknown[]; protected: boolean; messageId?: string };
+
+export interface LiveCompactOptions extends CompactOptions { groups: LiveGroup[]; keepRecent?: number; existingSummary?: string; }
 
 export interface CompactResult {
   compressedMessages: number;
@@ -46,14 +49,13 @@ export async function compactSession(store: Store, sessionId: string, options: C
   return { compressedMessages: compressible.length, retainedMessages: uncompressed.length - compressible.length, throughMessageId: compressible[compressible.length - 1]!.id };
 }
 
-export async function compactLiveGroups(options: LiveCompactOptions): Promise<{ summary: string; retained: unknown[][] }> {
+export async function compactLiveGroups(options: LiveCompactOptions): Promise<{ summary: string; retained: LiveGroup[] }> {
   const keep = options.keepRecent ?? 10;
   const recentStart = Math.max(0, options.groups.length - keep);
-  const protectedGroups = options.protectedGroups ?? [];
-  const compactedIndexes = options.groups.slice(0, recentStart).flatMap((_, index) => protectedGroups[index] ? [] : [index]);
+  const compactedIndexes = options.groups.slice(0, recentStart).flatMap((group, index) => group.protected ? [] : [index]);
   if (!compactedIndexes.length) return { summary: '', retained: options.groups };
   options.onStart?.();
-  const history = JSON.stringify(compactedIndexes.map(index => stripNative(options.groups[index])));
+  const history = JSON.stringify(compactedIndexes.map(index => stripNative(options.groups[index]!.items)));
   const summary = await requestSummary(options, history, options.existingSummary);
   if (!summary) throw new Error('Live compaction response was empty; existing request context was preserved');
   const compacted = new Set(compactedIndexes);

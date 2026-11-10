@@ -1,11 +1,13 @@
 import { logWarn } from '../log.js';
 import { isRecord } from '../tools/tool-schema.js';
 
-export type CountSource = 'local-count-estimate' | 'character-estimate' | 'calibrated estimate';
-export type ContextCount = { inputTokens: number; source: CountSource };
+/** Size-based token estimate of a request (UTF-8 bytes / 3; attachments as placeholders). Two estimates are comparable, so their difference tracks growth. */
+export function estimateContextTokens(input: unknown[], tools: unknown[]): number {
+  return Math.ceil(Buffer.byteLength(JSON.stringify({ input: stripNative(input), tools })) / 3);
+}
 
-/** Counts the text/tool representation of a Responses request without invoking generation. */
-export async function countContext(options: { baseUrl: string; apiKey?: string; model: string; input: unknown[]; tools: unknown[] }): Promise<ContextCount> {
+/** Counts the text/tool representation of a Responses request without invoking generation; the size estimate when counting is unavailable. */
+export async function countContextTokens(options: { baseUrl: string; apiKey?: string; model: string; input: unknown[]; tools: unknown[] }): Promise<number> {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (options.apiKey) headers.authorization = `Bearer ${options.apiKey}`;
   try {
@@ -16,17 +18,11 @@ export async function countContext(options: { baseUrl: string; apiKey?: string; 
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body: unknown = await response.json();
     if (!isRecord(body) || !Number.isSafeInteger(body.input_tokens) || (body.input_tokens as number) < 0) throw new Error('invalid count response');
-    return { inputTokens: body.input_tokens as number, source: 'local-count-estimate' };
+    return body.input_tokens as number;
   } catch (error) {
-    logWarn(`Context token count unavailable model=${options.model}; using Unicode character estimate`, error);
-    return { inputTokens: unicodeEstimate(JSON.stringify({ input: stripNative(options.input), tools: options.tools })), source: 'character-estimate' };
+    logWarn(`Context token count unavailable model=${options.model}; using size estimate`, error);
+    return estimateContextTokens(options.input, options.tools);
   }
-}
-
-function unicodeEstimate(text: string): number {
-  let count = 0;
-  for (const _ of text) count++;
-  return Math.ceil(count / 3);
 }
 
 function systemText(input: unknown[]): string {
