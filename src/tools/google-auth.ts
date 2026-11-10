@@ -5,14 +5,15 @@ import { dirname } from 'node:path';
 import type { GoogleClientConfig } from '../config.js';
 import { projectPath } from '../paths.js';
 
+const MAIL = 'https://mail.google.com/';
 const GMAIL_MODIFY = 'https://www.googleapis.com/auth/gmail.modify';
-// Connection only requires the base scopes; gmail.modify is checked by the tools that need it.
+// Connection only requires the base scopes; optional Gmail scopes are checked by their consumers.
 const BASE_SCOPES = [
   'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose',
   'https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/tasks',
   'https://www.googleapis.com/auth/drive.readonly', 'https://www.googleapis.com/auth/drive.file',
 ];
-const GOOGLE_SCOPES = [...BASE_SCOPES, GMAIL_MODIFY];
+const GOOGLE_SCOPES = [...BASE_SCOPES, GMAIL_MODIFY, MAIL];
 const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 const TOKEN_PATH = projectPath('.data/google/tokens.json');
 
@@ -40,7 +41,7 @@ export class GoogleAuth {
 
   async accounts() {
     const store = await this.readStore();
-    return Object.entries(store.accounts).map(([email, token]) => ({ email, default: email === store.default_account, status: unusable(token) ? 'reauthorization_required' as const : 'connected' as const, gmail_modify: hasScope(token, GMAIL_MODIFY) }));
+    return Object.entries(store.accounts).map(([email, token]) => ({ email, default: email === store.default_account, status: unusable(token) ? 'reauthorization_required' as const : 'connected' as const, gmail_modify: hasScope(token, GMAIL_MODIFY), mail: hasScope(token, MAIL) }));
   }
 
   async resolveAccount(account?: string): Promise<string> { return pick(await this.readStore(), account); }

@@ -1,9 +1,10 @@
-import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
+import { DEFAULT_SCHEDULE_TIMEZONE, localDate } from '../timezone.js';
 import { ActivityType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, type Presence, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from '../store.js';
 import { ask, isNoReply, type AgentConfig } from '../agent/agent.js';
 import { startNotificationListener } from '../notifications.js';
+import { MailWatcher } from '../mail/imap-watcher.js';
 import { createDiscordToolRuntime, type DiscordToolContext, type DiscordToolRuntime, type HandoffInput } from './discord-tools.js';
 import { isRecord } from '../tools/tool-schema.js';
 import { requireSetting, type ButlerConfig } from '../config.js';
@@ -566,14 +567,19 @@ class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error));
   }
 
-  // Channel inputs go to a fresh session once the prompt cache has expired.
+  // Channel inputs start a fresh session when the configured reset threshold has passed.
   // ownWork is the caller's own queued work: a notification batch is claimed inside its enqueue.
   private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
-    const config = this.getRuntime().discord;
-    const state = this.store.channelState(channelId, config.defaultModel);
+    const runtime = this.getRuntime();
+    const state = this.store.channelState(channelId, runtime.discord.defaultModel);
     const last = this.store.lastModelRequestTime(state.sessionId);
     // A session that has not called the model yet is already fresh.
-    if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    if (!last) return state;
+    const timezone = runtime.settings.schedule?.timezone ?? DEFAULT_SCHEDULE_TIMEZONE;
+    const expired = this.store.channelSessionReset(channelId) === 'daily'
+      ? localDate(new Date(last), timezone) !== localDate(new Date(), timezone)
+      : Date.now() - Date.parse(last) >= IDLE_SESSION_RESET_MS;
+    if (!expired) return state;
     // Work running or queued in this channel still belongs to the current session.
     if ((this.queues.get(channelId)?.pending ?? 0) > ownWork) return state;
     // A running subagent reports back to this session, so keep it until the result arrives.
@@ -971,6 +977,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   store.setExternalChannelStopHooks({ canStop: id => handler.canStopChannel(id) });
   let discordReady = false;
   let notificationTimer: ReturnType<typeof setTimeout> | undefined;
+  let mailWatcher: MailWatcher | undefined;
   const scheduleNotificationBatch = () => {
     const next = new Date();
     next.setMinutes(60, 0, 0);
@@ -991,7 +998,8 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   client.once('clientReady', readyClient => {
     discordReady = true;
     handler.setBotIdentity(readyClient.user.id, readyClient.user.globalName ?? readyClient.user.username);
-    if (settings.notifications) scheduleNotificationBatch();
+    if (settings.notifications || settings.mail?.accounts.length) scheduleNotificationBatch();
+    if (settings.mail && settings.google) mailWatcher = new MailWatcher(settings.mail.accounts, googleAuth, store, () => handler.enqueueNotifications());
     logInfo('Discord ready', { botId: readyClient.user.id });
     void syncGuildCommands([...readyClient.guilds.cache.keys()], 'startup').catch(error => reportCommandSyncFailure('startup', error));
     const notice = store.takeRestartNotice();
@@ -1042,6 +1050,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     shutdownPromise = (async () => {
       try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error); }
       closeNotifications = undefined;
+      try { await mailWatcher?.close(); } catch (error) { logError('Mail watcher shutdown failed', error); }
       try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error); }
       process.removeListener('SIGINT', onSignal);
       process.removeListener('SIGTERM', onSignal);

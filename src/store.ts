@@ -100,6 +100,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS subagents(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, thread_id TEXT, brief_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, run_id TEXT, status TEXT, snapshot_json TEXT);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagents(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS mail_watch_state(account TEXT PRIMARY KEY, uid_validity TEXT NOT NULL, last_uid INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS notification_events(id TEXT PRIMARY KEY, payload_json TEXT NOT NULL, input_message_id TEXT REFERENCES messages(id), status TEXT NOT NULL CHECK(status IN ('pending','processing','completed','unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS channel_state(channel_id TEXT PRIMARY KEY, session_id TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS restart_notice(id INTEGER PRIMARY KEY CHECK(id=1), application_id TEXT NOT NULL, interaction_token TEXT NOT NULL, channel_id TEXT);
@@ -521,6 +522,14 @@ export class Store implements SchedulerStore {
     return (this.db.prepare('SELECT snapshot_json FROM subagents WHERE snapshot_json IS NOT NULL ORDER BY updated_at DESC').all() as Array<{ snapshot_json: string }>).map(row => JSON.parse(row.snapshot_json) as Record<string, unknown>);
   }
 
+  mailWatchState(account: string): { uid_validity: string; last_uid: number } | undefined {
+    return this.db.prepare('SELECT uid_validity,last_uid FROM mail_watch_state WHERE account=?').get(account) as { uid_validity: string; last_uid: number } | undefined;
+  }
+
+  setMailWatchState(account: string, uidValidity: string, lastUid: number): void {
+    this.db.prepare('INSERT INTO mail_watch_state(account,uid_validity,last_uid) VALUES(?,?,?) ON CONFLICT(account) DO UPDATE SET uid_validity=excluded.uid_validity,last_uid=excluded.last_uid').run(account, uidValidity, lastUid);
+  }
+
   acceptNotification(payload: NotificationPayload): { duplicate: boolean; status: NotificationStatus } {
     const { id, source, title, body, occurred_at } = payload;
     const content = JSON.stringify({ id, source, title, body, occurred_at });
@@ -848,6 +857,7 @@ export class Store implements SchedulerStore {
   }
 
   channelReplyMode(channelId:string):ChannelReplyMode|undefined { return (this.settings.current().channels[channelId]?.replyMode as ChannelReplyMode|null|undefined)??undefined; }
+  channelSessionReset(channelId:string):'idle'|'daily'|undefined { return (this.settings.current().channels[channelId]?.sessionReset as 'idle'|'daily'|null|undefined)??undefined; }
   setChannelReplyMode(channelId:string,mode:ChannelReplyMode|undefined):void { this.settings.patchChannel(channelId,{replyMode:mode}); }
   channelReasoningEffort(channelId:string):ReasoningEffort|undefined { return (this.settings.current().channels[channelId]?.effort as ReasoningEffort|null|undefined)??undefined; }
   setChannelReasoningEffort(channelId:string,effort:ReasoningEffort|undefined):void { this.settings.patchChannel(channelId,{effort}); }

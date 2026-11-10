@@ -61,6 +61,14 @@ ui:
 #   port: 3212
 #   bearerToken: REPLACE_WITH_A_RANDOM_PRIVATE_TOKEN
 
+# Optional: watch Gmail inboxes over IMAP IDLE and queue new mail as notifications
+# in discord.notificationChannelId. Accounts must be connected under google with
+# the https://mail.google.com/ scope. delaySeconds (0-3600) defers the trigger.
+# mail:
+#   accounts:
+#     - email: someone@gmail.com
+#       delaySeconds: 0
+
 
 google:
   clientId: YOUR_GOOGLE_OAUTH_CLIENT_ID

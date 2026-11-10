@@ -23,6 +23,7 @@ How the Butler tree is laid out, where generated files and backups go, and how t
 | `daily-journal/` | daily-journal skill when it replaces a journal | manual |
 | `hledger/` | old per-write ledger copies (the mechanism was removed) | static archive |
 | `shortcuts/` | final signed iOS shortcuts | manual |
+| `renee-reference-assets/` | superseded Renee reference photo sets (`old-v1`–`old-v3`) | manual |
 
 Other bounded outputs: `workspace/memory-curation/work/` files are deleted by `fetch.py` after 45 days (`*.recalled.json` are state: `recalled.py` reads the 30 days before the day being curated); `model_requests` keeps 500 rows / 24 hours; `tool_calls` keeps full rows 30 days, after which recall/reflect rows are compacted to memory IDs (read by hindsight-curation's monthly check) and kept to 100 days; `.data/attachments/` files older than 90 days are deleted (the message keeps channel and msg IDs, and `discord_read` `message` re-downloads the original) — both run in `src/retention.ts` at startup and daily; `butler.log` and `deploy.log` rotate daily for 30 days via `/etc/logrotate.d/butler` (source `scripts/butler.logrotate`); the deploy script deletes `.data/deploy/previous-dist` after a successful start.
 
