@@ -98,7 +98,9 @@ export function createWebToolRuntime(config: WebConfig & { reserveRequest: (prov
           catch { throw new ProviderError(attemptSignal.aborted ? 'timeout' : 'network'); }
           if (!response.ok) {
             await response.body?.cancel().catch(() => {});
-            throw new ProviderError(response.status === 401 || response.status === 403 ? 'auth' : response.status === 402 || response.status === 432 ? 'quota' : response.status === 404 || response.status === 410 ? 'endpoint' : response.status === 422 ? 'source_unreadable' : response.status === 429 ? 'rate_limit' : response.status >= 500 ? 'upstream' : 'invalid_request');
+            // Firecrawl answers 403 for sites it refuses to scrape; its credential failures are 401.
+            const auth = response.status === 401 || (response.status === 403 && provider !== 'firecrawl');
+            throw new ProviderError(auth ? 'auth' : response.status === 403 ? 'source_unreadable' : response.status === 402 || response.status === 432 ? 'quota' : response.status === 404 || response.status === 410 ? 'endpoint' : response.status === 422 ? 'source_unreadable' : response.status === 429 ? 'rate_limit' : response.status >= 500 ? 'upstream' : 'invalid_request');
           }
           return response;
         };
