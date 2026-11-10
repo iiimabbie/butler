@@ -857,6 +857,7 @@ export class Store implements SchedulerStore {
   }
 
   channelReplyMode(channelId:string):ChannelReplyMode|undefined { return (this.settings.current().channels[channelId]?.replyMode as ChannelReplyMode|null|undefined)??undefined; }
+  channelSessionReset(channelId:string):'idle'|'daily'|undefined { return (this.settings.current().channels[channelId]?.sessionReset as 'idle'|'daily'|null|undefined)??undefined; }
   setChannelReplyMode(channelId:string,mode:ChannelReplyMode|undefined):void { this.settings.patchChannel(channelId,{replyMode:mode}); }
   channelReasoningEffort(channelId:string):ReasoningEffort|undefined { return (this.settings.current().channels[channelId]?.effort as ReasoningEffort|null|undefined)??undefined; }
   setChannelReasoningEffort(channelId:string,effort:ReasoningEffort|undefined):void { this.settings.patchChannel(channelId,{effort}); }

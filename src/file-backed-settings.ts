@@ -22,7 +22,7 @@ export class SettingsConflictError extends Error {
 class SettingsApplyError extends Error {}
 
 const channelIdPattern = /^\d{17,20}$/;
-const channelFields = new Set(['botReply', 'hindsightWrite', 'replyMode', 'mode', 'model', 'effort', 'imageModel', 'memoryBank', 'subagentTools']);
+const channelFields = new Set(['botReply', 'hindsightWrite', 'replyMode', 'mode', 'sessionReset', 'model', 'effort', 'imageModel', 'memoryBank', 'subagentTools']);
 type SettingsKey = 'crons' | 'reminders' | 'channels';
 type SettingsBytes = Record<SettingsKey, Buffer>;
 
@@ -78,7 +78,7 @@ export function validateSettings(crons: unknown, reminders: unknown, channels: u
     for (const [key, value] of Object.entries(raw)) {
       if (!channelFields.has(key)) throw new Error(`${label}.${key} is not a supported override`);
       if (['botReply', 'hindsightWrite', 'subagentTools'].includes(key) && value !== null && typeof value !== 'boolean') throw new Error(`${label}.${key} must be boolean or null`);
-      const choices = key === 'replyMode' ? ['all', 'mention', 'none'] : key === 'mode' ? ['queue', 'steer'] : key === 'effort' ? ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] : undefined;
+      const choices = key === 'replyMode' ? ['all', 'mention', 'none'] : key === 'mode' ? ['queue', 'steer'] : key === 'sessionReset' ? ['idle', 'daily'] : key === 'effort' ? ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'auto'] : undefined;
       if (choices && value !== null && (typeof value !== 'string' || !choices.includes(value))) throw new Error(`${label}.${key} is invalid`);
       if (['model', 'imageModel', 'memoryBank'].includes(key) && value !== null) requiredString(value, `${label}.${key}`);
     }
@@ -273,7 +273,7 @@ export class FileBackedSettings {
   }
 
   private channelDocument(channels: Record<string, ChannelOverrides>, original?: string): string {
-    const document = parseDocument(original ?? '# 列出 entry 才追蹤；刪除整筆 entry 即停止追蹤。{} 也是有效 entry。\n# 可設定 botReply、hindsightWrite、replyMode、mode、model、effort、imageModel、memoryBank、subagentTools。\n# memoryBank 指定此頻道使用的 Hindsight bank；省略或 null 使用全域 memory.bankId。\n# 欄位省略或設為 null 使用全域預設，不繼承父頻道。\n# 一般頻道預設 hindsightWrite: false、mode: steer。\nchannels: {}\n');
+    const document = parseDocument(original ?? '# 列出 entry 才追蹤；刪除整筆 entry 即停止追蹤。{} 也是有效 entry。\n# 可設定 botReply、hindsightWrite、replyMode、mode、sessionReset、model、effort、imageModel、memoryBank、subagentTools。\n# sessionReset: idle 閒置 55 分鐘換新 session；daily 每天午夜（排程時區）換。\n# memoryBank 指定此頻道使用的 Hindsight bank；省略或 null 使用全域 memory.bankId。\n# 欄位省略或設為 null 使用全域預設，不繼承父頻道。\n# 一般頻道預設 hindsightWrite: false、mode: steer。\nchannels: {}\n');
     const previous = document.get('channels', true);
     if (!previous || typeof previous !== 'object' || !('items' in previous)) document.set('channels', {});
     const old = document.toJS() as { channels: Record<string, unknown> };
