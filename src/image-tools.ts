@@ -44,6 +44,7 @@ const REFERENCE_LIMIT = 20 * 1024 * 1024;
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WORKSPACE_ROOT = resolve(PROJECT_ROOT, 'workspace');
 const REFERENCE_IMAGES_MAX = 4;
+const IMAGE_SIZES = ['auto', '1024x1024', '1024x1536', '1536x1024'];
 const referenceImagesParameter = {
   type: 'array', maxItems: REFERENCE_IMAGES_MAX, items: { type: 'string', minLength: 1 },
   description: 'Optional PNG/JPEG/WebP paths inside workspace or the attachment directory, e.g. a style, pose or outfit reference. A Discord attachment\'s path is attachment_inputs[].localPath from discord_read action=message. Say in the prompt what to take from each image.',
@@ -59,6 +60,7 @@ function generationDefinition(withSelf: boolean) {
         prompt: { type: 'string', minLength: 1, maxLength: 10_000 },
         ...(withSelf ? { self: { type: 'boolean', description: 'True when the image depicts yourself.' } } : {}),
         reference_images: referenceImagesParameter,
+        size: { type: 'string', enum: IMAGE_SIZES, description: 'Optional output size. For face swaps or recreating a reference image, choose the closest aspect ratio: portrait 1024x1536, landscape 1536x1024, or square 1024x1024. If omitted, the model decides.' },
       },
       required: ['prompt'],
       additionalProperties: false,
@@ -135,10 +137,11 @@ export function createImageToolRuntime(options: {
         return { status: 'queued_for_final_reply', path: destination, filename, mime: image.mime, delivery: 'pending' };
       }
       if (name !== 'image_generate') throw new ToolUsageError(`Unknown image tool: ${name}`);
-      if (typeof args.prompt !== 'string' || args.prompt.trim().length === 0 || args.prompt.length > 10_000 || Object.keys(args).some(key => key !== 'prompt' && key !== 'self' && key !== 'reference_images')) {
-        throw new ToolUsageError('image_generate requires a non-empty prompt of at most 10000 characters, optional self and optional reference_images');
+      if (typeof args.prompt !== 'string' || args.prompt.trim().length === 0 || args.prompt.length > 10_000 || Object.keys(args).some(key => key !== 'prompt' && key !== 'self' && key !== 'reference_images' && key !== 'size')) {
+        throw new ToolUsageError('image_generate requires a non-empty prompt of at most 10000 characters, optional self, optional reference_images and optional size');
       }
       if (args.self !== undefined && typeof args.self !== 'boolean') throw new ToolUsageError('image_generate self must be a boolean');
+      if (args.size !== undefined && (typeof args.size !== 'string' || !IMAGE_SIZES.includes(args.size))) throw new ToolUsageError('image_generate size must be auto, 1024x1024, 1024x1536 or 1536x1024');
       const self = args.self === true;
       const referencePaths = args.reference_images ?? [];
       if (!Array.isArray(referencePaths) || referencePaths.length > REFERENCE_IMAGES_MAX || referencePaths.some(path => typeof path !== 'string' || !path)) {
@@ -159,7 +162,7 @@ export function createImageToolRuntime(options: {
               'content-type': 'application/json',
               ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
             },
-            body: JSON.stringify({ model: config.model, prompt: args.prompt, n: 1, response_format: 'b64_json' }),
+            body: JSON.stringify({ model: config.model, prompt: args.prompt, n: 1, response_format: 'b64_json', size: args.size }),
             signal: AbortSignal.timeout(config.timeoutMs ?? 300_000),
           });
         } else {
@@ -168,6 +171,8 @@ export function createImageToolRuntime(options: {
           form.set('prompt', args.prompt);
           form.set('n', '1');
           form.set('response_format', 'b64_json');
+          if (typeof args.size === 'string') form.set('size', args.size);
+          form.set('input_fidelity', 'high');
           references.forEach((reference, index) => form.append('image[]', new Blob([new Uint8Array(reference.bytes)], { type: reference.mime }), `reference-${index + 1}${reference.extension}`));
           response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/images/edits`, {
             method: 'POST',
