@@ -1,4 +1,4 @@
-import { DiscordReactionInputError, ToolUsageError } from '../tools/tool-errors.js';
+import { errorMessage, DiscordReactionInputError, ToolUsageError } from '../tools/tool-errors.js';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { allowedReferencePath } from '../tools/image-tools.js';
@@ -179,7 +179,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
           await api('PUT', `/channels/${channelId}/messages/${messageId}/reactions/${encodeURIComponent(emoji)}/@me`);
           added.push(emoji);
         } catch (error) {
-          const original = error instanceof Error ? error.message : String(error);
+          const original = errorMessage(error);
           const ReactionError = error instanceof DiscordReactionInputError ? DiscordReactionInputError : Error;
           throw new ReactionError(`Failed to add reaction ${JSON.stringify(emoji)}; confirmed added: ${JSON.stringify(added)}. Successfully added reactions will not be rolled back; remaining reactions were not executed. The outcome for the current reaction may be unknown; do not retry automatically. Original error: ${original}`);
         }
@@ -233,7 +233,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
       const card = asRecord(await api('POST', `/channels/${channelId}/messages`, { allowed_mentions: { parse: [] }, embeds: [{ color: 0x8FBC8F, author: { name: '📨 交接' }, title, description: content, fields: [{ name: '來自', value: `<#${originChannelId}>${link ? ` · [原訊息](${link})` : ''}`, inline: true }, ...(requesterId ? [{ name: '交辦', value: `<@${requesterId}>`, inline: true }] : [])], footer: { text: 'Butler session handoff' }, timestamp: new Date().toISOString() }] }));
       if (typeof card.id !== 'string' || typeof card.timestamp !== 'string' || !Number.isFinite(Date.parse(card.timestamp))) throw new Error('Discord handoff card response lacks a valid message ID or timestamp; card outcome is unknown and must not be retried automatically');
       try { await handoff({ targetChannelId: channelId!, content: `${title}\n\n${content}`, cardMessageId: card.id, cardTime: card.timestamp, originChannelId, originMessageId, requesterId }); }
-      catch (error) { throw new Error(`Handoff card ${card.id} was posted but the target session could not be started (${error instanceof Error ? error.message : String(error)}); do not retry automatically`); }
+      catch (error) { throw new Error(`Handoff card ${card.id} was posted but the target session could not be started (${errorMessage(error)}); do not retry automatically`); }
       return { ok: true, confirmed: true, channelId, messageId: card.id, started: true };
     }
     let method = 'GET'; let path = ''; let body: unknown;

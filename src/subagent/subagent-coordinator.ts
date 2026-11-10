@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { errorMessage } from '../tools/tool-errors.js';
 
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped';
 export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: 'completed' | 'failed' | 'interrupted' | 'stopped'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
@@ -9,7 +10,7 @@ type Entry = { snapshot: SubagentSnapshot; abort: AbortController; resumeAfterSt
 type Options = {
   onEvent: (event: SubagentEvent) => void | Promise<void>;
   persistEvent: (event: SubagentEvent) => void;
-  setEventStatus: (id: string, expected: 'pending' | 'processing', status: Exclude<SubagentEvent['status'], 'pending'>) => boolean;
+  setEventStatus: (id: string, status: Exclude<SubagentEvent['status'], 'pending'>) => boolean;
   getEventStatus: (id: string) => string | undefined;
   pendingEvents: () => SubagentEvent[];
   persistMessage: (id: string, message: string) => string;
@@ -56,7 +57,7 @@ export class SubagentCoordinator {
         this.update(entry, 'completed');
         this.emit(entry, 'completed', result);
       } catch (error) {
-        entry.snapshot.error = error instanceof Error ? error.message : String(error);
+        entry.snapshot.error = errorMessage(error);
         if (entry.snapshot.stopRequested) {
           this.update(entry, 'stopped');
           this.emit(entry, 'stopped', `Stopped by parent: ${entry.snapshot.stopRequested.reason}. The worker process was terminated; work may be partially applied. Use subagent_send on this ID to request a status report.`);
@@ -116,14 +117,8 @@ export class SubagentCoordinator {
   }
 
   event(id: string) { const status = this.options.getEventStatus(id); return status ? { status } : undefined; }
-  updateEvent(id: string, status: Exclude<SubagentEvent['status'], 'pending'>) {
-    const expected = this.options.getEventStatus(id);
-    if (expected === 'pending' || expected === 'processing') this.options.setEventStatus(id, expected, status);
-  }
-  pendingEvents() { return this.options.pendingEvents().filter(event => event.status === 'pending'); }
-  prepareQueuedDeploy() {
-    return this.activeCount === 0;
-  }
+  updateEvent(id: string, status: Exclude<SubagentEvent['status'], 'pending'>): boolean { return this.options.setEventStatus(id, status); }
+  pendingEvents() { return this.options.pendingEvents(); }
   freeze() { this.frozen = true; for (const entry of this.entries.values()) entry.abort.abort(); }
   async drain() { await Promise.allSettled([...this.running]); }
   get activeCount() { return this.running.size; }

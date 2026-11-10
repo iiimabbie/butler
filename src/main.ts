@@ -10,12 +10,11 @@ import { MemoryCoordinator } from './memory/memory-coordinator.js';
 import { createWebToolRuntime } from './tools/web-tools.js';
 import { createHledgerToolRuntime } from './tools/hledger-tools.js';
 import { configureLogging, flushLogs, logError, logInfo, logWarn } from './log.js';
-import { isHttp429 } from './tools/tool-errors.js';
 
 try {
   const config = readConfig();
   configureLogging(config);
-  process.on('uncaughtExceptionMonitor', error => logError('Uncaught exception monitor', error, { mention: !isHttp429(error) }));
+  process.on('uncaughtExceptionMonitor', error => logError('Uncaught exception monitor', error));
   if (process.argv[2] === 'register-discord-commands') {
     await registerDiscordCommands(config);
   } else {
@@ -38,12 +37,11 @@ try {
       clearInterval(retentionTimer);
       watcher.close();
       closeSettingsWatch();
-      await memoryCoordinator?.close();
       store.close();
     }
   }
 } catch (error) {
-  logError('Butler startup/runtime failed', error, { mention: !isHttp429(error) });
+  logError('Butler startup/runtime failed', error);
   process.exitCode = 1;
 } finally {
   await flushLogs();

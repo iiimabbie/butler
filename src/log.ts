@@ -1,6 +1,7 @@
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { ButlerConfig } from './config.js';
+import { isHttp429 } from './tools/tool-errors.js';
 
 let webhookUrl: string | undefined;
 let mentionUserId: string | undefined;
@@ -73,7 +74,7 @@ export function logError(event: string, error?: unknown, options: { notify?: boo
   const previous = recentErrors.get(identity); if (previous !== undefined && now - previous < deduplicationWindowMs) { return; }
   if (queued >= 50) { logError('Error notifier queue full', undefined, { notify: false }); return; }
   recentErrors.set(identity, now); queued++;
-  const target = webhookUrl, notifyUserId = mentionSuppression.getStore() || options.mention === false ? undefined : mentionUserId, notifyThreadId = threadId;
+  const target = webhookUrl, notifyUserId = mentionSuppression.getStore() || options.mention === false || isHttp429(error) ? undefined : mentionUserId, notifyThreadId = threadId;
   const body = { ...(notifyUserId ? { content: `<@${notifyUserId}>` } : {}), embeds: [{ title: 'Butler ERROR', description: truncate(line, 4096), color: 0xED4245, timestamp: new Date().toISOString() }], allowed_mentions: { parse: [] as string[], ...(notifyUserId ? { users: [notifyUserId] } : {}) } };
   queue = queue.then(async () => {
     try {

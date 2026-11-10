@@ -1,4 +1,4 @@
-import { ToolUsageError, isHttp429 } from './tools/tool-errors.js';
+import { errorMessage, ToolUsageError } from './tools/tool-errors.js';
 import type { LogMethods } from './log.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { Cron } from 'croner';
@@ -117,7 +117,6 @@ export class Scheduler {
   private readonly pending = new Set<Promise<void>>();
   private readonly inFlight = new Set<string>();
   private stopped = true;
-  private polling = false;
 
   constructor(private readonly options: SchedulerOptions) {}
 
@@ -135,21 +134,19 @@ export class Scheduler {
       const nextRun = this.advanceCron(job, new Date(Date.parse(now) + 1));
       if (nextRun !== undefined) this.options.store.updateSchedule(job.id, { nextRun });
     }
-    void this.poll();
-    this.timer = setInterval(() => { void this.poll(); }, POLL_INTERVAL_MS);
+    this.poll();
+    this.timer = setInterval(() => { this.poll(); }, POLL_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
-    while (this.polling) await new Promise(resolve => setTimeout(resolve, 5));
     await Promise.allSettled([...this.pending]);
   }
 
-  private async poll(): Promise<void> {
-    if (this.stopped || this.polling) return;
-    this.polling = true;
+  private poll(): void {
+    if (this.stopped) return;
     try {
       const nowDate = new Date();
       const now = nowDate.toISOString();
@@ -169,14 +166,13 @@ export class Scheduler {
         const work = this.execute(claimed.job, claimed.run).finally(() => { this.inFlight.delete(job.id); this.pending.delete(work); });
         this.pending.add(work);
       }
-    } catch (error) { this.options.log.logError('Scheduler polling failed', error, { mention: !isHttp429(error) }); }
-    finally { this.polling = false; }
+    } catch (error) { this.options.log.logError('Scheduler polling failed', error); }
   }
 
   private advanceCron(job: ScheduleJob, from: Date): string | undefined {
     try { return scheduleNextRun(job, from) ?? undefined; }
     catch (error) {
-      this.options.log.logError('Could not calculate next run for schedule; disabling it', error, { mention: !isHttp429(error), fields: { scheduleId: job.id } });
+      this.options.log.logError('Could not calculate next run for schedule; disabling it', error, { fields: { scheduleId: job.id } });
       this.options.store.updateSchedule(job.id, { enabled: false });
       return undefined;
     }
@@ -188,9 +184,9 @@ export class Scheduler {
       await this.options.enqueue({ job, run, outputChannelId: job.outputChannelId, prompt: `Scheduled task requested by Discord user ${job.creatorId}. Send the result only to the configured output channel ${job.outputChannelId}. ${notificationRule}\n\n${job.content}` });
       this.options.store.finishScheduleRun(run.id, 'completed');
     } catch (error) {
-      this.options.log.logError('Scheduled task execution failed', error, { mention: !isHttp429(error), fields: { scheduleId: job.id, runId: run.id } });
-      try { this.options.store.finishScheduleRun(run.id, 'failed', error instanceof Error ? error.message : String(error)); }
-      catch (finishError) { this.options.log.logError('Could not persist scheduled execution failure', finishError, { mention: !isHttp429(finishError), fields: { runId: run.id } }); }
+      this.options.log.logError('Scheduled task execution failed', error, { fields: { scheduleId: job.id, runId: run.id } });
+      try { this.options.store.finishScheduleRun(run.id, 'failed', errorMessage(error)); }
+      catch (finishError) { this.options.log.logError('Could not persist scheduled execution failure', finishError, { fields: { runId: run.id } }); }
     }
   }
 }

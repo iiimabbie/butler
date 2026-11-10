@@ -5,7 +5,6 @@ import { readSafeFile } from '../safe-file.js';
 import type { Store, MessageSource } from '../store.js';
 import type { ProgressEvent } from '../agent/progress.js';
 import { formatLogTimestamp, logError, logInfo, logWarn } from '../log.js';
-import { isHttp429 } from '../tools/tool-errors.js';
 
 export type MemorySource = Pick<MessageSource, 'authorId' | 'authorName' | 'sourceKind' | 'channelId' | 'discordMessageId' | 'eventTime'>;
 export type MemoryMessage = { id: string; sessionId: string; role: string; content: string; createdAt: string; source: MemorySource; attachments?: Array<{ filename: string; mimeType: string; status: 'ready' | 'failed' }> };
@@ -63,7 +62,7 @@ export class Hindsight {
         createdBank = true;
       } else if (!response.ok) throw new Error(`bank config returned HTTP ${response.status}`);
     } catch (error) {
-      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error, { mention: !isHttp429(error) });
+      logError(`Hindsight bank setup failed session=${session} audit=${audit}`, error);
       store.finishTool(audit, 'failed', { bankId: this.config.bankId, error: safeError(error) });
       emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_bank_setup', status: 'failed', error: safeError(error) });
       logMemoryPhase('bank_setup', started, 'failed');

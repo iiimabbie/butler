@@ -42,3 +42,7 @@ export class WebPoolError extends Error {
 export class WebProviderError extends Error {
   constructor(readonly kind: string) { super(`Web provider: ${kind}`); this.name = 'WebProviderError'; }
 }
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

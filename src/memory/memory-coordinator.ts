@@ -3,7 +3,7 @@ import { Store, type AttachmentMemoryJob, type MemoryBatch } from '../store.js';
 import { Hindsight, ConversationSubmissionError, MemoryWriteSuppressedError } from './hindsight.js';
 import { buildConversationPayload } from './conversation-format.js';
 import { logError } from '../log.js';
-import { isHttp429 } from '../tools/tool-errors.js';
+import { errorMessage } from '../tools/tool-errors.js';
 import { nextCronRun } from '../scheduler.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
 
@@ -15,7 +15,6 @@ type Work = { documentId: string; kind: 'poll' | 'submit'; batch: MemoryBatch };
 
 export class MemoryCoordinator {
   private started = false;
-  private passive = false;
   private closed = false;
   private timer?: ReturnType<typeof setTimeout>;
   private activeHttp?: Promise<void>;
@@ -33,7 +32,6 @@ export class MemoryCoordinator {
     this.midnightAt = nextCronRun('0 0 * * *', this.getTimezone()).getTime();
     for (const job of this.store.attachmentMemoryJobs()) if (job.state === 'submitting') this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'unknown', { error: 'Restarted after persistent submit intent; automatic re-upload is unsafe.' });
     this.started = true;
-    this.passive = false;
     for (const batch of this.store.inFlightMemoryBatches()) {
       this.recoveryPending.add(batch.operationId);
       this.store.updateMemoryBatch(batch.operationId, batch.status === 'submitting' ? 'unknown' : batch.status, {
@@ -45,7 +43,7 @@ export class MemoryCoordinator {
   }
 
   notifyReady(): void {
-    if (!this.passive && !this.closed) this.schedule(0);
+    if (!this.closed) this.schedule(0);
   }
 
   flushSession(channelId: string, sessionId: string): void {
@@ -54,24 +52,14 @@ export class MemoryCoordinator {
   }
 
   async quiesce(): Promise<void> {
-    if (this.closed) return;
-    this.passive = true;
+    this.closed = true;
     this.clearTimer();
     await this.activeHttp?.catch(() => undefined);
     this.freezePrefixes(() => true, true);
   }
 
-  async resume(): Promise<void> {
-    if (this.closed) return;
-    this.passive = false;
-    this.schedule();
-  }
-
   async close(): Promise<void> {
-    if (this.closed) return;
     await this.quiesce();
-    this.closed = true;
-    this.clearTimer();
   }
 
   private freezePrefixes(matches: (prefix: Prefix) => boolean, force = false): void {
@@ -95,18 +83,18 @@ export class MemoryCoordinator {
   }
 
   private kick(): void {
-    if (!this.started || this.passive || this.closed || this.activeHttp) return;
+    if (!this.started || this.closed || this.activeHttp) return;
     this.activeHttp = this.drainOne().catch(error => {
-      logError('Memory coordinator drain failed', error, { mention: !isHttp429(error) });
+      logError('Memory coordinator drain failed', error);
     }).finally(() => {
       this.activeHttp = undefined;
-      if (!this.passive && !this.closed) this.schedule();
+      if (!this.closed) this.schedule();
     });
     this.schedule();
   }
 
   private schedule(delay?: number): void {
-    if (this.passive || this.closed || !this.started) return;
+    if (this.closed || !this.started) return;
     this.clearTimer();
     const wait = delay ?? this.nextDelay();
     if (wait === undefined) return;
@@ -119,7 +107,7 @@ export class MemoryCoordinator {
         if (midnightDue) this.midnightAt = nextCronRun('0 0 * * *', this.getTimezone()).getTime();
       } catch (error) {
         freezeFailed = true;
-        logError('Memory coordinator freeze failed', error, { mention: !isHttp429(error) });
+        logError('Memory coordinator freeze failed', error);
       } finally {
         if (this.activeHttp) this.schedule(freezeFailed ? 1_000 : undefined);
         else if (freezeFailed) this.schedule(1_000);
@@ -201,7 +189,7 @@ export class MemoryCoordinator {
 
   private async drainAttachment(job: AttachmentMemoryJob): Promise<void> {
     let source: { authorId?: string; authorName?: string; channelId?: string; discordMessageId?: string; eventTime?: string; createdAt: string; sourceKind?: string; forwardedMessage?: { authorId?: string; authorName?: string; channelId?: string; discordMessageId?: string; eventTime?: string } };
-    try { source = JSON.parse(job.sourceJson) as typeof source; } catch (error) { this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'unknown', { error: this.errorText(error) }); return; }
+    try { source = JSON.parse(job.sourceJson) as typeof source; } catch (error) { this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'unknown', { error: errorMessage(error) }); return; }
     if (job.state === 'queued') {
       if (!this.writeAllowed(source.channelId ?? '')) {
         this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'suppressed', { error: 'Source memory-write policy is no longer valid.' });
@@ -226,9 +214,9 @@ export class MemoryCoordinator {
           this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, 'suppressed', { error: error.message });
           return;
         }
-        logError(`Attachment memory submit failed document=${job.documentId}`, error, { mention: !isHttp429(error) });
+        logError(`Attachment memory submit failed document=${job.documentId}`, error);
         const rejection = error instanceof ConversationSubmissionError && error.classification === 'rejection';
-        this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, rejection ? 'failed' : 'unknown', { error: this.errorText(error) });
+        this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, rejection ? 'failed' : 'unknown', { error: errorMessage(error) });
       }
       return;
     }
@@ -259,9 +247,9 @@ export class MemoryCoordinator {
         logError(`Attachment memory operation terminal document=${job.documentId} operation=${operationId} status=${result.status}${detail ? ` reason=${detail}` : ''}`);
       }
     } catch (error) {
-      logError(`Attachment memory poll failed document=${job.documentId} operation=${operationId}`, error, { mention: !isHttp429(error) });
+      logError(`Attachment memory poll failed document=${job.documentId} operation=${operationId}`, error);
       const pollAttempt = Math.min(job.pollAttempt + 1, POLL_DELAYS.length - 1);
-      this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, job.state === 'retaining' ? 'retaining' : 'converting', { pollAttempt, nextPollAt: new Date(Date.now() + POLL_DELAYS[pollAttempt]).toISOString(), error: this.errorText(error) });
+      this.store.updateAttachmentMemoryJob(job.messageId, job.attachmentId, job.state === 'retaining' ? 'retaining' : 'converting', { pollAttempt, nextPollAt: new Date(Date.now() + POLL_DELAYS[pollAttempt]).toISOString(), error: errorMessage(error) });
     }
   }
 
@@ -276,10 +264,10 @@ export class MemoryCoordinator {
       });
     } catch (error) {
       if (error instanceof MemoryWriteSuppressedError) { this.suppressBatch(batch); return; }
-      logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
+      logError(`Memory submit failed operation=${batch.operationId} channel=${batch.channelId}`, error);
       const rejection = error instanceof ConversationSubmissionError && error.classification === 'rejection';
       this.store.updateMemoryBatch(batch.operationId, rejection ? 'failed' : 'unknown', {
-        error: this.errorText(error),
+        error: errorMessage(error),
         ...(!rejection ? { nextPollAt: new Date().toISOString() } : {}),
       });
     }
@@ -309,11 +297,11 @@ export class MemoryCoordinator {
         });
       }
     } catch (error) {
-      logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error, { mention: !isHttp429(error) });
+      logError(`Memory poll failed operation=${batch.operationId} channel=${batch.channelId}`, error);
       this.recoveryPending.delete(batch.operationId);
       const nextIndex = Math.min(batch.pollAttempt + 1, POLL_DELAYS.length - 1);
       this.store.updateMemoryBatch(batch.operationId, 'unknown', {
-        error: this.errorText(error),
+        error: errorMessage(error),
         lastPollAt: now, pollAttempt: nextIndex,
         nextPollAt: new Date(Date.now() + POLL_DELAYS[nextIndex]).toISOString(),
       });
@@ -329,7 +317,4 @@ export class MemoryCoordinator {
     return compare(a) - compare(b) || a.localeCompare(b);
   }
 
-  private errorText(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
-  }
 }

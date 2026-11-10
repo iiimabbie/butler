@@ -74,7 +74,7 @@ export type DiscordPresenceInput = { status?: DiscordPresence['status']; activit
 export class Store implements SchedulerStore {
   private readonly db: DatabaseSync;
   private readonly settings: FileBackedSettings;
-  private externalStopHooks?: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void };
+  private externalStopHooks?: { canStop: (channelId: string) => boolean };
   // Channel ID -> model override (undefined follows the default model).
   private fixedChannels = new Map<string, string | undefined>();
   private closed = false;
@@ -123,8 +123,6 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS web_usage(provider TEXT NOT NULL, date TEXT NOT NULL, requests INTEGER NOT NULL, PRIMARY KEY(provider,date));
       CREATE TABLE IF NOT EXISTS session_context_usage(session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE, model TEXT NOT NULL, base_url TEXT NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, local_count INTEGER NOT NULL, count_source TEXT NOT NULL DEFAULT 'local-count-estimate', context_limit INTEGER NOT NULL, limit_source TEXT NOT NULL, sampled_at TEXT NOT NULL, attachment_signature TEXT NOT NULL, checkpoint_through_message_id TEXT);
     `);
-    if (!(this.db.prepare('PRAGMA table_info(memory_batches)').all() as Array<{ name: string }>).some(column => column.name === 'poll_attempt')) this.db.exec('ALTER TABLE memory_batches ADD COLUMN poll_attempt INTEGER NOT NULL DEFAULT 0');
-    if (!(this.db.prepare('PRAGMA table_info(subagent_windows)').all() as Array<{ name: string }>).some(column => column.name === 'brief_json')) this.db.exec('ALTER TABLE subagent_windows ADD COLUMN brief_json TEXT');
     this.db.exec(`CREATE TABLE IF NOT EXISTS schedule_runtime(job_id TEXT PRIMARY KEY,next_run TEXT,schedule_key TEXT NOT NULL);`);
     this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_discord_id_unique ON message_sources(discord_message_id) WHERE discord_message_id IS NOT NULL');
     this.db.exec("UPDATE subagent_events SET status='failed_unknown',updated_at=datetime('now') WHERE status='processing'");
@@ -180,7 +178,7 @@ export class Store implements SchedulerStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
-  setExternalChannelStopHooks(hooks: { canStop: (channelId: string) => boolean; archive: (channelId: string) => void }): void { this.externalStopHooks = hooks; }
+  setExternalChannelStopHooks(hooks: { canStop: (channelId: string) => boolean }): void { this.externalStopHooks = hooks; }
 
   watchFileSettings(onInvalid: (error: Error, file: string) => void): () => void { this.settings.watch(onInvalid); return () => this.settings.close(); }
   setSettingsTimezone(timezone:string):void { this.settings.setTimezone(timezone); }
@@ -519,10 +517,10 @@ export class Store implements SchedulerStore {
     if (!messageIds.length) return;
     this.db.exec('BEGIN IMMEDIATE');
     try {
-      const rows = messageIds.map(messageId => this.db.prepare("SELECT id,message FROM subagent_inbox WHERE id=? AND subagent_id=? AND status='pending'").get(messageId, id) as { id: string; message: string } | undefined);
-      if (rows.some(row => !row)) throw new Error('Subagent inbox changed before consumption');
       const mark = this.db.prepare("UPDATE subagent_inbox SET status='consumed',consumed_at=? WHERE id=? AND subagent_id=? AND status='pending'");
-      for (const messageId of messageIds) mark.run(new Date().toISOString(), messageId, id);
+      for (const messageId of messageIds) {
+        if (Number(mark.run(new Date().toISOString(), messageId, id).changes) !== 1) throw new Error('Subagent inbox changed before consumption');
+      }
       this.db.exec('COMMIT');
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -581,7 +579,7 @@ export class Store implements SchedulerStore {
   }
 
   pendingSubagentEvents(): Array<{ id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: string; status: string }> {
-    return (this.db.prepare("SELECT id,run_id,subagent_id,parent_session_id,parent_input_id,payload_json,status FROM subagent_events WHERE status IN ('pending','failed_unknown') ORDER BY created_at,rowid").all() as Array<{ id: string; run_id: string; subagent_id: string; parent_session_id: string; parent_input_id: string | null; payload_json: string; status: string }>).map(row => {
+    return (this.db.prepare("SELECT id,run_id,subagent_id,parent_session_id,parent_input_id,payload_json,status FROM subagent_events WHERE status='pending' ORDER BY created_at,rowid").all() as Array<{ id: string; run_id: string; subagent_id: string; parent_session_id: string; parent_input_id: string | null; payload_json: string; status: string }>).map(row => {
       const payload = JSON.parse(row.payload_json) as { message: string; kind?: string };
       return { id: row.id, runId: row.run_id, subagentId: row.subagent_id, parentSession: row.parent_session_id, ...(row.parent_input_id ? { parentInputId: row.parent_input_id } : {}), ...payload, status: row.status };
     });
@@ -608,8 +606,9 @@ export class Store implements SchedulerStore {
     return (this.db.prepare('SELECT status FROM subagent_events WHERE id=?').get(id) as { status: string } | undefined)?.status;
   }
 
-  setSubagentEventStatus(id: string, expected: 'pending' | 'processing', status: 'processing' | 'delivered' | 'failed_unknown'): boolean {
-    const result = this.db.prepare('UPDATE subagent_events SET status=?,updated_at=? WHERE id=? AND status=?').run(status, new Date().toISOString(), id, expected);
+  /** Moves a pending or processing event to status; false when the event is already finished. */
+  setSubagentEventStatus(id: string, status: 'processing' | 'delivered' | 'failed_unknown'): boolean {
+    const result = this.db.prepare("UPDATE subagent_events SET status=?,updated_at=? WHERE id=? AND status IN ('pending','processing')").run(status, new Date().toISOString(), id);
     return Number(result.changes) === 1;
   }
 
@@ -877,15 +876,29 @@ export class Store implements SchedulerStore {
   deleteSchedule(id:string):boolean { return Boolean(this.settings.deleteSchedule(id)); }
 
   claimScheduleRun(id:string,scheduledAt:string,nextRun:string|null,now:string):{job:ScheduleJob;run:ScheduleRun}|undefined {
-    this.db.exec('BEGIN IMMEDIATE');try{const job=this.getSchedule(id);const row=this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as {next_run:string|null}|undefined;if(!job||!job.enabled||!row||row.next_run!==scheduledAt||scheduledAt>now){this.db.exec('COMMIT');return undefined;}const run:ScheduleRun={id:randomUUID(),jobId:id,scheduledAt,status:'running',claimedAt:now,finishedAt:null,error:null};try{this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id,id,scheduledAt,'running',now);}catch(error){if(error instanceof Error&&/UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)){this.db.exec('ROLLBACK');return undefined;}throw error;}const updated=this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=? AND next_run=?').run(nextRun,id,scheduledAt);if(Number(updated.changes)!==1)throw new Error(`Could not advance schedule ${id}`);this.db.exec('COMMIT');return {job:{...job,nextRun},run};}catch(error){this.db.exec('ROLLBACK');throw error;}
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const job = this.getSchedule(id);
+      const row = this.db.prepare('SELECT next_run FROM schedule_runtime WHERE job_id=?').get(id) as { next_run: string | null } | undefined;
+      if (!job || !job.enabled || !row || row.next_run !== scheduledAt || scheduledAt > now) { this.db.exec('COMMIT'); return undefined; }
+      const run: ScheduleRun = { id: randomUUID(), jobId: id, scheduledAt, status: 'running', claimedAt: now, finishedAt: null, error: null };
+      try { this.db.prepare('INSERT INTO schedule_runs(id,job_id,scheduled_at,status,claimed_at) VALUES(?,?,?,?,?)').run(run.id, id, scheduledAt, 'running', now); }
+      catch (error) {
+        // A run already recorded for this occurrence is never started twice.
+        if (error instanceof Error && /UNIQUE constraint failed: schedule_runs\.job_id, schedule_runs\.scheduled_at/.test(error.message)) { this.db.exec('ROLLBACK'); return undefined; }
+        throw error;
+      }
+      this.db.prepare('UPDATE schedule_runtime SET next_run=? WHERE job_id=?').run(nextRun, id);
+      this.db.exec('COMMIT');
+      return { job: { ...job, nextRun }, run };
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
 
   markRunningScheduleRunsUnknown(now: string): ScheduleRun[] {
     this.db.exec('BEGIN IMMEDIATE');
     try {
       const rows = this.db.prepare("SELECT * FROM schedule_runs WHERE status='running'").all() as ScheduleRunDbRow[];
-      const result = this.db.prepare("UPDATE schedule_runs SET status='unknown',finished_at=?,error='Process stopped before completion' WHERE status='running'").run(now);
-      if (Number(result.changes) !== rows.length) throw new Error('Could not mark all running schedule executions unknown');
+      this.db.prepare("UPDATE schedule_runs SET status='unknown',finished_at=?,error='Process stopped before completion' WHERE status='running'").run(now);
       this.db.exec('COMMIT');
       return rows.map(row => ({ ...runFromRow(row), status: 'unknown', finishedAt: now, error: 'Process stopped before completion' }));
     } catch (error) { this.db.exec('ROLLBACK'); throw error; }
