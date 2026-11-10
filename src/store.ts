@@ -7,10 +7,10 @@ import { dirname, join, relative } from 'node:path';
 import { FileBackedSettings, SettingsConflictError, type SettingsSnapshot } from './file-backed-settings.js';
 import { scheduleNextRun } from './scheduler.js';
 import type { ScheduleJob, ScheduleRun, SchedulerStore, ScheduleUpdate } from './scheduler.js';
-import type { TranscriptEntry } from './journal-transcript.js';
+import type { TranscriptEntry } from './agent/journal-transcript.js';
 import { projectPath } from './paths.js';
 import type { NotificationPayload } from './notifications.js';
-import type { WorkspaceContext } from './context.js';
+import type { WorkspaceContext } from './agent/context.js';
 
 // Attachment paths are stored relative to the project root so the project directory can move.
 const storedPath = (path: string | undefined): string | null => path === undefined ? null : relative(projectPath('.'), path);

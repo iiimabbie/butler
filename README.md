@@ -112,18 +112,18 @@ Slash commands：`/status` `/new` `/model` `/img_model` `/mode` `/replymode` `/c
 ```
 src/
   main.ts              進入點
-  discord.ts           Discord 事件、佇列、slash commands
-  agent.ts             組上下文、模型請求與工具迴圈
-  store.ts             SQLite
   config.ts            設定載入與熱更新
-  hindsight.ts         記憶 API；memory-coordinator.ts 負責 recall 與 retain
-  compaction.ts        對話壓縮
+  paths.ts             專案路徑
+  store.ts             SQLite
   scheduler.ts         排程與提醒
   notifications.ts     外部通知端點
-  subagent*.ts         Codex 子代理
-  code-mode*.ts        code_execute 沙箱
-  *-tools.ts           各類工具
   ui.ts                Google OAuth 管理頁（ui/ 為前端）
+  agent/               組上下文、模型請求與工具迴圈、對話壓縮
+  discord/             Discord 事件、佇列、slash commands、Discord 工具
+  memory/              記憶 API；memory-coordinator.ts 負責 recall 與 retain
+  subagent/            Codex 子代理與 code_execute 沙箱
+  attachments/         輸入附件、音訊、影片
+  tools/               各類工具
 scripts/               部署、systemd、快取與 prompt 診斷
 services/              hindsight、hledger、alloy 的 Docker 設定
 ```
