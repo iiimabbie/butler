@@ -1,4 +1,4 @@
-import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
+import { DEFAULT_SCHEDULE_TIMEZONE, localDate } from '../timezone.js';
 import { ActivityType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, type Presence, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from '../store.js';
@@ -567,14 +567,19 @@ class DiscordHandler {
     void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error));
   }
 
-  // Channel inputs go to a fresh session once the prompt cache has expired.
+  // Channel inputs start a fresh session when the configured reset threshold has passed.
   // ownWork is the caller's own queued work: a notification batch is claimed inside its enqueue.
   private channelSessionForWrite(channelId: string, ownWork = 0): { sessionId: string; model: string } {
-    const config = this.getRuntime().discord;
-    const state = this.store.channelState(channelId, config.defaultModel);
+    const runtime = this.getRuntime();
+    const state = this.store.channelState(channelId, runtime.discord.defaultModel);
     const last = this.store.lastModelRequestTime(state.sessionId);
     // A session that has not called the model yet is already fresh.
-    if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
+    if (!last) return state;
+    const timezone = runtime.settings.schedule?.timezone ?? DEFAULT_SCHEDULE_TIMEZONE;
+    const expired = this.store.channelSessionReset(channelId) === 'daily'
+      ? localDate(new Date(last), timezone) !== localDate(new Date(), timezone)
+      : Date.now() - Date.parse(last) >= IDLE_SESSION_RESET_MS;
+    if (!expired) return state;
     // Work running or queued in this channel still belongs to the current session.
     if ((this.queues.get(channelId)?.pending ?? 0) > ownWork) return state;
     // A running subagent reports back to this session, so keep it until the result arrives.
