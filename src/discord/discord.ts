@@ -39,8 +39,7 @@ export type RuntimeBundle = { settings: ButlerConfig; discord: DiscordConfig; we
 type ReplyContext = { messageId: string; channelId: string; authorId?: string; content?: string; hasAttachments?: boolean };
 type TextMessage = { authorId: string; authorName?: string; forwardedMessage?: import('../store.js').ForwardedMessage; channelId: string; messageId?: string; eventTime?: string; content: string; hasAttachments?: boolean; attachments?: DiscordAttachmentInput[]; isBot?: boolean; isSelf?: boolean; mentionsBot?: boolean; isWebhook?: boolean; webhookId?: string; reference?: ReplyContext; resolveReference?: () => Promise<ReplyContext>; reply(text: string, options?: { allowedMentions: typeof ALLOWED_MENTIONS; files?: Array<{ attachment: string; name: string }> }): Promise<unknown>; sendTyping?: () => Promise<unknown> };
 type CommandContext = {channelId: string; applicationId?: string; interactionToken?: string; command: CommandName; model?: string; effort?: 'default' | import('../store.js').ReasoningEffort; replyMode?: 'all' | 'mention' | 'none' | 'inherit'; mode?: 'queue' | 'steer'; enabled?: boolean; reply(text: string, options?: { embed?: import('discord.js').APIEmbed }): Promise<unknown> };
-const modelListCache = new Map<string, { expiresAt: number; models: string[] }>();
-const modelListInflight = new Map<string, Promise<string[]>>();
+const modelListCache = new Map<string, { expiresAt: number; models: Promise<string[]> }>();
 const MODEL_TTL = 10 * 60_000;
 // Anthropic prompt cache lasts at most one hour; after idle expiry, a new session is cheaper than recomputing the old one.
 const IDLE_SESSION_RESET_MS = 55 * 60_000;
@@ -62,18 +61,14 @@ type AskJob = {
 };
 
 class DiscordHandler {
-  private readonly queues = new Map<string, Promise<void>>();
-  private readonly backgroundQueues = new Map<string, Promise<void>>();
-  private readonly backgroundOutputChannels = new Map<string, string>();
+  private readonly queues = new Map<string, { tail: Promise<void>; pending: number }>();
+  private readonly backgroundWork = new Map<string, { outputChannelId: string; done: Promise<void> }>();
   private readonly ingressTails = new Map<string, Promise<void>>();
   private readonly activeIngestions = new Set<Promise<void>>();
   private readonly typing = new Map<string, { timer: ReturnType<typeof setInterval>; refs: number; send: () => void }>();
-  private readonly activeAsk = new Set<string>();
-  private readonly activeAskIds = new Map<string, string>();
-  private readonly activeProgress = new Map<string, ProgressRenderer>();
+  private readonly activeAsks = new Map<string, { askId: string; progress: ProgressRenderer; acceptsSteer: boolean }>();
   private readonly pendingSteer = new Map<string, Array<Promise<StoredMessage>>>();
   private readonly consumedSteerMessageIds = new Map<string, Set<string>>();
-  private readonly workCounts = new Map<string, number>();
   private scheduler?: Scheduler;
   private botIdentity?: { id: string; name: string };
   private readonly outputChannel: (id: string) => Promise<OutputChannel | undefined>;
@@ -83,25 +78,18 @@ class DiscordHandler {
   private readonly readPresence?: DiscordToolContext['readPresence'];
   private readonly subagentCoordinator: SubagentCoordinator;
   private stopping = false;
-  constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly runAsk = ask, private readonly restart?: (channelId: string) => Promise<boolean>, private readonly googleTools?: GoogleToolRuntime, private readonly localTools?: LocalToolRuntime, private readonly weatherTools?: WeatherToolRuntime, options: { outputChannel?: (id: string) => Promise<OutputChannel | undefined>; readOpeningMessage?: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator; setPresence?: DiscordToolContext['setPresence']; readPresence?: DiscordToolContext['readPresence'] } = {}) {
-    this.outputChannel = options.outputChannel ?? (async () => undefined);
-    this.readOpeningMessage = options.readOpeningMessage ?? (async () => undefined);
+  constructor(private readonly store: Store, private readonly getRuntime: () => RuntimeBundle, private readonly restart: ((channelId: string) => Promise<boolean>) | undefined, private readonly googleTools: GoogleToolRuntime | undefined, private readonly localTools: LocalToolRuntime, private readonly weatherTools: WeatherToolRuntime, options: { outputChannel: (id: string) => Promise<OutputChannel | undefined>; readOpeningMessage: (channelId: string) => Promise<SessionOpeningContext | undefined>; memoryCoordinator?: MemoryCoordinator; setPresence?: DiscordToolContext['setPresence']; readPresence?: DiscordToolContext['readPresence'] }) {
+    this.outputChannel = options.outputChannel;
+    this.readOpeningMessage = options.readOpeningMessage;
     this.memoryCoordinator = options.memoryCoordinator;
     this.setPresence = options.setPresence;
     this.readPresence = options.readPresence;
-    this.subagentCoordinator = new SubagentCoordinator(snapshot => this.store.saveSubagentRun(snapshot), {
+    this.subagentCoordinator = new SubagentCoordinator(this.store, {
       onEvent: event => this.handleSubagentEvent(event),
-      persistEvent: event => this.store.saveSubagentEvent(event),
-      setEventStatus: (id, status) => this.store.setSubagentEventStatus(id, status),
-      getEventStatus: id => this.store.subagentEventStatus(id),
-      pendingEvents: () => this.store.pendingSubagentEvents() as SubagentEvent[],
-      persistMessage: (id, message) => this.store.enqueueSubagentMessage(id, message),
-      loadMessages: id => this.store.pendingSubagentMessages(id),
-      consumeMessages: (id, messages) => this.store.consumeSubagentInbox(id, messages),
       onIdle: () => this.startQueuedDeploy(),
-    }, this.store.allSubagentRuns() as unknown as import('../subagent/subagent-coordinator.js').SubagentSnapshot[]);
-    this.localTools?.setDeployHooks({
-      idle: () => this.queues.size === 0 && this.backgroundQueues.size === 0 && this.subagentCoordinator.activeCount === 0,
+    });
+    this.localTools.setDeployHooks({
+      idle: () => this.queues.size === 0 && this.backgroundWork.size === 0 && this.subagentCoordinator.activeCount === 0,
       notify: (channelId, text) => this.notify(channelId, text),
     });
   }
@@ -135,14 +123,14 @@ class DiscordHandler {
     await this.memoryCoordinator?.quiesce();
     await this.scheduler?.stop();
     await Promise.allSettled([...this.activeIngestions]);
-    await Promise.allSettled([...this.queues.values(), ...this.backgroundQueues.values()]);
+    await Promise.allSettled([...[...this.queues.values()].map(queue => queue.tail), ...[...this.backgroundWork.values()].map(work => work.done)]);
     await this.memoryCoordinator?.close();
-    await this.localTools?.close();
+    await this.localTools.close();
     await this.subagentCoordinator.drain();
   }
 
   queueStatus(channelId: string): 'idle' | 'busy' { return this.queues.has(channelId) ? 'busy' : 'idle'; }
-  canStopChannel(channelId: string): boolean { return !this.queues.has(channelId) && !this.ingressTails.has(channelId) && !this.activeAsk.has(channelId) && (this.workCounts.get(channelId) ?? 0) === 0 && ![...this.backgroundOutputChannels.values()].includes(channelId); }
+  canStopChannel(channelId: string): boolean { return !this.queues.has(channelId) && !this.ingressTails.has(channelId) && ![...this.backgroundWork.values()].some(work => work.outputChannelId === channelId); }
 
   private reserveIngress(channelId: string): { ready: Promise<void>; release: () => void } {
     const ready = this.ingressTails.get(channelId) ?? Promise.resolve();
@@ -205,12 +193,13 @@ class DiscordHandler {
         this.memoryCoordinator?.notifyReady();
         return stored;
       });
-      if (mode === 'steer' && this.activeAsk.has(message.channelId) && (this.workCounts.get(message.channelId) ?? 0) === 1) {
+      const steerTarget = this.activeAsks.get(message.channelId);
+      if (mode === 'steer' && steerTarget?.acceptsSteer && this.queues.get(message.channelId)?.pending === 1) {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
-        this.activeProgress.get(message.channelId)?.event({ type: 'steer', speaker: message.authorName, message: content || '[附件]' });
-        logTrace('steer_enqueue', { traceId, parentAskId: this.activeAskIds.get(message.channelId), inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, queueLength: pending.length, queueIndex: pending.length - 1 });
+        steerTarget.progress.event({ type: 'steer', speaker: message.authorName, message: content || '[附件]' });
+        logTrace('steer_enqueue', { traceId, parentAskId: steerTarget.askId, inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, queueLength: pending.length, queueIndex: pending.length - 1 });
         releaseIngress();
         return;
       }
@@ -225,11 +214,10 @@ class DiscordHandler {
         try {
           const model = this.store.channelState(message.channelId, config.defaultModel).model;
           const openingContext = await this.sessionOpeningContext(stored.sessionId, message.channelId);
-          this.activeAsk.add(message.channelId);
-          this.activeAskIds.set(message.channelId, askId);
           logTrace('discord_ask_start', { askId, traceId, inputMessageId: message.messageId ?? stored.id, sessionId: stored.sessionId, channelId: message.channelId });
           progress = new ProgressRenderer({ send: async content => { const target = await this.outputChannel(message.channelId); if (!target) throw new Error('Progress message channel is unavailable'); const sent = await target.send(content); this.refreshTyping(message.channelId); return { edit: async updated => { if (!sent || typeof sent !== 'object' || !('edit' in sent)) throw new Error('Progress message did not return an editable message'); await (sent as { edit(options: { content: string; flags: number }): Promise<unknown> }).edit({ content: updated, flags: MessageFlags.SuppressEmbeds }); }, delete: async () => { if (!sent || typeof sent !== 'object' || !('delete' in sent)) throw new Error('Progress message did not return a deletable message'); await (sent as { delete(): Promise<unknown> }).delete(); } }; } });
-          this.activeProgress.set(message.channelId, progress);
+          const active = { askId, progress, acceptsSteer: true };
+          this.activeAsks.set(message.channelId, active);
           const runtime = this.getRuntime();
           await this.runAgent({
             storedInput: stored, model, channelId: message.channelId, outputChannelId: message.channelId, requesterId: message.authorId, messageId: message.messageId, reply: message.reply,
@@ -258,7 +246,7 @@ class DiscordHandler {
                 logTrace('steer_dequeue', { askId, traceId, sessionId: stored.sessionId, storedMessageId, remaining: pending?.length ?? 0 });
                 if (!pending?.length) this.pendingSteer.delete(message.channelId);
               },
-              onAskFinishing: () => { this.activeAsk.delete(message.channelId); stopTyping?.(); },
+              onAskFinishing: () => { active.acceptsSteer = false; stopTyping?.(); },
             },
           });
           askSucceeded = true;
@@ -270,9 +258,7 @@ class DiscordHandler {
           pending.splice(0);
           this.pendingSteer.delete(message.channelId);
         } finally {
-          this.activeAsk.delete(message.channelId);
-          this.activeAskIds.delete(message.channelId);
-          this.activeProgress.delete(message.channelId);
+          this.activeAsks.delete(message.channelId);
           logTrace('discord_ask_end', { askId, traceId, sessionId: stored.sessionId, succeeded: askSucceeded, pendingSteer: this.pendingSteer.get(message.channelId)?.length ?? 0 });
           if (!this.pendingSteer.get(message.channelId)?.length) this.pendingSteer.delete(message.channelId);
         }
@@ -368,7 +354,7 @@ class DiscordHandler {
     if (context.command === 'restart') {
       if (!this.restart) { await context.reply('目前不是由受控重啟入口啟動，無法重啟。'); return; }
       if (this.queues.size > 0) { await context.reply('目前有頻道工作進行中或排隊，無法重啟。'); return; }
-      if (this.localTools?.activeCount) { await context.reply('目前仍有主機工作運作，請先用 local_process_stop 停止，再重啟。'); return; }
+      if (this.localTools.activeCount) { await context.reply('目前仍有主機工作運作，請先用 local_process_stop 停止，再重啟。'); return; }
       this.stopping = true;
       try {
         if (!context.applicationId || !context.interactionToken) throw new Error('restart interaction token is unavailable');
@@ -420,7 +406,7 @@ class DiscordHandler {
     });
   }
 
-  enqueueScheduled(request: ScheduledTaskRequest): Promise<void> { return this.enqueueBackground(request.job.id, request.outputChannelId, () => this.runScheduled(request)); }
+  enqueueScheduled(request: ScheduledTaskRequest): Promise<void> { return this.runBackground(request.job.id, request.outputChannelId, () => this.runScheduled(request)); }
 
   private startTyping(channelId: string, sendTyping?: () => Promise<unknown>): () => void {
     if (!sendTyping) return () => {};
@@ -473,7 +459,7 @@ class DiscordHandler {
     });
     try {
       await job.beforeAsk?.(discordTools);
-      await this.runAsk(this.store, session, {
+      await ask(this.store, session, {
         baseUrl: config.baseUrl, apiKey: config.apiKey, model: job.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
         transcriptTimezone: runtime.settings.schedule?.timezone, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, workspaceDirectory: workspacePath,
         storedInput,
@@ -594,7 +580,7 @@ class DiscordHandler {
     // A session that has not called the model yet is already fresh.
     if (!last || Date.now() - Date.parse(last) < IDLE_SESSION_RESET_MS) return state;
     // Work running or queued in this channel still belongs to the current session.
-    if ((this.workCounts.get(channelId) ?? 0) > ownWork) return state;
+    if ((this.queues.get(channelId)?.pending ?? 0) > ownWork) return state;
     // A running subagent reports back to this session, so keep it until the result arrives.
     if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
     return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, 'idle') };
@@ -677,34 +663,28 @@ class DiscordHandler {
 
   // The queued deploy itself waits until channel work, background work and subagents are all idle.
   private startQueuedDeploy(): void {
-    if (!this.stopping) this.localTools?.startQueuedDeploy();
+    if (!this.stopping) this.localTools.startQueuedDeploy();
   }
 
-  private enqueueBackground(key: string, outputChannelId: string, work: () => Promise<void>): Promise<void> {
-    const previous = this.backgroundQueues.get(key) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(async () => {
-      this.backgroundOutputChannels.set(key, outputChannelId);
-      try { await work(); }
-      finally { this.backgroundOutputChannels.delete(key); }
-    });
-    this.backgroundQueues.set(key, next);
-    void next.finally(() => {
-      if (this.backgroundQueues.get(key) === next) this.backgroundQueues.delete(key);
+  // One entry per running scheduled job; the scheduler never starts a job that is still running.
+  private runBackground(key: string, outputChannelId: string, work: () => Promise<void>): Promise<void> {
+    const done = Promise.resolve().then(work);
+    this.backgroundWork.set(key, { outputChannelId, done });
+    void done.finally(() => {
+      this.backgroundWork.delete(key);
       this.startQueuedDeploy();
     }).catch(() => undefined);
-    return next;
+    return done;
   }
 
   private enqueue(channelId: string, work: () => Promise<void>): Promise<void> {
-    const previous = this.queues.get(channelId) ?? Promise.resolve();
-    this.workCounts.set(channelId, (this.workCounts.get(channelId) ?? 0) + 1);
-    const next = previous.catch(() => undefined).then(() => work());
-    this.queues.set(channelId, next);
+    const queue = this.queues.get(channelId) ?? { tail: Promise.resolve(), pending: 0 };
+    this.queues.set(channelId, queue);
+    queue.pending++;
+    const next = queue.tail.catch(() => undefined).then(() => work());
+    queue.tail = next;
     void next.finally(() => {
-      const remaining = (this.workCounts.get(channelId) ?? 1) - 1;
-      if (remaining > 0) this.workCounts.set(channelId, remaining);
-      else this.workCounts.delete(channelId);
-      if (this.queues.get(channelId) === next) this.queues.delete(channelId);
+      if (--queue.pending === 0) this.queues.delete(channelId);
       this.startQueuedDeploy();
     }).catch(() => undefined);
     return next;
@@ -877,29 +857,23 @@ async function handleInteraction(handler: DiscordHandler, interaction: import('d
 const AUTOCOMPLETE_LIMIT = 25;
 const DEFAULT_IMAGE_MODEL_CHOICE = { name: 'default (use configured model)', value: 'default' };
 
-// The model list of an endpoint, cached and shared by concurrent autocompletes.
+// The model list of an endpoint, cached and shared by concurrent autocompletes; a failed request is not cached.
 async function fetchModelIds(baseUrl: string, apiKey?: string): Promise<string[]> {
   const key = `${baseUrl}\u0000${apiKey ?? ''}`;
   const cached = modelListCache.get(key);
   if (cached && cached.expiresAt > Date.now()) return cached.models;
-  let request = modelListInflight.get(key);
-  if (!request) {
-    request = (async () => {
-      const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(2_000) });
-      if (!response.ok) throw new Error('model list request failed');
-      const body: unknown = await response.json();
-      if (!isRecord(body) || !Array.isArray(body.data)) throw new Error('model list response invalid');
-      const ids = body.data.map(item => isRecord(item) && typeof item.id === 'string' ? item.id.trim() : '').filter(Boolean);
-      if (!ids.length) throw new Error('model list empty');
-      return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
-    })();
-    modelListInflight.set(key, request);
-  }
-  try {
-    const models = await request;
-    modelListCache.set(key, { models, expiresAt: Date.now() + MODEL_TTL });
-    return models;
-  } finally { modelListInflight.delete(key); }
+  const models = (async () => {
+    const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) throw new Error('model list request failed');
+    const body: unknown = await response.json();
+    if (!isRecord(body) || !Array.isArray(body.data)) throw new Error('model list response invalid');
+    const ids = body.data.map(item => isRecord(item) && typeof item.id === 'string' ? item.id.trim() : '').filter(Boolean);
+    if (!ids.length) throw new Error('model list empty');
+    return [...new Set(ids)].sort((a, b) => a.localeCompare(b));
+  })();
+  modelListCache.set(key, { models, expiresAt: Date.now() + MODEL_TTL });
+  models.catch(() => { if (modelListCache.get(key)?.models === models) modelListCache.delete(key); });
+  return models;
 }
 
 async function modelChoices(config: DiscordConfig, focused: string): Promise<Array<{ name: string; value: string }>> {
@@ -936,7 +910,7 @@ async function handleAutocomplete(config: DiscordConfig, interaction: import('di
   } catch (error) { logWarn('Discord autocomplete failed', error); try { await interaction.respond([]); } catch { /* expired interaction */ } }
 }
 
-export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store, memoryCoordinator?: MemoryCoordinator, closeConfigWatch?: () => void): Promise<void> {
+export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store, memoryCoordinator?: MemoryCoordinator): Promise<void> {
   const startup = getRuntime();
   const config = startup.discord;
   const settings = startup.settings;
@@ -966,7 +940,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     }
   };
   client.on('shardReady', applyPresence);
-  const handler = new DiscordHandler(store, getRuntime, ask, requestRestart, googleTools, localTools, weatherTools, {
+  const handler = new DiscordHandler(store, getRuntime, requestRestart, googleTools, localTools, weatherTools, {
     memoryCoordinator,
     setPresence: input => { const presence = store.setDiscordPresence(input); applyPresence(); return presence; },
     readPresence: async (channelId, userId) => {
@@ -1076,7 +1050,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     closed = true;
     clearTimeout(notificationTimer);
     shutdownPromise = (async () => {
-      closeConfigWatch?.();
       try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error); }
       closeNotifications = undefined;
       try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error); }
@@ -1085,7 +1058,6 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       try { await closeUi?.(); } catch (error) { logError('UI shutdown failed', error); }
       closeUi = undefined;
       try { await client.destroy(); } catch (error) { logError('Discord client shutdown failed', error); }
-      try { store.close(); } catch (error) { logError('Discord database shutdown failed', error); }
     })();
     return shutdownPromise;
   };

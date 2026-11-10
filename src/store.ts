@@ -77,7 +77,6 @@ export class Store implements SchedulerStore {
   private externalStopHooks?: { canStop: (channelId: string) => boolean };
   // Channel ID -> model override (undefined follows the default model).
   private fixedChannels = new Map<string, string | undefined>();
-  private closed = false;
 
   constructor(path: string, options: { settingsDirectory?: string; timezone?: string; fixedChannels?: FixedChannel[] } = {}) {
     const directory = dirname(path);
@@ -914,8 +913,6 @@ export class Store implements SchedulerStore {
   }
 
   close(): void {
-    if (this.closed) return;
-    this.closed = true;
     this.settings.close(); this.db.close();
   }
 }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { errorMessage } from '../tools/tool-errors.js';
+import type { Store } from '../store.js';
 
 export type SubagentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'interrupted' | 'stopping' | 'stopped';
 export type SubagentEvent = { id: string; runId: string; subagentId: string; parentSession: string; parentInputId?: string; message: string; kind?: 'completed' | 'failed' | 'interrupted' | 'stopped'; status: 'pending' | 'processing' | 'delivered' | 'failed_unknown' };
@@ -7,15 +8,8 @@ export type SubagentSnapshot = { id: string; parentSession: string; runId: strin
 type Execute = (signal: AbortSignal, runId: string, task: string, resume: boolean) => Promise<string>;
 // resumeAfterStop: a message arrived while stopping; the window resumes once the stopped run ends.
 type Entry = { snapshot: SubagentSnapshot; abort: AbortController; resumeAfterStop?: Execute };
-type Options = {
+type Hooks = {
   onEvent: (event: SubagentEvent) => void | Promise<void>;
-  persistEvent: (event: SubagentEvent) => void;
-  setEventStatus: (id: string, status: Exclude<SubagentEvent['status'], 'pending'>) => boolean;
-  getEventStatus: (id: string) => string | undefined;
-  pendingEvents: () => SubagentEvent[];
-  persistMessage: (id: string, message: string) => string;
-  loadMessages: (id: string) => Array<{ id: string; message: string }>;
-  consumeMessages: (id: string, messages: string[]) => void;
   onIdle: () => void;
 };
 
@@ -24,11 +18,11 @@ export class SubagentCoordinator {
   private readonly running = new Set<Promise<void>>();
   private frozen = false;
 
-  constructor(private readonly persist: (snapshot: SubagentSnapshot) => void, private readonly options: Options, restored: SubagentSnapshot[] = []) {
-    for (const snapshot of restored) {
+  constructor(private readonly store: Store, private readonly hooks: Hooks) {
+    for (const snapshot of store.allSubagentRuns() as unknown as SubagentSnapshot[]) {
       const recovered = { ...snapshot, status: ['queued', 'running', 'stopping'].includes(snapshot.status) ? 'interrupted' as const : snapshot.status };
       this.entries.set(snapshot.id, { snapshot: recovered, abort: new AbortController() });
-      this.persist(recovered);
+      this.store.saveSubagentRun(recovered);
     }
   }
 
@@ -41,7 +35,7 @@ export class SubagentCoordinator {
     const now = new Date().toISOString();
     const entry: Entry = { snapshot: { id: input.id, parentSession: input.parentSession, runId, status: 'queued', task: input.task, origin: input.origin ?? current?.snapshot.origin, createdAt: current?.snapshot.createdAt ?? now, updatedAt: now }, abort: new AbortController() };
     this.entries.set(input.id, entry);
-    this.persist(entry.snapshot);
+    this.store.saveSubagentRun(entry.snapshot);
     const work = Promise.resolve().then(async () => {
       try {
         entry.abort.signal.throwIfAborted();
@@ -52,7 +46,7 @@ export class SubagentCoordinator {
           result = await input.execute(entry.abort.signal, runId, input.task, resume);
           entry.abort.signal.throwIfAborted();
           resume = true;
-        } while (!entry.snapshot.stopRequested && this.options.loadMessages(input.id).length);
+        } while (!entry.snapshot.stopRequested && this.store.pendingSubagentMessages(input.id).length);
         entry.snapshot.result = result;
         this.update(entry, 'completed');
         this.emit(entry, 'completed', result);
@@ -72,7 +66,7 @@ export class SubagentCoordinator {
     void work.finally(() => {
       this.running.delete(work);
       if (entry.resumeAfterStop && !this.frozen) this.start({ id: input.id, parentSession: input.parentSession, task: entry.snapshot.task, origin: entry.snapshot.origin, execute: entry.resumeAfterStop, resume: true });
-      this.options.onIdle();
+      this.hooks.onIdle();
     }).catch(() => undefined);
     return { subagent_id: input.id, run_id: runId, accepted: true, status: 'queued' };
   }
@@ -92,7 +86,7 @@ export class SubagentCoordinator {
     if (this.frozen) throw new Error('Subagents are frozen');
     const entry = this.entries.get(id);
     if (!entry || entry.snapshot.parentSession !== parentSession) throw new Error('Unknown subagent window for this parent session');
-    this.options.persistMessage(id, message);
+    this.store.enqueueSubagentMessage(id, message);
     if (entry.snapshot.status === 'stopping') entry.resumeAfterStop = resume;
     else if (!['queued', 'running'].includes(entry.snapshot.status)) this.start({ id, parentSession, task: entry.snapshot.task, origin: entry.snapshot.origin, execute: resume, resume: true });
     return { accepted: true, subagent_id: id };
@@ -110,15 +104,15 @@ export class SubagentCoordinator {
   }
 
   loadMessages(id: string, runId: string): Array<{ id: string; message: string }> {
-    return this.entries.get(id)?.snapshot.runId === runId ? this.options.loadMessages(id) : [];
+    return this.entries.get(id)?.snapshot.runId === runId ? this.store.pendingSubagentMessages(id) : [];
   }
   consumeMessages(id: string, runId: string, messages: string[]): void {
-    if (this.entries.get(id)?.snapshot.runId === runId) this.options.consumeMessages(id, messages);
+    if (this.entries.get(id)?.snapshot.runId === runId) this.store.consumeSubagentInbox(id, messages);
   }
 
-  event(id: string) { const status = this.options.getEventStatus(id); return status ? { status } : undefined; }
-  updateEvent(id: string, status: Exclude<SubagentEvent['status'], 'pending'>): boolean { return this.options.setEventStatus(id, status); }
-  pendingEvents() { return this.options.pendingEvents(); }
+  event(id: string) { const status = this.store.subagentEventStatus(id); return status ? { status } : undefined; }
+  updateEvent(id: string, status: Exclude<SubagentEvent['status'], 'pending'>): boolean { return this.store.setSubagentEventStatus(id, status); }
+  pendingEvents() { return this.store.pendingSubagentEvents() as SubagentEvent[]; }
   freeze() { this.frozen = true; for (const entry of this.entries.values()) entry.abort.abort(); }
   async drain() { await Promise.allSettled([...this.running]); }
   get activeCount() { return this.running.size; }
@@ -126,14 +120,14 @@ export class SubagentCoordinator {
     const entry = this.entries.get(id);
     if (!entry || entry.snapshot.runId !== runId) return;
     Object.assign(entry.snapshot, patch, { updatedAt: new Date().toISOString() });
-    this.persist(entry.snapshot);
+    this.store.saveSubagentRun(entry.snapshot);
   }
   private emit(entry: Entry, kind: 'completed' | 'failed' | 'interrupted' | 'stopped', message: string) {
     this.publish({ id: randomUUID(), runId: entry.snapshot.runId, subagentId: entry.snapshot.id, parentSession: entry.snapshot.parentSession, message, kind, status: 'pending' });
   }
   private publish(event: SubagentEvent) {
-    this.options.persistEvent(event);
-    void Promise.resolve().then(() => this.options.onEvent(event)).catch(() => undefined);
+    this.store.saveSubagentEvent(event);
+    void Promise.resolve().then(() => this.hooks.onEvent(event)).catch(() => undefined);
   }
-  private update(entry: Entry, status: SubagentStatus) { entry.snapshot.status = status; entry.snapshot.updatedAt = new Date().toISOString(); this.persist(entry.snapshot); }
+  private update(entry: Entry, status: SubagentStatus) { entry.snapshot.status = status; entry.snapshot.updatedAt = new Date().toISOString(); this.store.saveSubagentRun(entry.snapshot); }
 }

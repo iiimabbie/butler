@@ -32,7 +32,7 @@ try {
     retentionTimer.unref();
     try {
       await memoryCoordinator?.start();
-      await startDiscord(getRuntime, store, memoryCoordinator, () => { watcher.close(); closeSettingsWatch(); });
+      await startDiscord(getRuntime, store, memoryCoordinator);
     } finally {
       clearInterval(retentionTimer);
       watcher.close();
