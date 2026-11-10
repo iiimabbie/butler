@@ -1,4 +1,4 @@
-import { ToolUsageError } from './tool-errors.js';
+import { errorMessage, ToolUsageError } from './tool-errors.js';
 import { constants as fsConstants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile, copyFile, realpath } from 'node:fs/promises';
@@ -148,7 +148,7 @@ export function createImageToolRuntime(options: {
       if (self && !config.identityReferencePath) throw new ToolUsageError('image_generate self=true requires image.identityReferencePath');
       const references = [
         ...(self ? [await readReferenceImage(config.identityReferencePath!)] : []),
-        ...await Promise.all(referencePaths.map(async path => readReferenceImage(await allowedReferencePath(path, options.attachmentDir)).catch(error => { throw new ToolUsageError(error instanceof Error ? error.message : String(error)); }))),
+        ...await Promise.all(referencePaths.map(async path => readReferenceImage(await allowedReferencePath(path, options.attachmentDir)).catch(error => { throw new ToolUsageError(errorMessage(error)); }))),
       ];
 
       let response: Response;

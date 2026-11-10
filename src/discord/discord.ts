@@ -92,7 +92,7 @@ class DiscordHandler {
     this.subagentCoordinator = new SubagentCoordinator(snapshot => this.store.saveSubagentRun(snapshot), {
       onEvent: event => this.handleSubagentEvent(event),
       persistEvent: event => this.store.saveSubagentEvent(event),
-      setEventStatus: (id, expected, status) => this.store.setSubagentEventStatus(id, expected, status),
+      setEventStatus: (id, status) => this.store.setSubagentEventStatus(id, status),
       getEventStatus: id => this.store.subagentEventStatus(id),
       pendingEvents: () => this.store.pendingSubagentEvents() as SubagentEvent[],
       persistMessage: (id, message) => this.store.enqueueSubagentMessage(id, message),
@@ -101,7 +101,7 @@ class DiscordHandler {
       onIdle: () => this.startQueuedDeploy(),
     }, this.store.allSubagentRuns() as unknown as import('../subagent/subagent-coordinator.js').SubagentSnapshot[]);
     this.localTools?.setDeployHooks({
-      idle: () => this.queues.size === 0 && this.backgroundQueues.size === 0 && this.subagentCoordinator.prepareQueuedDeploy(),
+      idle: () => this.queues.size === 0 && this.backgroundQueues.size === 0 && this.subagentCoordinator.activeCount === 0,
       notify: (channelId, text) => this.notify(channelId, text),
     });
   }
@@ -120,7 +120,7 @@ class DiscordHandler {
     try {
       const state = this.channelSessionForWrite(channelId);
       this.store.addReadyMessage(state.sessionId, 'user', `[Butler runtime notice] ${text}`, { sourceKind: 'deployment_result', channelId });
-    } catch (error) { logError(`Runtime notice was not recorded channel=${channelId}`, error, { mention: !isHttp429(error) }); }
+    } catch (error) { logError(`Runtime notice was not recorded channel=${channelId}`, error); }
   }
 
   setScheduler(scheduler: Scheduler): void { this.scheduler = scheduler; }
@@ -264,7 +264,7 @@ class DiscordHandler {
           askSucceeded = true;
         } catch (error) {
           const failureKind = error instanceof AttachmentInputError ? ` (${error.code}${error.code === 'request_rejected' && error.status ? ` HTTP ${error.status}` : ''})` : '';
-          logError(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { mention: !isHttp429(error) && !isHttp429(failureKind), deduplicationKey: discordAskDeduplicationKey(message.channelId, failureKind) });
+          logError(`Discord message ask failed${failureKind} channel=${message.channelId} message=${message.messageId ?? 'unknown'}`, error, { mention: !isHttp429(failureKind), deduplicationKey: `Discord message ask failed${failureKind} channel=${message.channelId}` });
           const pending = this.pendingSteer.get(message.channelId) ?? [];
           logTrace('steer_queue_discard', { askId, traceId, sessionId: stored.sessionId, count: pending.length, reason: 'ask_error_cleanup' });
           pending.splice(0);
@@ -359,7 +359,7 @@ class DiscordHandler {
           if (!result.compressedMessages) await context.reply(`沒有足夠的較早訊息可壓縮；最近 ${KEEP_RECENT_MESSAGES} 則訊息會保留。`);
           else await context.reply(`已摘要 ${result.compressedMessages} 則較早訊息，保留最近 ${result.retainedMessages} 則原始訊息。`);
         } catch (error) {
-          logError(`Discord conversation compaction failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
+          logError(`Discord conversation compaction failed channel=${context.channelId}`, error);
           await context.reply(error instanceof Error ? error.message : '壓縮失敗；原有上下文保持不變。');
         }
       });
@@ -376,8 +376,8 @@ class DiscordHandler {
         this.store.setRestartNotice({ applicationId: context.applicationId, interactionToken: context.interactionToken, channelId: context.channelId });
       } catch (error) {
         this.stopping = false;
-        try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError, { mention: !isHttp429(noticeError) }); }
-        logError(`Discord restart notice persistence failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
+        try { await context.reply('無法保存重啟通知，Butler 已恢復接收工作。'); } catch (noticeError) { logError('Discord restart failure notice delivery failed', noticeError); }
+        logError(`Discord restart notice persistence failed channel=${context.channelId}`, error);
         return;
       }
       try {
@@ -386,8 +386,8 @@ class DiscordHandler {
       } catch (error) {
         this.stopping = false;
         this.store.setRestartNotice(null);
-        logError(`Discord managed restart failed channel=${context.channelId}`, error, { mention: !isHttp429(error) });
-        try { await context.reply('重啟未能啟動；Butler 已恢復接收工作。'); } catch (error) { logError('Discord restart failure notice delivery failed', error, { mention: !isHttp429(error) }); }
+        logError(`Discord managed restart failed channel=${context.channelId}`, error);
+        try { await context.reply('重啟未能啟動；Butler 已恢復接收工作。'); } catch (error) { logError('Discord restart failure notice delivery failed', error); }
       }
       return;
     }
@@ -473,7 +473,7 @@ class DiscordHandler {
     });
     try {
       await job.beforeAsk?.(discordTools);
-      await this.runAsk(this.store, session, storedInput.content, {
+      await this.runAsk(this.store, session, {
         baseUrl: config.baseUrl, apiKey: config.apiKey, model: job.model, maxContextTokens: config.maxContextTokens, modelContextTokens: config.modelContextTokens, timeoutMs: config.requestTimeoutMs,
         transcriptTimezone: runtime.settings.schedule?.timezone, attachmentDir: config.attachmentDir, transcription: runtime.settings.transcription, workspaceDirectory: workspacePath,
         storedInput,
@@ -528,7 +528,7 @@ class DiscordHandler {
     } catch (error) {
       if (attachmentToolCallIds.length) {
         try { this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : deliveryAttempted ? 'failed_or_unknown' : 'not_sent'); }
-        catch (persistError) { logError('Discord attachment delivery status persistence failed', persistError, { mention: !isHttp429(persistError) }); }
+        catch (persistError) { logError('Discord attachment delivery status persistence failed', persistError); }
       }
       throw error;
     }
@@ -567,8 +567,7 @@ class DiscordHandler {
         const target = await this.outputChannel(origin.outputChannelId);
         if (!target) { logError(`Subagent output channel unavailable event=${event.id}`); return; }
         if (this.stopping) return;
-        this.subagentCoordinator.updateEvent(event.id, 'processing');
-        if (this.subagentCoordinator.event(event.id)?.status !== 'processing') return;
+        if (!this.subagentCoordinator.updateEvent(event.id, 'processing')) return;
         started = true;
         const runtime = this.getRuntime();
         const config = runtime.discord;
@@ -579,11 +578,11 @@ class DiscordHandler {
         this.subagentCoordinator.updateEvent(event.id, 'delivered');
       } catch (error) {
         if (started) this.subagentCoordinator.updateEvent(event.id, 'failed_unknown');
-        logError(`Subagent parent event failed event=${event.id}`, error, { mention: !isHttp429(error) });
+        logError(`Subagent parent event failed event=${event.id}`, error);
       }
     };
     const queued = this.enqueue(origin.channelId, work);
-    void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error, { mention: !isHttp429(error) }));
+    void queued.catch(error => logError(`Could not enqueue subagent parent event event=${event.id}`, error));
   }
 
   // Channel inputs go to a fresh session once the prompt cache has expired.
@@ -627,7 +626,7 @@ class DiscordHandler {
     const state = this.channelSessionForWrite(input.targetChannelId);
     const { message: stored } = this.store.addReadyMessage(state.sessionId, 'user', input.content, { sourceKind: 'session_handoff', authorId: input.requesterId, channelId: input.targetChannelId, discordMessageId: input.cardMessageId, eventTime: input.cardTime, ...(input.originMessageId ? { replyToMessageId: input.originMessageId, replyToChannelId: input.originChannelId } : {}) });
     this.memoryCoordinator?.notifyReady();
-    void this.enqueue(input.targetChannelId, () => this.runChannelInput(stored, { channelId: input.targetChannelId, outputChannelId: input.targetChannelId, entryKind: 'normal', requesterId: input.requesterId, triggerInputId: stored.id }, target)).catch(error => logError(`Session handoff failed channel=${input.targetChannelId}`, error, { mention: !isHttp429(error) }));
+    void this.enqueue(input.targetChannelId, () => this.runChannelInput(stored, { channelId: input.targetChannelId, outputChannelId: input.targetChannelId, entryKind: 'normal', requesterId: input.requesterId, triggerInputId: stored.id }, target)).catch(error => logError(`Session handoff failed channel=${input.targetChannelId}`, error));
   }
 
   enqueueNotifications(): void {
@@ -650,10 +649,10 @@ class DiscordHandler {
         this.store.finishNotifications(inputMessageId, 'completed');
       } catch (error) {
         if (inputMessageId) this.store.finishNotifications(inputMessageId, 'unknown');
-        logError('Notification batch processing failed', error, { mention: !isHttp429(error), fields: { started: Boolean(inputMessageId) } });
+        logError('Notification batch processing failed', error, { fields: { started: Boolean(inputMessageId) } });
       }
     };
-    void this.enqueue(channelId, work).catch(error => logError('Could not enqueue notification batch', error, { mention: !isHttp429(error) }));
+    void this.enqueue(channelId, work).catch(error => logError('Could not enqueue notification batch', error));
   }
 
   private channelSubagent(channelId: string, subagent: import('../config.js').ButlerConfig['subagent']): import('../config.js').ButlerConfig['subagent'] {
@@ -792,7 +791,7 @@ async function archiveDeliveredAttachments(result: unknown, files: OutgoingFile[
     let localPath = file.archivePath;
     if (!localPath) {
       try { localPath = (await archiveOutgoingAttachment(file.attachment, item.name, attachmentDir, mimeType)).localPath; }
-      catch (error) { logError(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error, { mention: !isHttp429(error) }); }
+      catch (error) { logError(`Delivered Discord attachment archive failed message=${messageId} filename=${item.name}`, error); }
     }
     delivered.push({ attachmentId: item.id, filename: item.name, mimeType, status: 'ready', ...(localPath ? { localPath, memoryDocumentId: `attachment:${messageId}:${item.id}` } : {}), ...(file.origin ? { origin: file.origin } : {}) });
   }
@@ -862,7 +861,7 @@ async function handleInteraction(handler: DiscordHandler, interaction: import('d
       return interaction.reply({ content, flags: options?.embed ? MessageFlags.Ephemeral : MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, embeds: options?.embed ? [options.embed] : [], allowedMentions: ALLOWED_MENTIONS });
     } });
   } catch (error) {
-    logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error, { mention: !isHttp429(error) });
+    logError(`Discord interaction failed channel=${interaction.channelId ?? 'unknown'} command=${interaction.commandName}`, error);
     try {
       if (interaction.deferred || interaction.replied) {
         await interaction.editReply({ content: DELIVERY_ERROR, flags: MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
@@ -870,7 +869,7 @@ async function handleInteraction(handler: DiscordHandler, interaction: import('d
         await interaction.reply({ content: DELIVERY_ERROR, flags: MessageFlags.Ephemeral | MessageFlags.SuppressEmbeds, allowedMentions: ALLOWED_MENTIONS });
       }
     } catch (error) {
-      logError('Discord interaction failure notice delivery failed', error, { mention: !isHttp429(error) });
+      logError('Discord interaction failure notice delivery failed', error);
     }
   }
 }
@@ -1005,7 +1004,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       };
     },
   });
-  store.setExternalChannelStopHooks({ canStop: id => handler.canStopChannel(id), archive: id => { store.archiveChannelSession(id); } });
+  store.setExternalChannelStopHooks({ canStop: id => handler.canStopChannel(id) });
   let discordReady = false;
   let notificationTimer: ReturnType<typeof setTimeout> | undefined;
   const scheduleNotificationBatch = () => {
@@ -1013,7 +1012,7 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     next.setMinutes(60, 0, 0);
     notificationTimer = setTimeout(() => {
       try { handler.enqueueNotifications(); }
-      catch (error) { logError('Notification batch scheduling failed', error, { mention: !isHttp429(error) }); }
+      catch (error) { logError('Notification batch scheduling failed', error); }
       scheduleNotificationBatch();
     }, next.getTime() - Date.now());
   };
@@ -1036,14 +1035,14 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     if (notice) {
       // Interaction tokens stay valid for 15 minutes, which covers a restart; ephemeral replies are only editable through them.
       void client.rest.patch(Routes.webhookMessage(notice.applicationId, notice.interactionToken, '@original'), { body: { content: '重啟完成' }, auth: false })
-        .catch(error => logError('Discord restart readiness notification failed', error, { mention: !isHttp429(error) }));
+        .catch(error => logError('Discord restart readiness notification failed', error));
     }
     const deployNotice = store.takeDeployNotice();
-    if (deployNotice) void handler.notify(deployNotice.channelId, deployNotice.text).catch(error => logError('Deployment notice delivery failed', error, { mention: !isHttp429(error) }));
+    if (deployNotice) void handler.notify(deployNotice.channelId, deployNotice.text).catch(error => logError('Deployment notice delivery failed', error));
     const scheduler = new Scheduler({ store, enqueue: request => handler.enqueueScheduled(request), log: { logInfo, logWarn, logError } });
     handler.setScheduler(scheduler);
     scheduler.start();
-    if (managed) execFile('systemd-notify', ['--ready'], error => { if (error) logError('Discord readiness signal failed', error, { mention: !isHttp429(error) }); });
+    if (managed) execFile('systemd-notify', ['--ready'], error => { if (error) logError('Discord readiness signal failed', error); });
   });
   client.on('messageCreate', message => {
     const errorWebhookUrl = getRuntime().settings.discord?.errorWebhookUrl;
@@ -1057,15 +1056,15 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
       : message.content;
     const attachments = forwardedMessage ? forwardedAttachments : [...message.attachments.values()].map(item => ({ id: item.id, url: item.url, name: item.name, contentType: item.contentType, size: item.size }));
     const handle = () => handler.message({ authorId: message.author.id, authorName: message.member?.displayName ?? message.author.globalName ?? message.author.username, forwardedMessage, channelId: message.channelId, eventTime: message.createdAt.toISOString(), messageId: message.id, content, hasAttachments: attachments.length > 0, attachments, isBot: message.author.bot, isSelf: message.author.id === client.user?.id, mentionsBot: Boolean(client.user && message.mentions.users.has(client.user.id)), isWebhook: Boolean(message.webhookId), webhookId: message.webhookId ?? undefined, reference: message.reference?.messageId && !forwardedMessage ? { messageId: message.reference.messageId, channelId: message.reference.channelId ?? message.channelId } : undefined, reply: (text, options) => message.system ? message.channel.send({ content: text, flags: MessageFlags.SuppressEmbeds, allowedMentions: options?.allowedMentions, files: options?.files }) : message.reply({ content: text, failIfNotExists: false, flags: MessageFlags.SuppressEmbeds, allowedMentions: options?.allowedMentions, files: options?.files }), sendTyping: () => message.channel.sendTyping() })
-      .catch(error => logError(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error, { mention: !isHttp429(error) }));
+      .catch(error => logError(`Discord message handler failed channel=${message.channelId} message=${message.id}`, error));
     if (isErrorWebhook) void withoutLogMention(handle);
     else void handle();
   });
   client.on('interactionCreate', interaction => {
     if (interaction.isAutocomplete()) { const runtime = getRuntime(); void handleAutocomplete(runtime.discord, interaction, runtime.settings.image).catch(error => logWarn('Discord autocomplete handler failed', error)); }
-    else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(error => logError('Discord interaction handler failed', error, { mention: !isHttp429(error) }));
+    else if (interaction.isChatInputCommand()) void handleInteraction(handler, interaction).catch(error => logError('Discord interaction handler failed', error));
   });
-  client.on('error', error => logError('Discord client error', error, { mention: !isHttp429(error) }));
+  client.on('error', error => logError('Discord client error', error));
 
   let closed = false;
   let uiStartupFailed = false;
@@ -1078,19 +1077,19 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
     clearTimeout(notificationTimer);
     shutdownPromise = (async () => {
       closeConfigWatch?.();
-      try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error, { mention: !isHttp429(error) }); }
+      try { await closeNotifications?.(); } catch (error) { logError('Notification listener shutdown failed', error); }
       closeNotifications = undefined;
-      try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error, { mention: !isHttp429(error) }); }
+      try { await handler.close(); } catch (error) { logError('Local runtime shutdown failed', error); }
       process.removeListener('SIGINT', onSignal);
       process.removeListener('SIGTERM', onSignal);
-      try { await closeUi?.(); } catch (error) { logError('UI shutdown failed', error, { mention: !isHttp429(error) }); }
+      try { await closeUi?.(); } catch (error) { logError('UI shutdown failed', error); }
       closeUi = undefined;
-      try { await client.destroy(); } catch (error) { logError('Discord client shutdown failed', error, { mention: !isHttp429(error) }); }
-      try { store.close(); } catch (error) { logError('Discord database shutdown failed', error, { mention: !isHttp429(error) }); }
+      try { await client.destroy(); } catch (error) { logError('Discord client shutdown failed', error); }
+      try { store.close(); } catch (error) { logError('Discord database shutdown failed', error); }
     })();
     return shutdownPromise;
   };
-  const onSignal = (signal: NodeJS.Signals) => { void shutdown().then(finish).catch(error => { logError(`Discord ${signal} shutdown failed`, error, { mention: !isHttp429(error) }); finish(); }); };
+  const onSignal = (signal: NodeJS.Signals) => { void shutdown().then(finish).catch(error => { logError(`Discord ${signal} shutdown failed`, error); finish(); }); };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
@@ -1132,8 +1131,5 @@ function formatContextUsage(sample: ReturnType<Store['contextUsage']>, model: st
   return `${sample.inputTokens} input / ${sample.outputTokens} output；${sample.model}；${sample.limitSource} ${limit} tokens；${pct}；${sample.sampledAt}；Responses usage${stale}`;
 }
 
-function discordAskDeduplicationKey(channelId: string, failureKind: string): string {
-  return `Discord message ask failed${failureKind} channel=${channelId}`;
-}
 function isHighSurrogate(code: number): boolean { return code >= 0xD800 && code <= 0xDBFF; }
 function isLowSurrogate(code: number): boolean { return code >= 0xDC00 && code <= 0xDFFF; }

@@ -1,4 +1,4 @@
-import { ToolUsageError } from './tool-errors.js';
+import { errorMessage, ToolUsageError } from './tool-errors.js';
 import { constants } from 'node:fs';
 import { open, opendir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
@@ -51,7 +51,7 @@ export class LocalToolRuntime {
     this.deployRunning = channelId;
     void this.runDeploy(channelId).catch(async error => {
       this.deployRunning = undefined;
-      await this.deployNotify(channelId, `部署失敗：${error instanceof Error ? error.message : String(error)}`).catch(() => undefined);
+      await this.deployNotify(channelId, `部署失敗：${errorMessage(error)}`).catch(() => undefined);
     });
   }
   private async runDeploy(channelId: string) {

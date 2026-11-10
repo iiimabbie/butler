@@ -1,3 +1,4 @@
+import { errorMessage } from './tools/tool-errors.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
@@ -49,7 +50,7 @@ function validateSchedule(value: unknown, kind: 'cron' | 'reminder', index: numb
   let runAt: string | null = null;
   if (kind === 'cron') {
     cron = requiredString(value.cron, `${label}.cron`);
-    try { validateCronExpression(cron); } catch (error) { throw new Error(`${label}.cron: ${error instanceof Error ? error.message : String(error)}`); }
+    try { validateCronExpression(cron); } catch (error) { throw new Error(`${label}.cron: ${errorMessage(error)}`); }
   } else {
     const time = requiredString(value.runAt, `${label}.runAt`);
     if (!/^\d{4}-\d\d-\d\dT.*(?:Z|[+-]\d\d:\d\d)$/.test(time) || !Number.isFinite(Date.parse(time))) throw new Error(`${label}.runAt must be an ISO date-time with a timezone`);
@@ -126,10 +127,10 @@ export class FileBackedSettings {
         const document = parseDocument(bytes[key].toString('utf8'));
         if (document.errors.length) throw document.errors[0];
         return document.toJS();
-      } catch (error) { throw new Error(`${this.paths[key]}: ${error instanceof Error ? error.message : String(error)}`); }
+      } catch (error) { throw new Error(`${this.paths[key]}: ${errorMessage(error)}`); }
     };
     try { return { snapshot: validateSettings(decode('crons'), decode('reminders'), decode('channels'), this.timezone), bytes }; }
-    catch (error) { throw new Error(`${this.directory}: ${error instanceof Error ? error.message : String(error)}`); }
+    catch (error) { throw new Error(`${this.directory}: ${errorMessage(error)}`); }
   }
 
   initialize(snapshot: SettingsSnapshot): void {
@@ -170,7 +171,7 @@ export class FileBackedSettings {
       try { this.apply?.(next, previous); }
       catch (error) {
         this.snapshot = previous;
-        const fatal = new SettingsApplyError(`Could not apply file-backed settings: ${error instanceof Error ? error.message : String(error)}`);
+        const fatal = new SettingsApplyError(`Could not apply file-backed settings: ${errorMessage(error)}`);
         throw fatal;
       }
     } else this.snapshot = next;
@@ -248,7 +249,6 @@ export class FileBackedSettings {
     const temp = join(this.directory, `.${randomUUID()}.tmp`);
     try {
       writeFileSync(temp, content, { mode: 0o600, flag: 'wx' });
-      for (const name of Object.keys(this.paths) as SettingsKey[]) if (!readFileSync(this.paths[name]).equals(this.bytes![name])) throw new SettingsConflictError(`Settings changed during update: ${this.paths[name]}`);
       renameSync(temp, this.paths[key]);
     } catch (error) {
       if (existsSync(temp)) unlinkSync(temp);

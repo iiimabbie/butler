@@ -1,5 +1,5 @@
 import { Worker } from 'node:worker_threads';
-import { ToolUsageError } from '../tools/tool-errors.js';
+import { errorMessage, ToolUsageError } from '../tools/tool-errors.js';
 
 // Explicit list: a newly added tool is not available to scripts (or run concurrently) until it is known to be read-only.
 export const readOnlyTools: ReadonlySet<string> = new Set([
@@ -59,7 +59,7 @@ export async function executeCode(args: Record<string, unknown>, options: {
           worker.postMessage({ id: message.id, json: JSON.stringify(output) });
         } catch (error) {
           if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) { reject(error); return; }
-          worker.postMessage({ id: message.id, error: error instanceof Error ? error.message : String(error) });
+          worker.postMessage({ id: message.id, error: errorMessage(error) });
         }
       });
     });

@@ -1,4 +1,4 @@
-import { ToolUsageError } from './tool-errors.js';
+import { errorMessage, ToolUsageError } from './tool-errors.js';
 import { logWarn } from '../log.js';
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
@@ -91,7 +91,7 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
             try { results.push(action === 'update'
               ? await updateOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory, args.force === true)
               : await checkOne(skillName, lock.skills[skillName]!, skillsDirectory, stagingDirectory)); }
-            catch (error) { results.push({ name: skillName, status: 'failed', error: error instanceof Error ? error.message : String(error) }); }
+            catch (error) { results.push({ name: skillName, status: 'failed', error: errorMessage(error) }); }
             // Persist after each skill so an interruption cannot leave replaced files with a stale hash.
             if (action === 'update') await writeLock(lockPath, lock);
           }

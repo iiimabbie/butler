@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import type { Store } from '../store.js';
 import { logInfo } from '../log.js';
-import { ToolUsageError } from '../tools/tool-errors.js';
+import { errorMessage, ToolUsageError } from '../tools/tool-errors.js';
 import { projectPath } from '../paths.js';
 import { isRecord } from '../tools/tool-schema.js';
 
@@ -100,7 +100,7 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
       await catalogPreparation;
     } catch (error) {
       options.signal?.throwIfAborted();
-      throw new Error(`Subagent Codex model catalog preparation failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new Error(`Subagent Codex model catalog preparation failed: ${errorMessage(error)}`);
     }
     options.signal?.throwIfAborted();
     const args = [
