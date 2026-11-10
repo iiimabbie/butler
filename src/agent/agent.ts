@@ -1,5 +1,5 @@
 import { agentReachDefinition, executeAgentReach } from '../tools/agent-reach-tools.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { codeExecuteDefinition, executeCode, readOnlyTools } from '../subagent/code-mode.js';
@@ -26,7 +26,7 @@ import type { ReasoningEffort, StoredMessage, SessionOpeningContext } from '../s
 import { formatRecall, Hindsight } from '../memory/hindsight.js';
 import { logError, logInfo, logWarn } from '../log.js';
 import { AttachmentInputError, formatDeliveryNotice, formatStoredMessageText, messageAttachmentContent, redactAttachmentPayload } from '../attachments/input-attachments.js';
-import { countContext } from './context-budget.js';
+import { countContextTokens, estimateContextTokens } from './context-budget.js';
 import { compactLiveGroups, compactSession } from './compaction.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
@@ -252,7 +252,6 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
     // Tool calls and outputs are replayed after the message that triggered them, so later asks keep what this ask read and did.
     const toolWork = new Map<string, unknown[]>([[fresh[0]!.id, initialAskContext]]);
     let toolOwnerId = fresh[0]!.id;
-    let liveCompactionCandidate = '';
     const headers: Record<string, string> = { 'content-type': 'application/json' };
     if (config.apiKey) headers.authorization = `Bearer ${config.apiKey}`;
 
@@ -292,25 +291,18 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
       const toolChoice: 'none' | { type: 'function'; name: string } | undefined = forceImageSave ? { type: 'function', name: 'image_save' } : recoveryFinalTextOnly ? 'none' : undefined;
       if (forceImageSave) imageSaveRequiredAttempted = true;
       forceImageSave = false;
-      let localCountEstimate = 0;
-      let localCountSource: string = 'local-count-estimate';
-      let priorUsage = store.contextUsage(session);
+      let localEstimate = 0;
       const knownModelLimit = config.modelContextTokens?.[config.model];
       const limit = knownModelLimit ?? config.maxContextTokens ?? 150000;
-      const countAndCalibrate = async () => {
-        const local = await countContext({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: fullAvailableTools });
-        localCountEstimate = local.inputTokens;
-        localCountSource = local.source;
-        const attachmentSignature = nativeAttachmentSignature(input);
-        const checkpointThroughMessageId = store.compactCheckpoint(session)?.throughMessageId ?? null;
-        priorUsage = store.contextUsage(session);
-        if (priorUsage && priorUsage.model === config.model && priorUsage.baseUrl === config.baseUrl && priorUsage.attachmentSignature === attachmentSignature && (priorUsage.checkpointThroughMessageId ?? null) === checkpointThroughMessageId && priorUsage.countSource === localCountSource) {
-          return { ...local, inputTokens: Math.max(0, priorUsage.inputTokens + local.inputTokens - priorUsage.localCount), source: 'calibrated estimate' as const };
-        }
-        return local;
+      // The last measured usage plus the growth since then; a counted value when this model has no measurement yet.
+      const predictInputTokens = async (): Promise<number> => {
+        localEstimate = estimateContextTokens(input, fullAvailableTools);
+        const prior = store.contextUsage(session);
+        if (prior && prior.model === config.model && prior.baseUrl === config.baseUrl) return Math.max(0, prior.inputTokens + localEstimate - prior.localCount);
+        return countContextTokens({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, input, tools: fullAvailableTools });
       };
-      let prediction = await countAndCalibrate();
-      let percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
+      let predicted = await predictInputTokens();
+      let percent = Math.round(predicted / limit * 1000) / 10;
       // Compact history at 65% before the first request, leaving room for this ask's tool output so live compaction stays rare.
       if (percent >= 65 && turn === 0) {
         const safeBoundary = currentIndex > 0 ? storedHistory[currentIndex - 1]?.id : undefined;
@@ -322,7 +314,6 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
             const checkpoint = store.compactCheckpoint(session);
             if (checkpoint && checkpoint.throughMessageId !== previousCheckpoint && compactResult.compressedMessages > 0) {
               store.clearContextUsage(session);
-              priorUsage = undefined;
               compactInput = [{ role: 'user', content: `Prior conversation summary (historical background):\n${checkpoint.summary}` }];
               // The checkpoint dropped the workspace snapshot and this request misses the cache anyway, so re-read the files now instead of breaking the cache again next ask.
               workspace = await loadWorkspaceContext(config.workspaceDirectory);
@@ -335,8 +326,8 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
               liveGroups.splice(0, liveGroups.length, ...retained.map(item => item.group));
               liveGroupProtected.splice(0, liveGroupProtected.length, ...retained.map(item => item.protected));
               input.splice(0, input.length, ...stableInput, liveSummaryState, ...liveGroups.flat(), ...runtimeReminders);
-              prediction = await countAndCalibrate();
-              percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
+              predicted = await predictInputTokens();
+              percent = Math.round(predicted / limit * 1000) / 10;
             }
             progress.end('completed');
           } catch (error) {
@@ -347,38 +338,33 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
       }
       // Live compaction rewrites the cached prefix, so it is only an emergency pass near the limit.
       if (percent >= 95) {
-        const candidate = JSON.stringify(liveGroups);
-        if (candidate !== liveCompactionCandidate) {
-          liveCompactionCandidate = candidate;
-          // Keep the normal recent window unless it cannot fit. Emergency passes
-          // summarize complete older groups, never protected inputs or the latest group.
-          // These are summary-only requests: completed tools are never replayed.
-          for (const keepRecent of [recentCount, 5, 2, 1]) {
-            if (keepRecent !== recentCount && percent < 100) break;
-            const beforeTokens = prediction.inputTokens;
-            const beforeGroups = liveGroups.length;
-            const progress = compactionProgress(config, 'compact_live_groups');
-            try {
-              const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content, onStart: progress.start });
-              if (compacted.summary) {
-                store.clearContextUsage(session);
-                priorUsage = undefined;
-                liveSummaryState.content = `Earlier completed in-memory interaction summary (volatile tool evidence; not a persistent checkpoint):\n${compacted.summary}`;
-                const retainedFlags = compacted.retained.map(group => liveGroupProtected[liveGroups.indexOf(group)] ?? false);
-                liveGroups.splice(0, liveGroups.length, ...compacted.retained);
-                liveGroupProtected.splice(0, liveGroupProtected.length, ...retainedFlags);
-                input.splice(0, input.length, ...stableInput, liveSummaryState, ...liveGroups.flat(), ...runtimeReminders);
-                prediction = await countAndCalibrate();
-                percent = Math.round(prediction.inputTokens / limit * 1000) / 10;
-              }
-              logTrace('context_live_compaction', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, keepRecent, beforeTokens, afterTokens: prediction.inputTokens, beforeGroups, afterGroups: liveGroups.length, pressure: percent, budget: limit, summarized: Boolean(compacted.summary) });
-              progress.end('completed');
-            } catch (error) {
-              logWarn(`Automatic live compaction failed session=${session}`, error);
-              progress.end('failed');
-              // An unknown summary outcome must not trigger an automatic retry.
-              break;
+        // Keep the normal recent window unless it cannot fit. Emergency passes
+        // summarize complete older groups, never protected inputs or the latest group.
+        // These are summary-only requests: completed tools are never replayed.
+        for (const keepRecent of [recentCount, 5, 2, 1]) {
+          if (keepRecent !== recentCount && percent < 100) break;
+          const beforeTokens = predicted;
+          const beforeGroups = liveGroups.length;
+          const progress = compactionProgress(config, 'compact_live_groups');
+          try {
+            const compacted = await compactLiveGroups({ baseUrl: config.baseUrl, apiKey: config.apiKey, model: config.model, reasoningEffort: config.reasoningEffort, groups: liveGroups, protectedGroups: liveGroupProtected, keepRecent, existingSummary: liveSummaryState.content, onStart: progress.start });
+            if (compacted.summary) {
+              store.clearContextUsage(session);
+              liveSummaryState.content = `Earlier completed in-memory interaction summary (volatile tool evidence; not a persistent checkpoint):\n${compacted.summary}`;
+              const retainedFlags = compacted.retained.map(group => liveGroupProtected[liveGroups.indexOf(group)] ?? false);
+              liveGroups.splice(0, liveGroups.length, ...compacted.retained);
+              liveGroupProtected.splice(0, liveGroupProtected.length, ...retainedFlags);
+              input.splice(0, input.length, ...stableInput, liveSummaryState, ...liveGroups.flat(), ...runtimeReminders);
+              predicted = await predictInputTokens();
+              percent = Math.round(predicted / limit * 1000) / 10;
             }
+            logTrace('context_live_compaction', { askId: config.askId, traceId: config.traceId, sessionId: session, turn, keepRecent, beforeTokens, afterTokens: predicted, beforeGroups, afterGroups: liveGroups.length, pressure: percent, budget: limit, summarized: Boolean(compacted.summary) });
+            progress.end('completed');
+          } catch (error) {
+            logWarn(`Automatic live compaction failed session=${session}`, error);
+            progress.end('failed');
+            // An unknown summary outcome must not trigger an automatic retry.
+            break;
           }
         }
       }
@@ -387,7 +373,7 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
       // and extended retention keeps a channel's history cached between messages minutes apart.
       const requestBody = JSON.stringify({ model: config.model, input, tools: fullAvailableTools, prompt_cache_key: session, prompt_cache_retention: '24h', ...(toolChoice ? { tool_choice: toolChoice } : {}), ...(config.reasoningEffort === undefined || config.reasoningEffort === 'auto' ? {} : { reasoning: { effort: config.reasoningEffort } }), store: false });
       const requestId = randomUUID();
-      store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }), bodySha256: createHash('sha256').update(requestBody).digest('hex') });
+      store.saveModelRequest({ requestId, sessionId: session, askId: config.askId, traceId: config.traceId, turn, bodyJson: JSON.stringify({ redacted: true, body: redactAttachmentPayload(JSON.parse(requestBody)) }) });
       let result: Awaited<ReturnType<typeof requestModel>>;
       try {
         result = await requestModel({ url: `${config.baseUrl.replace(/\/$/, '')}/responses`, headers, body: requestBody, session, model: config.model, turn, timeoutMs: config.timeoutMs, askId: config.askId, traceId: config.traceId, requestId });
@@ -417,7 +403,7 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
       if (isRecord(raw) && isRecord(raw.usage) && Number.isSafeInteger(raw.usage.input_tokens) && Number.isSafeInteger(raw.usage.output_tokens)) {
         const cachedTokens = isRecord(raw.usage.input_tokens_details) ? raw.usage.input_tokens_details.cached_tokens : undefined;
         logTrace('model_usage', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, inputTokens: raw.usage.input_tokens, cachedTokens: typeof cachedTokens === 'number' ? cachedTokens : null, outputTokens: raw.usage.output_tokens });
-        store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localCountEstimate, countSource: localCountSource, contextLimit: limit, limitSource: knownModelLimit ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString(), attachmentSignature: nativeAttachmentSignature(input), checkpointThroughMessageId: store.compactCheckpoint(session)?.throughMessageId });
+        store.saveContextUsage(session, { model: config.model, baseUrl: config.baseUrl, inputTokens: raw.usage.input_tokens as number, outputTokens: raw.usage.output_tokens as number, localCount: localEstimate, contextLimit: limit, limitSource: knownModelLimit ? 'known model limit' : 'configured budget', sampledAt: new Date().toISOString() });
       } else store.clearContextUsage(session);
       // Failed/cancelled/incomplete upstream turns must not enter recovery or execute tools.
       // Transport aborts and timeouts already throw from requestModel before this point.
@@ -758,19 +744,6 @@ function pageArgs(args: Record<string, unknown>, defaultLimit = 20): { offset: n
 
 function asOutput(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : { value };
-}
-
-function nativeAttachmentSignature(input: unknown[]): string {
-  const native: unknown[] = [];
-  const visit = (value: unknown): void => {
-    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
-    if (!isRecord(value)) return;
-    if (value.type === 'input_image' || value.type === 'input_file') native.push(value);
-    else for (const item of Object.values(value)) visit(item);
-  };
-  visit(input);
-  // Count and serialized size: enough to tell whether the attached images/files changed.
-  return `${native.length}:${JSON.stringify(native).length}`;
 }
 
 function formatOpeningContext(opening: SessionOpeningContext): string {
