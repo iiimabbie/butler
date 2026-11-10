@@ -537,7 +537,7 @@ class DiscordHandler {
 
   private async runScheduled(request: ScheduledTaskRequest): Promise<void> {
     const config = this.getRuntime().discord;
-    const model = request.job.model ?? this.store.channelState(request.outputChannelId, config.defaultModel).model;
+    const model = request.job.model ?? this.getRuntime().settings.schedule?.model ?? this.store.channelState(request.outputChannelId, config.defaultModel).model;
     // Each scheduled run starts in its own session.
     const { message: storedInput } = this.store.addReadyMessage(this.store.newSession(), 'user', request.prompt, { sourceKind: 'scheduled_input', authorId: request.job.creatorId, channelId: request.outputChannelId, eventTime: request.run.scheduledAt });
     this.memoryCoordinator?.notifyReady();

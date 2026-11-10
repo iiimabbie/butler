@@ -23,7 +23,7 @@ export type ButlerConfig = {
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
   transcription?: AudioTranscriptionConfig;
-  schedule?: { timezone?: string };
+  schedule?: { timezone?: string; model?: string };
   subagent?: { toolsEnabled: boolean };
 };
 
@@ -138,7 +138,7 @@ function validateConfig(raw: unknown): ButlerConfig {
     } else if (name === 'schedule') {
       const timezone = string('timezone') ?? DEFAULT_SCHEDULE_TIMEZONE;
       validateTimezone(timezone, 'Butler config schedule.timezone');
-      config.schedule = { timezone };
+      config.schedule = { timezone, model: string('model') };
     } else if (name === 'subagent') {
       for (const key of Object.keys(section)) if (key !== 'toolsEnabled') throw new Error(`Butler config subagent.${key} is not supported`);
       const toolsEnabled = section.toolsEnabled;
