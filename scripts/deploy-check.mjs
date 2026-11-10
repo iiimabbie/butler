@@ -77,7 +77,7 @@ console.log(`Latest retention (whole log): ${retention ?? 'not found'}`);
 let db;
 try {
   db = new DatabaseSync(data('butler.sqlite'), { readOnly: true });
-  const running = db.prepare("select id,status from subagent_runs where status='running'").all();
+  const running = db.prepare("select id,status from subagents where status='running'").all();
   console.log(`Running subagents: ${running.length}`);
   for (const row of running) console.log(`  ${short(row.id)} ${row.status}`);
 } catch { problems.push('Could not read running subagents from .data/butler.sqlite'); }

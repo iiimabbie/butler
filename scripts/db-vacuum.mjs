@@ -16,7 +16,7 @@ function systemctl(action) {
 }
 
 const check = new DatabaseSync(file, { readOnly: true });
-const running = check.prepare("SELECT count(*) AS n FROM subagent_runs WHERE status='running'").get().n;
+const running = check.prepare("SELECT count(*) AS n FROM subagents WHERE status='running'").get().n;
 check.close();
 if (running > 0) {
   console.error(`${running} subagent run(s) in progress; stopping Butler would kill them. Try again later.`);

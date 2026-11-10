@@ -12,7 +12,7 @@ const db = new DatabaseSync(process.argv[3] ?? new URL('../.data/butler.sqlite',
 const since = new Date(Date.now() - hours * 3600e3).toISOString();
 const NAMES = (() => { try { return JSON.parse(readFileSync(new URL('../.data/channel-names.json', import.meta.url), 'utf8')); } catch { return {}; } })(); // optional { channelId: label }
 
-const channelOf = new Map(db.prepare('SELECT m.session_id, s.channel_id FROM messages m JOIN message_sources s ON s.message_id = m.id WHERE s.channel_id IS NOT NULL ORDER BY m.rowid').all().map(r => [r.session_id, r.channel_id]));
+const channelOf = new Map(db.prepare('SELECT session_id, channel_id FROM messages WHERE channel_id IS NOT NULL ORDER BY rowid').all().map(r => [r.session_id, r.channel_id]));
 const rows = db.prepare('SELECT session_id, turn, attempted_at, body_json, usage_json FROM model_requests WHERE usage_json IS NOT NULL ORDER BY rowid').all();
 const oldest = rows[0]?.attempted_at;
 const tw = iso => new Date(new Date(iso).getTime() + 8 * 3600e3).toISOString().slice(5, 16).replace('T', ' ');
