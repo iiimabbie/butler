@@ -2,7 +2,7 @@ import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
 import { ActivityType, Client, EmbedBuilder, GatewayIntentBits, MessageReferenceType, MessageFlags, PermissionFlagsBits, type Presence, Routes, SlashCommandBuilder } from 'discord.js';
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from '../store.js';
-import { ask, type AgentConfig } from '../agent/agent.js';
+import { ask, isNoReply, type AgentConfig } from '../agent/agent.js';
 import { startNotificationListener } from '../notifications.js';
 import { createDiscordToolRuntime, type DiscordToolContext, type DiscordToolRuntime, type HandoffInput } from './discord-tools.js';
 import { isRecord } from '../tools/tool-schema.js';
@@ -473,7 +473,7 @@ class DiscordHandler {
         imageTools: runtime.settings.image ? createImageToolRuntime({ config: { ...runtime.settings.image, model: this.store.effectiveChannelImageModel(channelId) ?? runtime.settings.image.model }, attachmentDir: config.attachmentDir, attachmentFiles }) : undefined,
         ...job.agent,
         onResponseReady: async text => {
-          if (text.replace(/`\[no_reply\]`/g, '').includes('[no_reply]')) {
+          if (isNoReply(text)) {
             logInfo('no_reply', { ...traceTextMetadata(text), replyTo: job.messageId ? { channelId: outputChannelId, messageId: job.messageId } : { channelId: outputChannelId, inputId: storedInput.id } });
             if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, 'not_sent');
             attachmentFiles.splice(0); attachmentToolCallIds.splice(0);
@@ -497,12 +497,7 @@ class DiscordHandler {
               this.store.updateAttachments(saved.id, deliveredAttachments);
             }, trace);
           } finally {
-            let finalized = false;
-            try {
-              if (outgoing) { this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); finalized = true; this.memoryCoordinator?.notifyReady(); }
-            } finally {
-              logTrace('discord_persistence_finalize', { ...trace, storedMessageId: outgoing?.id, finalized, persistedChunks: delivered.length, ...traceTextMetadata(delivered.join('\n')) });
-            }
+            if (outgoing) { this.store.finalizeOutgoing(outgoing.id, delivered.join('\n')); this.memoryCoordinator?.notifyReady(); }
             if (attachmentToolCallIds.length) this.store.updateAttachmentDelivery(attachmentToolCallIds, filesDelivered ? 'delivered' : 'failed_or_unknown');
           }
           // A draft delivered before a late steer is followed by another reply; each attachment goes out once.
@@ -721,20 +716,15 @@ async function sendText(message: Pick<TextMessage, 'channelId' | 'messageId' | '
   for (let offset = 0; offset < uploads.length; offset += DISCORD_ATTACHMENT_LIMIT) batches.push(uploads.slice(offset, offset + DISCORD_ATTACHMENT_LIMIT));
   const chunks = splitDiscordText(text || (files.length ? ' ' : DELIVERY_ERROR));
   while (chunks.length < batches.length) chunks.push(' ');
-  logTrace('discord_split_plan', { ...context, ...traceTextMetadata(text), chunks: chunks.length, files: files.length });
   for (let index = 0; index < chunks.length; index++) {
     const segment = { ...context, index, total: chunks.length, ...traceTextMetadata(chunks[index]!) };
     const batch = batches[index] ?? [];
     let stage = 'send';
-    logTrace('discord_segment_start', segment);
     try {
       const result = await message.reply(chunks[index]!, { allowedMentions: ALLOWED_MENTIONS, ...(batch.length ? { files: batch } : {}) });
-      const discordMessageId = isRecord(result) && typeof result.id === 'string' && /^[0-9]{2,32}$/.test(result.id) ? result.id : undefined;
-      logTrace('discord_segment_sent', { ...segment, discordMessageId });
       stage = 'persistence_callback';
       if (batches.length && index === batches.length - 1) onFilesDelivered?.();
       await onDelivered?.(chunks[index]!, result, batch);
-      logTrace('discord_segment_recorded', { ...segment, discordMessageId, callbackPresent: Boolean(onDelivered) });
     } catch (error) {
       logTrace('discord_segment_failed', { ...segment, stage });
       throw error;

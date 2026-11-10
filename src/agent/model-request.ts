@@ -1,14 +1,13 @@
 import { logError } from '../log.js';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { logInfo } from '../log.js';
 import { Agent } from 'undici';
 
 // Node fetch otherwise aborts at undici's 300 s header/body timeouts; the AbortSignal below is the only limit.
 const modelDispatcher = new Agent({ headersTimeout: 0, bodyTimeout: 0 });
 const traceInstanceId = randomUUID();
-const traceHmacKey = randomBytes(32);
-export function traceTextMetadata(text: string): { textLength: number; textHmac: string } {
-  return { textLength: text.length, textHmac: createHmac('sha256', traceHmacKey).update(text).digest('hex').slice(0, 24) };
+export function traceTextMetadata(text: string): { textLength: number } {
+  return { textLength: text.length };
 }
 export function logTrace(event: string, fields: Record<string, unknown>): void {
   try { logInfo(event, { instanceId: traceInstanceId, ...fields }); } catch { /* diagnostics must not affect message flow */ }
