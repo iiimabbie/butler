@@ -1,12 +1,12 @@
 import { createServer, type Server } from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { GoogleAuthError, type GoogleAuth } from './google-auth.js';
+import { GoogleAuthError, type GoogleAuth } from './tools/google-auth.js';
 import { logError } from './log.js';
+import { projectPath } from './paths.js';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '../ui');
+const root = projectPath('ui');
 const assets = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/style.css', ['style.css', 'text/css; charset=utf-8']], ['/app.js', ['app.js', 'text/javascript; charset=utf-8']]] as const);
 
 export function startUi(port: number, options: { googleAuth?: GoogleAuth; publicOrigin?: string; cookiePath?: string } = {}): Promise<{ server: Server; close: () => Promise<void> }> {

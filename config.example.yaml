@@ -95,6 +95,8 @@ image:
 subagent:
   # toolsEnabled: true  # hot-reloadable; false hides and rejects parent management tools
 
-# Optional default timezone for cron and reminder creation.
+# Optional default timezone for cron and reminder creation, and default model for schedule runs
+# (a schedule's own model wins; without either, runs use the output channel's model). Hot-reloadable.
 schedule:
   timezone: Asia/Taipei
+  # model: gpt-6.1-terra

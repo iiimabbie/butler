@@ -18,7 +18,7 @@ How the Butler tree is laid out, where generated files and backups go, and how t
 |---|---|---|
 | `hindsight/` | manual bank config changes, `scripts/clear-hindsight-memory.mjs` | manual |
 | `memory-and-chats/` | `scripts/clear-memory-and-chats.mjs` | manual |
-| `skills-trash/` | `skills_manage` update/remove (`src/skills.ts`) | 30 days, pruned on each move |
+| `skills-trash/` | `skills_manage` update/remove (`src/tools/skills.ts`) | 30 days, pruned on each move |
 | `memory-curation/` | hindsight-curation `bin/apply.py` snapshots, tags exports | 30 days, pruned by `apply.py` |
 | `daily-journal/` | daily-journal skill when it replaces a journal | manual |
 | `hledger/` | old per-write ledger copies (the mechanism was removed) | static archive |

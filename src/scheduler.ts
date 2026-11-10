@@ -1,4 +1,4 @@
-import { ToolUsageError, isHttp429 } from './tool-errors.js';
+import { ToolUsageError, isHttp429 } from './tools/tool-errors.js';
 import type { LogMethods } from './log.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { Cron } from 'croner';
@@ -13,7 +13,7 @@ export interface ScheduleJob {
   creatorId: string;
   kind: ScheduleKind;
   notify: ScheduleNotify;
-  /** Model for this schedule's runs; null uses the output channel's model. */
+  /** Model for this schedule's runs; null uses config schedule.model, then the output channel's model. */
   model: string | null;
   content: string;
   cron: string | null;

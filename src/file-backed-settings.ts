@@ -1,7 +1,7 @@
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from 'node:fs';
 import { join } from 'node:path';
-import { isRecord } from './tool-schema.js';
+import { isRecord } from './tools/tool-schema.js';
 import { randomUUID } from 'node:crypto';
 import { Document, isMap, isScalar, parseDocument } from 'yaml';
 import { validateCronExpression, validateTimezone, type ScheduleJob } from './scheduler.js';

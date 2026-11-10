@@ -1,11 +1,10 @@
-import { isRecord } from './tool-schema.js';
+import { isRecord } from './tools/tool-schema.js';
 import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { dirname, basename } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import type { WebConfig } from './web-tools.js';
-import type { ImageConfig } from './image-tools.js';
-import type { AudioTranscriptionConfig } from './audio-transcription.js';
+import type { WebConfig } from './tools/web-tools.js';
+import type { ImageConfig } from './tools/image-tools.js';
+import type { AudioTranscriptionConfig } from './attachments/audio-transcription.js';
 import type { LogMethods } from './log.js';
 import { projectPath } from './paths.js';
 import { validateTimezone } from './scheduler.js';
@@ -24,7 +23,7 @@ export type ButlerConfig = {
   memory?: { baseUrl: string; bankId: string; timeoutMs?: number };
   image?: ImageConfig;
   transcription?: AudioTranscriptionConfig;
-  schedule?: { timezone?: string };
+  schedule?: { timezone?: string; model?: string };
   subagent?: { toolsEnabled: boolean };
 };
 
@@ -39,7 +38,7 @@ export function configuredFixedChannels(config: ButlerConfig): FixedChannel[] {
   ];
 }
 
-const CONFIG_PATH = fileURLToPath(new URL('../.data/config.yaml', import.meta.url));
+const CONFIG_PATH = projectPath('.data/config.yaml');
 
 export function readConfig(path = CONFIG_PATH): ButlerConfig {
   let raw: unknown;
@@ -139,7 +138,7 @@ function validateConfig(raw: unknown): ButlerConfig {
     } else if (name === 'schedule') {
       const timezone = string('timezone') ?? DEFAULT_SCHEDULE_TIMEZONE;
       validateTimezone(timezone, 'Butler config schedule.timezone');
-      config.schedule = { timezone };
+      config.schedule = { timezone, model: string('model') };
     } else if (name === 'subagent') {
       for (const key of Object.keys(section)) if (key !== 'toolsEnabled') throw new Error(`Butler config subagent.${key} is not supported`);
       const toolsEnabled = section.toolsEnabled;

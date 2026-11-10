@@ -1,16 +1,16 @@
 import { DEFAULT_SCHEDULE_TIMEZONE } from './timezone.js';
 import { configuredFixedChannels, readConfig, watchConfig, type ButlerConfig } from './config.js';
-import type { RuntimeBundle } from './discord.js';
+import type { RuntimeBundle } from './discord/discord.js';
 import { attachmentsPath, databasePath, journalPath } from './paths.js';
 import { Store } from './store.js';
 import { runRetention } from './retention.js';
-import { readDiscordConfig, registerDiscordCommands, startDiscord } from './discord.js';
-import { Hindsight } from './hindsight.js';
-import { MemoryCoordinator } from './memory-coordinator.js';
-import { createWebToolRuntime } from './web-tools.js';
-import { createHledgerToolRuntime } from './hledger-tools.js';
+import { readDiscordConfig, registerDiscordCommands, startDiscord } from './discord/discord.js';
+import { Hindsight } from './memory/hindsight.js';
+import { MemoryCoordinator } from './memory/memory-coordinator.js';
+import { createWebToolRuntime } from './tools/web-tools.js';
+import { createHledgerToolRuntime } from './tools/hledger-tools.js';
 import { configureLogging, flushLogs, logError, logInfo, logWarn } from './log.js';
-import { isHttp429 } from './tool-errors.js';
+import { isHttp429 } from './tools/tool-errors.js';
 
 try {
   const config = readConfig();
