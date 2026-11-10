@@ -187,6 +187,15 @@ export class Scheduler {
       this.options.log.logError('Scheduled task execution failed', error, { fields: { scheduleId: job.id, runId: run.id } });
       try { this.options.store.finishScheduleRun(run.id, 'failed', errorMessage(error)); }
       catch (finishError) { this.options.log.logError('Could not persist scheduled execution failure', finishError, { fields: { runId: run.id } }); }
+    } finally {
+      if (job.kind === 'reminder') {
+        try {
+          const current = this.options.store.getSchedule(job.id);
+          if (current && current.nextRun === null) this.options.store.deleteSchedule(job.id);
+        } catch (error) {
+          this.options.log.logError('Could not delete finished reminder', error, { fields: { scheduleId: job.id, runId: run.id } });
+        }
+      }
     }
   }
 }
