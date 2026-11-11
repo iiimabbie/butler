@@ -182,20 +182,24 @@ class DiscordHandler {
       })();
       this.activeIngestions.add(preparation);
       void preparation.finally(() => { this.activeIngestions.delete(preparation); }).catch(() => undefined);
-      const shouldAsk = () => {
+      // Steering an active ask ignores replyMode; bot input still needs an allowed mention.
+      const shouldAsk = (steering = false) => {
         if ((!content && !message.hasAttachments) || this.stopping) return false;
         const policy = this.store.effectiveChannelPolicy(message.channelId);
-        if (policy.replyMode === 'none') return false;
-        return botInput ? Boolean(message.mentionsBot && policy.botReply) : policy.replyMode === 'all' || (policy.replyMode === 'mention' && Boolean(message.mentionsBot));
+        if (!steering && policy.replyMode === 'none') return false;
+        if (botInput) return Boolean(message.mentionsBot && policy.botReply);
+        if (steering) return true;
+        return policy.replyMode === 'all' || (policy.replyMode === 'mention' && Boolean(message.mentionsBot));
       };
-      if (!shouldAsk()) { releaseIngress(); await preparation; this.memoryCoordinator?.notifyReady(); return; }
+      const steerTarget = this.activeAsks.get(message.channelId);
+      const canSteer = mode === 'steer' && Boolean(steerTarget?.acceptsSteer) && this.queues.get(message.channelId)?.pending === 1 && shouldAsk(true);
+      if (!canSteer && !shouldAsk()) { releaseIngress(); await preparation; this.memoryCoordinator?.notifyReady(); return; }
       const prepared = preparation.then(() => {
         stored = this.store.message(stored.id)!;
         this.memoryCoordinator?.notifyReady();
         return stored;
       });
-      const steerTarget = this.activeAsks.get(message.channelId);
-      if (mode === 'steer' && steerTarget?.acceptsSteer && this.queues.get(message.channelId)?.pending === 1) {
+      if (canSteer && steerTarget) {
         const pending = this.pendingSteer.get(message.channelId) ?? [];
         pending.push(prepared);
         this.pendingSteer.set(message.channelId, pending);
