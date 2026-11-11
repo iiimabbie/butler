@@ -66,7 +66,7 @@ export function startNotificationListener(config: NotificationConfig, accept: (p
     } catch (error) {
       const conflict = error instanceof NotificationConflictError;
       if (!(error instanceof IntakeError) && !conflict) logError('Notification intake failed', error);
-      respond(error instanceof IntakeError ? error.status : conflict ? 409 : 503, { error: error instanceof IntakeError ? error.message : conflict ? 'Notification id already has different content' : 'Notification intake unavailable' });
+      respond(error instanceof IntakeError ? error.status : conflict ? 422 : 503, { error: error instanceof IntakeError ? error.message : conflict ? 'Notification id already has different content' : 'Notification intake unavailable' });
     }
   });
   server.requestTimeout = 10_000;
