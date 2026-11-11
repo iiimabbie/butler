@@ -182,13 +182,13 @@ class DiscordHandler {
       })();
       this.activeIngestions.add(preparation);
       void preparation.finally(() => { this.activeIngestions.delete(preparation); }).catch(() => undefined);
-      // Steering an active ask ignores replyMode; bot input still needs an allowed mention.
+      // Any input, human or bot, steers an active ask regardless of replyMode or mentions.
       const shouldAsk = (steering = false) => {
         if ((!content && !message.hasAttachments) || this.stopping) return false;
-        const policy = this.store.effectiveChannelPolicy(message.channelId);
-        if (!steering && policy.replyMode === 'none') return false;
-        if (botInput) return Boolean(message.mentionsBot && policy.botReply);
         if (steering) return true;
+        const policy = this.store.effectiveChannelPolicy(message.channelId);
+        if (policy.replyMode === 'none') return false;
+        if (botInput) return Boolean(message.mentionsBot && policy.botReply);
         return policy.replyMode === 'all' || (policy.replyMode === 'mention' && Boolean(message.mentionsBot));
       };
       const steerTarget = this.activeAsks.get(message.channelId);
