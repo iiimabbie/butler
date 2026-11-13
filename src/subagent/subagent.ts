@@ -71,7 +71,6 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
     const messages = options.loadMessages();
     let prompt: string;
     if (!window.thread_id) {
-      if (!window.brief_json) throw new ToolUsageError('This legacy subagent window has no saved task brief; start a new task with the original brief.');
       const task = JSON.parse(window.brief_json) as { task: string; context: string; constraints: string; expected_output: string };
       const brief = `Task: ${task.task}\n\nContext and source material: ${task.context}\n\nConstraints: ${task.constraints}\n\nExpected output and acceptance criteria: ${task.expected_output}`;
       prompt = `${subagentSystem}\n\n${brief}${messages.length ? `\n\nAdditional messages:\n${messages.map(row => row.message).join('\n\n')}` : ''}`;
