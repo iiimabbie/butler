@@ -183,3 +183,8 @@ function formatDuration(ms: number): string { return ms <= 1000 ? `${Math.max(0,
 function safeText(text: string, maxLength: number): string {
   return text.replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '').replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '').replace(/\u001b/g, '').replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, '').replace(/[\r\n\t]+/g, ' ').replace(/`/g, 'ˋ').replace(/https?:\/\/\S+/gi, '[連結]').replace(/(bearer\s+|api[_ -]?key[=: ]+|token[=: ]+)(\S+)/gi, '$1[已隱藏]').trim().slice(0, maxLength);
 }
+
+export function emitProgress(config: { onProgress?: (event: ProgressEvent) => void }, event: ProgressEvent): void {
+  try { config.onProgress?.(event); }
+  catch (error) { logWarn('Agent progress callback failed', error); }
+}

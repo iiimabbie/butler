@@ -15,7 +15,7 @@ const optionalPath = { type: 'string' };
 const definition = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 const definitions = [
   definition('skills_read', 'List installed skills and their metadata when name is omitted; read a file in an installed skill directory when name is supplied. path defaults to SKILL.md and requires name.', { name: string, path: optionalPath }, []),
-  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
+  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory and list the path, name and description of each candidate; read <path>/SKILL.md to review one before installing; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
 ];
 
 export type SkillsToolRuntime = { definitions: typeof definitions; execute(name: string, args: Record<string, unknown>): Promise<unknown>; catalog(): Promise<string> };
@@ -157,13 +157,20 @@ async function prepare(source: string, staging: string) {
       root = resolve(stage, 'local');
       await cp(local, root, { recursive: true, dereference: false });
     }
-    const candidates: Array<{ path: string; name: string; description: string; skill_md: string }> = [];
+    const candidates: Array<{ path: string; name: string; description: string }> = [];
+    // One malformed SKILL.md in a collection must not hide the valid ones.
+    const skipped: Array<{ path: string; error: string }> = [];
     for (const dir of await findSkillDirectories(root)) {
-      const meta = await skillMetadata(dir);
-      candidates.push({ path: dir, name: meta.name, description: meta.description, skill_md: meta.content });
+      try {
+        const meta = await skillMetadata(dir);
+        candidates.push({ path: dir, name: meta.name, description: meta.description });
+      } catch (error) {
+        if (!(error instanceof ToolUsageError)) throw error;
+        skipped.push({ path: dir, error: error.message });
+      }
     }
-    if (!candidates.length) throw new ToolUsageError('No SKILL.md found in source');
-    return { candidates };
+    if (!candidates.length) throw new ToolUsageError(skipped.length ? `No valid SKILL.md found in source: ${skipped.map(item => `${item.path}: ${item.error}`).join('; ')}` : 'No SKILL.md found in source');
+    return { candidates, ...(skipped.length ? { skipped } : {}) };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
     throw error;
@@ -191,7 +198,7 @@ async function skillMetadata(directory: string) {
   try { frontmatter = parse(match[1]!); } catch { throw new ToolUsageError('SKILL.md frontmatter must be valid YAML'); }
   if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) throw new ToolUsageError('SKILL.md frontmatter must be a YAML mapping');
   const fields = frontmatter as Record<string, unknown>;
-  return { name: validName(typeof fields.name === 'string' ? fields.name : basename(directory)), description: typeof fields.description === 'string' ? fields.description : '', content };
+  return { name: validName(typeof fields.name === 'string' ? fields.name : basename(directory)), description: typeof fields.description === 'string' ? fields.description : '' };
 }
 
 async function installedSkills(directory: string) {

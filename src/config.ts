@@ -25,7 +25,7 @@ export type ButlerConfig = {
   image?: ImageConfig;
   transcription?: AudioTranscriptionConfig;
   schedule?: { timezone?: string; model?: string };
-  subagent?: { toolsEnabled: boolean };
+  subagent?: { toolsEnabled: boolean; allowClaude: boolean };
 };
 
 export type FixedChannel = { id: string; model?: string };
@@ -86,7 +86,6 @@ function validateConfig(raw: unknown): ButlerConfig {
       if (typeof enabled !== 'boolean') throw new Error('Butler config hledger.enabled must be boolean');
       config.hledger = { enabled };
     } else if (name === 'web') {
-      for (const field of ['provider','apiKey','baseUrl']) if (section[field] !== undefined) throw new Error(`Butler config web.${field} is no longer supported; configure web.tavily instead`);
       config.web = {};
       if (section.pool !== undefined) {
         if (!isRecord(section.pool)) throw new Error('Butler config web.pool must be an object');
@@ -102,7 +101,6 @@ function validateConfig(raw: unknown): ButlerConfig {
           if (value !== undefined && (!Number.isSafeInteger(value) || Number(value) < min || Number(value) > max)) throw new Error(`Butler config web.pool.${field} is outside its allowed range`);
           return value as number | undefined;
         };
-        if (pool.tavilyDailyRequestLimit !== undefined) throw new Error('Butler config web.pool.tavilyDailyRequestLimit is no longer supported; configure web.tavily.dailyRequestLimit');
         config.web.pool = { searchOrder: order('searchOrder'), fetchOrder: order('fetchOrder'), searchTimeoutMs: limit('searchTimeoutMs',1,120000), fetchTimeoutMs: limit('fetchTimeoutMs',1,120000), attemptTimeoutMs: limit('attemptTimeoutMs',1,45000), maxAttempts: limit('maxAttempts',1,3) };
       }
       for (const provider of ['tavily','firecrawl','anysearch'] as const) {
@@ -141,10 +139,11 @@ function validateConfig(raw: unknown): ButlerConfig {
       validateTimezone(timezone, 'Butler config schedule.timezone');
       config.schedule = { timezone, model: string('model') };
     } else if (name === 'subagent') {
-      for (const key of Object.keys(section)) if (key !== 'toolsEnabled') throw new Error(`Butler config subagent.${key} is not supported`);
-      const toolsEnabled = section.toolsEnabled;
+      for (const key of Object.keys(section)) if (key !== 'toolsEnabled' && key !== 'allowClaude') throw new Error(`Butler config subagent.${key} is not supported`);
+      const { toolsEnabled, allowClaude } = section;
       if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
-      config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
+      if (allowClaude !== undefined && typeof allowClaude !== 'boolean') throw new Error('Butler config subagent.allowClaude must be boolean');
+      config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true, allowClaude: (allowClaude as boolean | undefined) ?? false };
     } else if (name === 'mail') {
       if (!Array.isArray(section.accounts)) throw new Error('Butler config mail.accounts must be an array');
       const accounts = section.accounts.map((account: unknown) => {

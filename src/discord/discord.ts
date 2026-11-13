@@ -647,7 +647,7 @@ class DiscordHandler {
   }
 
   private channelSubagent(channelId: string, subagent: import('../config.js').ButlerConfig['subagent']): import('../config.js').ButlerConfig['subagent'] {
-    return this.store.channelSubagentTools(channelId) ? subagent : { toolsEnabled: false };
+    return this.store.channelSubagentTools(channelId) ? subagent : { toolsEnabled: false, allowClaude: subagent?.allowClaude ?? false };
   }
 
   private async runChannelInput(storedInput: StoredMessage, input: NonNullable<import('../subagent/subagent-coordinator.js').SubagentSnapshot['origin']>,

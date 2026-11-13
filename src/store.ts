@@ -97,7 +97,7 @@ export class Store implements SchedulerStore {
       CREATE TABLE IF NOT EXISTS memory_batches(operation_id TEXT PRIMARY KEY, payload TEXT NOT NULL, document_id TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, batch_order INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('frozen','submitting','unknown','pending','processing','completed','failed','cancelled','not_found','needs_clarification','suppressed')), submit_intended_at TEXT, last_poll_at TEXT, next_poll_at TEXT, poll_attempt INTEGER NOT NULL DEFAULT 0, error TEXT, created_at TEXT NOT NULL, UNIQUE(document_id,batch_order));
       CREATE TABLE IF NOT EXISTS memory_batch_sources(message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE, operation_id TEXT NOT NULL REFERENCES memory_batches(operation_id));
       CREATE TABLE IF NOT EXISTS tool_calls(id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL, status TEXT NOT NULL, result TEXT, created_at TEXT NOT NULL, finished_at TEXT);
-      CREATE TABLE IF NOT EXISTS subagents(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, thread_id TEXT, brief_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, run_id TEXT, status TEXT, snapshot_json TEXT);
+      CREATE TABLE IF NOT EXISTS subagents(id TEXT PRIMARY KEY, parent_session_id TEXT NOT NULL, model TEXT NOT NULL, cwd TEXT NOT NULL, thread_id TEXT, brief_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, run_id TEXT, status TEXT, snapshot_json TEXT);
       CREATE TABLE IF NOT EXISTS subagent_inbox(id TEXT PRIMARY KEY, subagent_id TEXT NOT NULL REFERENCES subagents(id) ON DELETE CASCADE, message TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','consumed')), created_at TEXT NOT NULL, consumed_at TEXT);
       CREATE TABLE IF NOT EXISTS subagent_events(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, subagent_id TEXT NOT NULL, parent_session_id TEXT NOT NULL, parent_input_id TEXT, payload_json TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('pending','processing','delivered','failed_unknown')), created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS mail_watch_state(account TEXT PRIMARY KEY, uid_validity TEXT NOT NULL, last_uid INTEGER NOT NULL);
@@ -477,7 +477,7 @@ export class Store implements SchedulerStore {
     return id;
   }
 
-  getSubagentWindow(id: string, parentSessionId: string): { id: string; parent_session_id: string; model: string; cwd: string; thread_id: string | null; brief_json: string | null; created_at: string; updated_at: string } | undefined {
+  getSubagentWindow(id: string, parentSessionId: string): { id: string; parent_session_id: string; model: string; cwd: string; thread_id: string | null; brief_json: string; created_at: string; updated_at: string } | undefined {
     return this.db.prepare('SELECT id,parent_session_id,model,cwd,thread_id,brief_json,created_at,updated_at FROM subagents WHERE id=? AND parent_session_id=?').get(id, parentSessionId) as ReturnType<Store['getSubagentWindow']>;
   }
 
