@@ -43,26 +43,21 @@ export const subagentDefinitions = [
   { type: 'function', name: 'subagent_send', description: 'Send a message to a task in this parent session. A running task receives it after its current run ends; a finished, stopped or interrupted task resumes its session immediately. model optionally switches the model for this and later runs. Returns immediately; the result arrives automatically.', parameters: { type: 'object', properties: { subagent_id: string, message: string, model: string }, required: ['subagent_id', 'message'], additionalProperties: false } },
 ];
 
-const claudeModel = /claude/i;
-
 let modelCache: { baseUrl: string; at: number; ids: string[] } | undefined;
-async function subagentModels(baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string[]> {
-  if (modelCache?.baseUrl !== baseUrl || Date.now() - modelCache.at >= 10 * 60 * 1000) modelCache = { baseUrl, at: Date.now(), ids: await fetchSubagentModels(baseUrl, apiKey) };
-  return allowClaude ? modelCache.ids : modelCache.ids.filter(id => !claudeModel.test(id));
-}
-
-async function fetchSubagentModels(baseUrl: string, apiKey?: string): Promise<string[]> {
+async function subagentModels(baseUrl: string, apiKey?: string): Promise<string[]> {
+  if (modelCache?.baseUrl === baseUrl && Date.now() - modelCache.at < 10 * 60 * 1000) return modelCache.ids;
   const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, {
     headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) throw new Error(`Subagent model list request failed with HTTP ${response.status}`);
   const body: unknown = await response.json();
   const ids = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord).map(item => item.id).filter((id): id is string => typeof id === 'string' && !/opus|fable|-(?:sol|astra|argon)\b|image|tts|video|voice/i.test(id)) : [];
+  modelCache = { baseUrl, at: Date.now(), ids };
   return ids;
 }
 
 export async function validateSubagentModel(model: string, baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string> {
-  const ids = await subagentModels(baseUrl, apiKey, allowClaude);
+  const ids = (await subagentModels(baseUrl, apiKey)).filter(id => allowClaude || !/claude/i.test(id));
   if (!ids.includes(model)) throw new ToolUsageError(`Unknown subagent model ${model}; available: ${ids.join(', ')}`);
   return model;
 }
