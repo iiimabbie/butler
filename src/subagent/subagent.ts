@@ -43,7 +43,7 @@ export const subagentDefinitions = [
   { type: 'function', name: 'subagent_send', description: 'Send a message to a task in this parent session. A running task receives it after its current run ends; a finished, stopped or interrupted task resumes its session immediately. model optionally switches the model for this and later runs. Returns immediately; the result arrives automatically.', parameters: { type: 'object', properties: { subagent_id: string, message: string, model: string }, required: ['subagent_id', 'message'], additionalProperties: false } },
 ];
 
-const claudeModel = /claude|opus|-(?:sol|astra|argon)\b/i;
+const claudeModel = /claude|-(?:sol|astra|argon)\b/i;
 
 let modelCache: { baseUrl: string; at: number; ids: string[] } | undefined;
 async function subagentModels(baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string[]> {
@@ -57,7 +57,7 @@ async function fetchSubagentModels(baseUrl: string, apiKey?: string): Promise<st
   });
   if (!response.ok) throw new Error(`Subagent model list request failed with HTTP ${response.status}`);
   const body: unknown = await response.json();
-  const ids = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord).map(item => item.id).filter((id): id is string => typeof id === 'string' && !/image|tts|video|voice/i.test(id)) : [];
+  const ids = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord).map(item => item.id).filter((id): id is string => typeof id === 'string' && !/opus|image|tts|video|voice/i.test(id)) : [];
   return ids;
 }
 
