@@ -95,8 +95,7 @@ void loadGoogleStatus();
 
 let embeddedFrame = null;
 try {
-  if (window !== window.parent && window.parent?.document) {
-    document.documentElement.classList.add('embedded');
+  if (window !== window.parent && window.parent.document) {
     document.body.classList.add('embedded');
     const frame = window.frameElement;
     if (frame && frame.tagName === 'IFRAME') {
@@ -127,10 +126,11 @@ try {
         const val = computed.getPropertyValue(prop).trim();
         if (val) document.documentElement.style.setProperty(prop, val);
       }
+      // The iframe element must share the page's color-scheme; a mismatch paints an opaque canvas behind it.
       const scheme = parentRoot.getAttribute('data-scheme');
       if (scheme) {
-        document.documentElement.setAttribute('data-scheme', scheme);
         document.documentElement.style.colorScheme = scheme;
+        if (embeddedFrame) embeddedFrame.style.colorScheme = scheme;
       }
     };
     syncTheme();
@@ -141,21 +141,5 @@ try {
     if (themeStyle) observer.observe(themeStyle, { childList: true, characterData: true, subtree: true });
   }
 } catch { /* standalone or inaccessible frame */ }
-if (embeddedFrame) {
-  let resizeFrame = 0, lastHeight = 0;
-  const scheduleFrameResize = () => {
-    if (resizeFrame) return;
-    resizeFrame = requestAnimationFrame(() => {
-      resizeFrame = 0;
-      const height = Math.ceil($('main').getBoundingClientRect().height);
-      if (height > 0 && height !== lastHeight) {
-        lastHeight = height;
-        embeddedFrame.style.height = `${height}px`;
-      }
-    });
-  };
-  new ResizeObserver(scheduleFrameResize).observe($('main'));
-  window.addEventListener('resize', scheduleFrameResize);
-  if (document.fonts?.ready) document.fonts.ready.then(scheduleFrameResize);
-  scheduleFrameResize();
-}
+// ResizeObserver reports the initial size and every later change, including font loads and width changes.
+if (embeddedFrame) new ResizeObserver(() => { embeddedFrame.style.height = `${Math.ceil($('main').getBoundingClientRect().height)}px`; }).observe($('main'));
