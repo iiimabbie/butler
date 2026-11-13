@@ -1,7 +1,4 @@
 * { box-sizing: border-box; }
-:root {
-  color-scheme: light dark;
-}
 @font-face { font-family:"JetBrains Mono"; font-style:normal; font-weight:400; font-display:swap; src:url("/static/866b5a866b/fonts/JetBrainsMono-Regular.woff2") format("woff2"); }
 body { margin:0; background:var(--color-background, Canvas); color:var(--color-text-base, CanvasText); font:15px/1.6 "JetBrains Mono",monospace; }
 body.embedded { background:transparent; }

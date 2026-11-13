@@ -153,9 +153,12 @@ async function prepare(source: string, staging: string) {
       await cloneRepository(repo, url, folder?.ref, folder?.path);
       const { stdout } = await execFile('git', ['-C', repo, 'rev-parse', 'HEAD'], { maxBuffer: 10 * 1024 * 1024 });
       await writeFile(resolve(stage, 'source.json'), JSON.stringify({ url, commit: stdout.trim(), ...(folder ? { ref: folder.ref } : {}) }));
-      root = folder ? resolve(repo, folder.path) : repo;
-      assertInside(repo, root);
-      if (!(await stat(root).catch(() => undefined))?.isDirectory()) throw new ToolUsageError(`Folder ${folder!.path} does not exist on ${folder!.ref}`);
+      root = repo;
+      if (folder) {
+        root = resolve(repo, folder.path);
+        assertInside(repo, root);
+        if (!(await stat(root).catch(() => undefined))?.isDirectory()) throw new ToolUsageError(`Folder ${folder.path} does not exist on ${folder.ref}`);
+      }
     } else {
       const local = await realpath(source);
       if (!(await stat(local)).isDirectory()) throw new ToolUsageError('Local skill source must be a directory');
