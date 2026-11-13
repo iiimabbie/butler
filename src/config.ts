@@ -25,7 +25,7 @@ export type ButlerConfig = {
   image?: ImageConfig;
   transcription?: AudioTranscriptionConfig;
   schedule?: { timezone?: string; model?: string };
-  subagent?: { toolsEnabled: boolean };
+  subagent?: { toolsEnabled: boolean; allowClaude: boolean };
 };
 
 export type FixedChannel = { id: string; model?: string };
@@ -141,10 +141,11 @@ function validateConfig(raw: unknown): ButlerConfig {
       validateTimezone(timezone, 'Butler config schedule.timezone');
       config.schedule = { timezone, model: string('model') };
     } else if (name === 'subagent') {
-      for (const key of Object.keys(section)) if (key !== 'toolsEnabled') throw new Error(`Butler config subagent.${key} is not supported`);
-      const toolsEnabled = section.toolsEnabled;
+      for (const key of Object.keys(section)) if (key !== 'toolsEnabled' && key !== 'allowClaude') throw new Error(`Butler config subagent.${key} is not supported`);
+      const { toolsEnabled, allowClaude } = section;
       if (toolsEnabled !== undefined && typeof toolsEnabled !== 'boolean') throw new Error('Butler config subagent.toolsEnabled must be boolean');
-      config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true };
+      if (allowClaude !== undefined && typeof allowClaude !== 'boolean') throw new Error('Butler config subagent.allowClaude must be boolean');
+      config.subagent = { toolsEnabled: (toolsEnabled as boolean | undefined) ?? true, allowClaude: (allowClaude as boolean | undefined) ?? false };
     } else if (name === 'mail') {
       if (!Array.isArray(section.accounts)) throw new Error('Butler config mail.accounts must be an array');
       const accounts = section.accounts.map((account: unknown) => {

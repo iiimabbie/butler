@@ -36,29 +36,34 @@ In repositories indexed by CodeGraph (a \`.codegraph/\` directory exists at the 
 const string = { type: 'string', minLength: 1 };
 const page = { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 100 } };
 export const subagentDefinitions = [
-  { type: 'function', name: 'subagent_run', description: 'Start a background task on a Codex CLI worker and return its subagent_id immediately; the result arrives automatically as an internal event, so do not poll. The worker runs with full host access in cwd (an absolute directory), has no chat background, cannot use Butler tools (Discord, memory, Google, ledger) and cannot start its own sub-agents. Each call starts an independent task; use subagent_send to continue one. model may be any ID the configured LLM endpoint lists, from any provider (Gemini, Grok, GLM, Kimi, DeepSeek, GPT and others); Claude, Opus, Sol, Astra and Argon models are not accepted, and an unknown or rejected ID returns the available list. Choose the model yourself: pick the cheapest listed model you judge capable of the task, using what you know about each model family (mini, flash, lite and nano variants are cheap). Escalate to a stronger model only after a cheaper model falls short. When an unknown ID returns the list, apply the same rule to that list instead of picking the strongest entry. Workers run at high reasoning effort. Handle single lookups and small edits directly instead.', parameters: { type: 'object', properties: { task: string, context: string, constraints: string, expected_output: string, model: string, cwd: string }, required: ['task', 'context', 'constraints', 'expected_output', 'model', 'cwd'], additionalProperties: false } },
+  { type: 'function', name: 'subagent_run', description: 'Start a background task on a Codex CLI worker and return its subagent_id immediately; the result arrives automatically as an internal event, so do not poll. The worker runs with full host access in cwd (an absolute directory), has no chat background, cannot use Butler tools (Discord, memory, Google, ledger) and cannot start its own sub-agents. Each call starts an independent task; use subagent_send to continue one. model may be any ID the configured LLM endpoint lists, from any provider (Gemini, Grok, GLM, Kimi, DeepSeek, GPT and others); an unknown or rejected ID returns the available list. Choose the model yourself: pick the cheapest listed model you judge capable of the task, using what you know about each model family (mini, flash, lite and nano variants are cheap). Escalate to a stronger model only after a cheaper model falls short. When an unknown ID returns the list, apply the same rule to that list instead of picking the strongest entry. Workers run at high reasoning effort. Handle single lookups and small edits directly instead.', parameters: { type: 'object', properties: { task: string, context: string, constraints: string, expected_output: string, model: string, cwd: string }, required: ['task', 'context', 'constraints', 'expected_output', 'model', 'cwd'], additionalProperties: false } },
   { type: 'function', name: 'subagent_list', description: 'List tasks in this parent session with status and recent activity.', parameters: { type: 'object', properties: page, required: [], additionalProperties: false } },
   { type: 'function', name: 'subagent_status', description: "Read a task's status, current activity and paginated result in this parent session. offset is a character offset; limit is the number of 1000-character blocks.", parameters: { type: 'object', properties: { subagent_id: string, ...page }, required: ['subagent_id'], additionalProperties: false } },
   { type: 'function', name: 'subagent_stop', description: 'Stop a running task in this parent session by terminating its worker process. Work may be partially applied; use subagent_send on the same ID to resume it and ask for a status report.', parameters: { type: 'object', properties: { subagent_id: string, reason: string }, required: ['subagent_id', 'reason'], additionalProperties: false } },
   { type: 'function', name: 'subagent_send', description: 'Send a message to a task in this parent session. A running task receives it after its current run ends; a finished, stopped or interrupted task resumes its session immediately. model optionally switches the model for this and later runs. Returns immediately; the result arrives automatically.', parameters: { type: 'object', properties: { subagent_id: string, message: string, model: string }, required: ['subagent_id', 'message'], additionalProperties: false } },
 ];
 
+const claudeModel = /claude|opus|-(?:sol|astra|argon)\b/i;
+export const claudeBlockedNote = ' Claude, Opus, Sol, Astra and Argon models are not accepted.';
+
 let modelCache: { baseUrl: string; at: number; ids: string[] } | undefined;
-async function subagentModels(baseUrl: string, apiKey?: string): Promise<string[]> {
-  if (modelCache?.baseUrl === baseUrl && Date.now() - modelCache.at < 10 * 60 * 1000) return modelCache.ids;
+async function subagentModels(baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string[]> {
+  if (modelCache?.baseUrl !== baseUrl || Date.now() - modelCache.at >= 10 * 60 * 1000) modelCache = { baseUrl, at: Date.now(), ids: await fetchSubagentModels(baseUrl, apiKey) };
+  return allowClaude ? modelCache.ids : modelCache.ids.filter(id => !claudeModel.test(id));
+}
+
+async function fetchSubagentModels(baseUrl: string, apiKey?: string): Promise<string[]> {
   const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/models`, {
     headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal: AbortSignal.timeout(15000),
   });
   if (!response.ok) throw new Error(`Subagent model list request failed with HTTP ${response.status}`);
   const body: unknown = await response.json();
-  const ids = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord).map(item => item.id).filter((id): id is string => typeof id === 'string' && !/claude|opus|image|tts|video|voice|-(?:sol|astra|argon)\b/i.test(id)) : [];
-  modelCache = { baseUrl, at: Date.now(), ids };
+  const ids = isRecord(body) && Array.isArray(body.data) ? body.data.filter(isRecord).map(item => item.id).filter((id): id is string => typeof id === 'string' && !/image|tts|video|voice/i.test(id)) : [];
   return ids;
 }
 
-export async function validateSubagentModel(model: string, baseUrl: string, apiKey?: string): Promise<string> {
-  if (/claude/i.test(model)) throw new ToolUsageError('Subagent model must not contain claude');
-  const ids = await subagentModels(baseUrl, apiKey);
+export async function validateSubagentModel(model: string, baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string> {
+  const ids = await subagentModels(baseUrl, apiKey, allowClaude);
   if (!ids.includes(model)) throw new ToolUsageError(`Unknown subagent model ${model}; available: ${ids.join(', ')}`);
   return model;
 }

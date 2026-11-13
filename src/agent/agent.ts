@@ -30,7 +30,7 @@ import { countContextTokens, estimateContextTokens } from './context-budget.js';
 import { compactLiveGroups, compactSession, type LiveGroup } from './compaction.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
-import { runSubagent, subagentDefinitions, validateSubagentModel } from '../subagent/subagent.js';
+import { claudeBlockedNote, runSubagent, subagentDefinitions, validateSubagentModel } from '../subagent/subagent.js';
 import type { SubagentCoordinator } from '../subagent/subagent-coordinator.js';
 
 export interface AgentConfig {
@@ -66,7 +66,7 @@ export interface AgentConfig {
   onResponseReady?: (text: string) => Promise<void>;
   discordContext?: { channelId: string; messageId?: string; requesterId?: string };
   workspaceDirectory?: string;
-  subagent?: { toolsEnabled: boolean };
+  subagent?: import('../config.js').ButlerConfig['subagent'];
   subagentCoordinator?: SubagentCoordinator;
   subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled' | 'notification'; requesterId?: string; triggerInputId?: string };
   subagentEvent?: boolean;
@@ -119,7 +119,8 @@ export function subagentToolsForContext(config: Pick<AgentConfig, 'subagent' | '
   if (!config.subagentCoordinator) return [];
   return subagentDefinitions.filter(tool => config.subagentEvent && config.subagent?.toolsEnabled === false
     ? ['subagent_send', 'subagent_stop'].includes(tool.name)
-    : config.subagent?.toolsEnabled !== false && (config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)));
+    : config.subagent?.toolsEnabled !== false && (config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)))
+    .map(tool => tool.name === 'subagent_run' && !config.subagent?.allowClaude ? { ...tool, description: tool.description + claudeBlockedNote } : tool);
 }
 
 function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Record<string, unknown> }): { [key: string]: unknown; parameters: Record<string, unknown> } {
@@ -577,7 +578,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
     } else if (call.name === 'subagent_run') {
       if (!config.subagent || !config.subagentCoordinator) throw new ToolUsageError('Subagent is unavailable');
       const task = { task: runtimeArgs.task as string, context: runtimeArgs.context as string, constraints: runtimeArgs.constraints as string, expected_output: runtimeArgs.expected_output as string };
-      const model = await validateSubagentModel(runtimeArgs.model as string, config.baseUrl, config.apiKey);
+      const model = await validateSubagentModel(runtimeArgs.model as string, config.baseUrl, config.apiKey, config.subagent.allowClaude);
       const cwd = runtimeArgs.cwd as string;
       if (!isAbsolute(cwd)) throw new ToolUsageError('Subagent cwd must be an absolute path to an existing directory');
       try { if (!statSync(cwd).isDirectory()) throw new Error('Not a directory'); }
@@ -598,7 +599,7 @@ async function executeCall(store: Store, session: string, call: FunctionCall, co
       const subagentId = runtimeArgs.subagent_id as string;
       const window = store.getSubagentWindow(subagentId, session);
       if (!window) throw new ToolUsageError('Unknown subagent window for this parent session; use subagent_list to find the actual ID.');
-      const model = await validateSubagentModel((runtimeArgs.model as string | undefined) ?? window.model, config.baseUrl, config.apiKey);
+      const model = await validateSubagentModel((runtimeArgs.model as string | undefined) ?? window.model, config.baseUrl, config.apiKey, config.subagent.allowClaude);
       store.setSubagentModel(window.id, model);
       const resume = subagentExecutor(store, session, subagentId, config, model);
       result = config.subagentCoordinator.message(subagentId, session, runtimeArgs.message as string, resume);
