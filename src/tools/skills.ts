@@ -15,12 +15,12 @@ const optionalPath = { type: 'string' };
 const definition = (name: string, description: string, properties: Record<string, unknown>, required: string[]) => ({ type: 'function', name, description, parameters: { type: 'object', properties, required, additionalProperties: false } });
 const definitions = [
   definition('skills_read', 'List installed skills and their metadata when name is omitted; read a file in an installed skill directory when name is supplied. path defaults to SKILL.md and requires name.', { name: string, path: optionalPath }, []),
-  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL or local directory and list the path, name and description of each candidate; read <path>/SKILL.md to review one before installing; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
+  definition('skills_manage', 'Manage installed skills.\nprepare — Stage skill candidates from a Git URL, a GitHub folder URL (https://github.com/<owner>/<repo>/tree/<branch>/<folder>, fetches only that folder) or a local directory and list the path, name and description of each candidate; read <path>/SKILL.md to review one before installing; required source.\ninstall — Install a staged skill into workspace/skills and record its Git source in workspace/skills/.lock.json; existing skills are not overwritten; required path, name.\nupdate — Re-fetch locked skills from their recorded source and replace them; name selects one, omitted updates all; locally modified skills are skipped unless force is true.\ncheck — Report which locked skills have upstream changes or local modifications without changing anything; optional name.\nremove — Move an installed skill to backups/skills-trash (kept 30 days) and drop its lock entry; required name.', { action: { type: 'string', enum: ['prepare', 'install', 'update', 'check', 'remove'] }, source: string, path: string, name: string, force: { type: 'boolean' } }, ['action']),
 ];
 
 export type SkillsToolRuntime = { definitions: typeof definitions; execute(name: string, args: Record<string, unknown>): Promise<unknown>; catalog(): Promise<string> };
 
-type SkillSource = { type: 'git'; url: string; path: string } | { type: 'url'; files: Record<string, string> };
+type SkillSource = { type: 'git'; url: string; path: string; ref?: string } | { type: 'url'; files: Record<string, string> };
 type SkillLockEntry = { source: SkillSource; revision?: string; hash?: string; updatedAt?: string };
 type SkillLock = { version: 1; skills: Record<string, SkillLockEntry> };
 
@@ -71,12 +71,12 @@ export function createSkillsToolRuntime(workspaceDirectory: string): SkillsToolR
           await mkdir(skillsDirectory, { recursive: true });
           const stage = resolve(stagingReal, relative(stagingReal, candidateReal).split(sep)[0]!);
           await cp(candidateReal, destination, { recursive: true, errorOnExist: true, force: false, dereference: false, filter: src => basename(src) !== '.git' });
-          let sourceInfo: { url: string; commit: string } | undefined;
-          try { sourceInfo = JSON.parse(await readFile(resolve(stage, 'source.json'), 'utf8')) as { url: string; commit: string }; }
+          let sourceInfo: { url: string; commit: string; ref?: string } | undefined;
+          try { sourceInfo = JSON.parse(await readFile(resolve(stage, 'source.json'), 'utf8')) as { url: string; commit: string; ref?: string }; }
           catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           if (sourceInfo) {
             const lock = await readLock(lockPath);
-            lock.skills[skillName] = { source: { type: 'git', url: sourceInfo.url, path: relative(resolve(stage, 'repo'), candidateReal).split(sep).join('/') }, revision: sourceInfo.commit, hash: await contentHash(destination), updatedAt: new Date().toISOString() };
+            lock.skills[skillName] = { source: { type: 'git', url: sourceInfo.url, path: relative(resolve(stage, 'repo'), candidateReal).split(sep).join('/'), ...(sourceInfo.ref ? { ref: sourceInfo.ref } : {}) }, revision: sourceInfo.commit, hash: await contentHash(destination), updatedAt: new Date().toISOString() };
             await writeLock(lockPath, lock);
           }
           return { installed: skillName, path: relative(workspace, destination) };
@@ -146,11 +146,16 @@ async function prepare(source: string, staging: string) {
   const stage = await mkdtemp(resolve(staging, 'candidate-'));
   try {
     let root: string;
-    if (/^[a-z][a-z\d+.-]*:\/\//i.test(source) || /^[^/]+@[^:]+:/.test(source)) {
-      root = resolve(stage, 'repo');
-      await execFile('git', ['clone', '--depth', '1', '--', source, root], { maxBuffer: 10 * 1024 * 1024 });
-      const { stdout } = await execFile('git', ['-C', root, 'rev-parse', 'HEAD'], { maxBuffer: 10 * 1024 * 1024 });
-      await writeFile(resolve(stage, 'source.json'), JSON.stringify({ url: source, commit: stdout.trim() }));
+    const folder = githubFolder(source);
+    if (folder || /^[a-z][a-z\d+.-]*:\/\//i.test(source) || /^[^/]+@[^:]+:/.test(source)) {
+      const repo = resolve(stage, 'repo');
+      const url = folder?.url ?? source;
+      await cloneRepository(repo, url, folder?.ref, folder?.path);
+      const { stdout } = await execFile('git', ['-C', repo, 'rev-parse', 'HEAD'], { maxBuffer: 10 * 1024 * 1024 });
+      await writeFile(resolve(stage, 'source.json'), JSON.stringify({ url, commit: stdout.trim(), ...(folder ? { ref: folder.ref } : {}) }));
+      root = folder ? resolve(repo, folder.path) : repo;
+      assertInside(repo, root);
+      if (!(await stat(root).catch(() => undefined))?.isDirectory()) throw new ToolUsageError(`Folder ${folder!.path} does not exist on ${folder!.ref}`);
     } else {
       const local = await realpath(source);
       if (!(await stat(local)).isDirectory()) throw new ToolUsageError('Local skill source must be a directory');
@@ -175,6 +180,19 @@ async function prepare(source: string, staging: string) {
     await rm(stage, { recursive: true, force: true });
     throw error;
   }
+}
+
+/** A GitHub folder page URL as the repository to clone, its branch and the folder inside it. */
+function githubFolder(source: string): { url: string; ref: string; path: string } | undefined {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/tree\/([^/]+)\/(.+?)\/?$/.exec(source);
+  return match ? { url: `https://github.com/${match[1]}/${match[2]}.git`, ref: match[3]!, path: decodeURIComponent(match[4]!) } : undefined;
+}
+
+/** A shallow clone; with a folder, only that folder's files are downloaded. */
+async function cloneRepository(destination: string, url: string, ref?: string, folder?: string): Promise<void> {
+  const options = { maxBuffer: 10 * 1024 * 1024, timeout: 120000 };
+  await execFile('git', ['clone', '--depth', '1', ...(folder ? ['--filter=blob:none', '--sparse'] : []), ...(ref ? ['--branch', ref] : []), '--', url, destination], options);
+  if (folder) await execFile('git', ['-C', destination, 'sparse-checkout', 'set', '--', folder], options);
 }
 
 async function findSkillDirectories(root: string): Promise<string[]> {
@@ -273,7 +291,7 @@ async function contentHash(directory: string): Promise<string> {
 function validateSource(entry: SkillLockEntry): SkillSource {
   if (!entry || typeof entry !== 'object' || !entry.source || typeof entry.source !== 'object') throw new Error('Invalid skill lock entry');
   const source = entry.source as Record<string, unknown>;
-  if (source.type === 'git' && typeof source.url === 'string' && typeof source.path === 'string') return source as SkillSource;
+  if (source.type === 'git' && typeof source.url === 'string' && typeof source.path === 'string' && (source.ref === undefined || typeof source.ref === 'string')) return source as SkillSource;
   if (source.type === 'url' && source.files && typeof source.files === 'object' && !Array.isArray(source.files) && Object.keys(source.files).length > 0) {
     const files: Record<string, string> = {};
     const skillDir = resolve('/skill');
@@ -297,7 +315,7 @@ async function fetchSkill(entry: SkillLockEntry, name: string, staging: string):
     let revision = '';
     if (source.type === 'git') {
       const repo = resolve(temp, 'repo');
-      await execFile('git', ['clone', '--depth', '1', '--', source.url, repo], { maxBuffer: 10 * 1024 * 1024, timeout: 120000 });
+      await cloneRepository(repo, source.url, source.ref, source.path || undefined);
       const result = await execFile('git', ['-C', repo, 'rev-parse', 'HEAD'], { maxBuffer: 10 * 1024 * 1024, timeout: 120000 });
       revision = result.stdout.trim();
       directory = resolve(repo, source.path);
