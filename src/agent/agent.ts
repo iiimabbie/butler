@@ -30,7 +30,7 @@ import { countContextTokens, estimateContextTokens } from './context-budget.js';
 import { compactLiveGroups, compactSession, type LiveGroup } from './compaction.js';
 import { DEFAULT_SCHEDULE_TIMEZONE } from '../timezone.js';
 import { formatTranscript, validateTranscriptDate } from './journal-transcript.js';
-import { claudeBlockedNote, runSubagent, subagentDefinitions, validateSubagentModel } from '../subagent/subagent.js';
+import { runSubagent, subagentDefinitions, validateSubagentModel } from '../subagent/subagent.js';
 import type { SubagentCoordinator } from '../subagent/subagent-coordinator.js';
 
 export interface AgentConfig {
@@ -119,8 +119,7 @@ export function subagentToolsForContext(config: Pick<AgentConfig, 'subagent' | '
   if (!config.subagentCoordinator) return [];
   return subagentDefinitions.filter(tool => config.subagentEvent && config.subagent?.toolsEnabled === false
     ? ['subagent_send', 'subagent_stop'].includes(tool.name)
-    : config.subagent?.toolsEnabled !== false && (config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)))
-    .map(tool => tool.name === 'subagent_run' && !config.subagent?.allowClaude ? { ...tool, description: tool.description + claudeBlockedNote } : tool);
+    : config.subagent?.toolsEnabled !== false && (config.subagent || ['subagent_list', 'subagent_status'].includes(tool.name)));
 }
 
 function addProgressLabelSchema(tool: { [key: string]: unknown; parameters: Record<string, unknown> }): { [key: string]: unknown; parameters: Record<string, unknown> } {

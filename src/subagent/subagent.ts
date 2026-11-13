@@ -44,7 +44,6 @@ export const subagentDefinitions = [
 ];
 
 const claudeModel = /claude|opus|-(?:sol|astra|argon)\b/i;
-export const claudeBlockedNote = ' Claude, Opus, Sol, Astra and Argon models are not accepted.';
 
 let modelCache: { baseUrl: string; at: number; ids: string[] } | undefined;
 async function subagentModels(baseUrl: string, apiKey: string | undefined, allowClaude: boolean): Promise<string[]> {
