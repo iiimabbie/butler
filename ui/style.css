@@ -4,7 +4,7 @@ body { margin:0; background:var(--color-background, Canvas); color:var(--color-t
 body.embedded { background:transparent; }
 a { color:var(--color-primary, LinkText); }
 main { max-width:760px; margin:0 auto; padding:28px 16px; }
-.embedded main { margin:0; padding-top:10px; }
+.embedded main { max-width:none; margin:0; padding-top:10px; }
 
 .page-header { display:flex; align-items:flex-end; justify-content:space-between; gap:12px; margin-bottom:16px; }
 .embedded .brand { display:none; }

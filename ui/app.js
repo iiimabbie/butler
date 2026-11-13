@@ -127,10 +127,11 @@ try {
         const val = computed.getPropertyValue(prop).trim();
         if (val) document.documentElement.style.setProperty(prop, val);
       }
+      // The iframe element must share the page's color-scheme; a mismatch paints an opaque canvas behind it.
       const scheme = parentRoot.getAttribute('data-scheme');
       if (scheme) {
-        document.documentElement.setAttribute('data-scheme', scheme);
         document.documentElement.style.colorScheme = scheme;
+        if (embeddedFrame) embeddedFrame.style.colorScheme = scheme;
       }
     };
     syncTheme();
