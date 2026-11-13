@@ -93,6 +93,69 @@ $('#google-submit').onclick = async () => {
 };
 void loadGoogleStatus();
 
-let embeddedFrame=null;
-try { const frame=window.frameElement; if(frame && frame.tagName==='IFRAME') { embeddedFrame=frame; document.documentElement.classList.add('embedded'); document.body.classList.add('embedded'); frame.style.display='block'; } } catch { /* standalone or inaccessible frame */ }
-if(embeddedFrame){ let resizeFrame=0,lastHeight=0; const scheduleFrameResize=()=>{if(resizeFrame)return;resizeFrame=requestAnimationFrame(()=>{resizeFrame=0;const height=Math.ceil($('main').getBoundingClientRect().height);if(height>0&&height!==lastHeight){lastHeight=height;embeddedFrame.style.height=`${height}px`;}});}; new ResizeObserver(scheduleFrameResize).observe($('main')); window.addEventListener('resize',scheduleFrameResize); if(document.fonts?.ready) document.fonts.ready.then(scheduleFrameResize); scheduleFrameResize();}
+let embeddedFrame = null;
+try {
+  if (window !== window.parent && window.parent?.document) {
+    document.documentElement.classList.add('embedded');
+    document.body.classList.add('embedded');
+    const frame = window.frameElement;
+    if (frame && frame.tagName === 'IFRAME') {
+      embeddedFrame = frame;
+      frame.style.display = 'block';
+    }
+
+    const parentDoc = window.parent.document;
+    const parentRoot = parentDoc.documentElement;
+    const syncTheme = () => {
+      const computed = window.parent.getComputedStyle(parentRoot);
+      for (const prop of [
+        '--color-background',
+        '--color-widget-background',
+        '--color-widget-background-highlight',
+        '--color-widget-content-border',
+        '--color-separator',
+        '--color-text-highlight',
+        '--color-text-paragraph',
+        '--color-text-base',
+        '--color-text-base-muted',
+        '--color-text-subdue',
+        '--color-primary',
+        '--color-positive',
+        '--color-negative',
+        '--border-radius'
+      ]) {
+        const val = computed.getPropertyValue(prop).trim();
+        if (val) document.documentElement.style.setProperty(prop, val);
+      }
+      const scheme = parentRoot.getAttribute('data-scheme');
+      if (scheme) {
+        document.documentElement.setAttribute('data-scheme', scheme);
+        document.documentElement.style.colorScheme = scheme;
+      }
+    };
+    syncTheme();
+
+    const observer = new MutationObserver(syncTheme);
+    observer.observe(parentRoot, { attributes: true, attributeFilter: ['data-theme', 'data-scheme'] });
+    const themeStyle = parentDoc.getElementById('theme-style');
+    if (themeStyle) observer.observe(themeStyle, { childList: true, characterData: true, subtree: true });
+  }
+} catch { /* standalone or inaccessible frame */ }
+if (embeddedFrame) {
+  let resizeFrame = 0, lastHeight = 0;
+  const scheduleFrameResize = () => {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = 0;
+      const height = Math.ceil($('main').getBoundingClientRect().height);
+      if (height > 0 && height !== lastHeight) {
+        lastHeight = height;
+        embeddedFrame.style.height = `${height}px`;
+      }
+    });
+  };
+  new ResizeObserver(scheduleFrameResize).observe($('main'));
+  window.addEventListener('resize', scheduleFrameResize);
+  if (document.fonts?.ready) document.fonts.ready.then(scheduleFrameResize);
+  scheduleFrameResize();
+}
