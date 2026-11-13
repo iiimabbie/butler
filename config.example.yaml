@@ -102,7 +102,7 @@ image:
 # Optional background subagent (Codex CLI). Butler picks the model per task from the LLM endpoint's model list.
 subagent:
   # toolsEnabled: true  # hot-reloadable; false hides and rejects parent management tools
-  # allowClaude: false  # hot-reloadable; true lets workers use Claude, Sol, Astra and Argon models (Opus is never offered)
+  # allowClaude: false  # hot-reloadable; true lets workers use Claude models other than the high tiers (Opus, Fable), which are never offered
 
 # Optional default timezone for cron and reminder creation, and default model for schedule runs
 # (a schedule's own model wins; without either, runs use the output channel's model). Hot-reloadable.
