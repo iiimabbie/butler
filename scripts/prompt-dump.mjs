@@ -16,7 +16,7 @@ if (tsc.status !== 0) { process.stderr.write(`${tsc.stdout}${tsc.stderr}`); proc
 const load = name => import(pathToFileURL(path.join(build, name)).href);
 
 const [{ promptPrefix }, { readConfig }, { createDiscordToolRuntime }, { googleDefinitions }, { LocalToolRuntime }, { createWebToolRuntime }, { createWeatherToolRuntime }, { createSkillsToolRuntime }, { scheduleToolDefinitions }, { createImageToolRuntime }, { createHledgerToolRuntime }, { loadWorkspaceContext }] = await Promise.all(
-  ['agent/agent.js', 'config.js', 'discord/discord-tools.js', 'tools/google-tools.js', 'tools/local-tools.js', 'tools/web-tools.js', 'tools/weather-tools.js', 'tools/skills.js', 'tools/schedule-tools.js', 'tools/image-tools.js', 'tools/hledger-tools.js', 'agent/context.js'].map(load),
+  ['agent/prompt-prefix.js', 'config.js', 'discord/discord-tools.js', 'tools/google-tools.js', 'tools/local-tools.js', 'tools/web-tools.js', 'tools/weather-tools.js', 'tools/skills.js', 'tools/schedule-tools.js', 'tools/image-tools.js', 'tools/hledger-tools.js', 'agent/context.js'].map(load),
 );
 const settings = readConfig(path.join(root, '.data/config.yaml'));
 const workspace = path.join(root, 'workspace');
