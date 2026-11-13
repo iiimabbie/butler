@@ -63,6 +63,7 @@ export async function validateSubagentModel(model: string, baseUrl: string, apiK
 }
 
 let catalogPreparation: Promise<void> | undefined;
+const stallMinutes = 15;
 
 export async function runSubagent(options: SubagentRunConfig, id: string): Promise<string> {
   try {
@@ -112,6 +113,7 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
     ];
     const child = spawn('codex', args, { detached: true, cwd: window.cwd, stdio: ['pipe', 'pipe', 'pipe'], env });
     child.once('spawn', () => {
+      watchStall();
       try { options.consumeMessages(messages.map(row => row.id)); }
       catch (error) { processError = error instanceof Error ? error : new Error(String(error)); abort(); }
     });
@@ -126,6 +128,14 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
       try { process.kill(-child.pid, 'SIGTERM'); }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') processError = error instanceof Error ? error : new Error(String(error)); }
     };
+    // A worker silent this long outside a running command is stuck waiting on the model; long commands are exempt.
+    const runningCommands = new Set<string>();
+    let stalled = false;
+    let stallTimer: NodeJS.Timeout | undefined;
+    const watchStall = () => {
+      clearTimeout(stallTimer);
+      if (!runningCommands.size) stallTimer = setTimeout(() => { stalled = true; abort(); }, stallMinutes * 60_000);
+    };
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) abort();
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -139,9 +149,11 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
           window.thread_id = event.thread_id;
         } else if (event.type === 'item.started' && isRecord(event.item)) {
           const item = event.item;
+          if (item.type === 'command_execution' && typeof item.id === 'string') runningCommands.add(item.id);
           options.onActivity({ currentTool: typeof item.type === 'string' ? item.type : undefined, currentCallId: typeof item.id === 'string' ? item.id : undefined, activity: item.type === 'command_execution' && typeof item.command === 'string' ? item.command.slice(0, 200) : String(item.type) });
-        } else if (event.type === 'item.completed' && isRecord(event.item) && event.item.type === 'agent_message' && typeof event.item.text === 'string') {
-          lastMessage = event.item.text;
+        } else if (event.type === 'item.completed' && isRecord(event.item)) {
+          if (typeof event.item.id === 'string') runningCommands.delete(event.item.id);
+          if (event.item.type === 'agent_message' && typeof event.item.text === 'string') lastMessage = event.item.text;
         } else if (event.type === 'turn.started') {
           options.onActivity({ turns: ++turns });
         } else if (event.type === 'turn.failed' || event.type === 'error') {
@@ -153,6 +165,7 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
         processError = error instanceof Error ? error : new Error(String(error));
         abort();
       }
+      watchStall();
     });
     child.stderr.on('data', (chunk: Buffer) => { stderr = Buffer.concat([stderr, chunk]).subarray(-8 * 1024); });
     child.stdin.on('error', error => { processError = error; });
@@ -161,11 +174,13 @@ export async function runSubagent(options: SubagentRunConfig, id: string): Promi
       child.once('close', code => resolve(code));
       child.stdin.end(prompt);
     });
+    clearTimeout(stallTimer);
     options.signal?.removeEventListener('abort', abort);
     lines.close();
-    logInfo('subagent_codex_exit', { subagentId: id, code, turns });
+    logInfo('subagent_codex_exit', { subagentId: id, code, turns, stalled });
     options.signal?.throwIfAborted();
     if (processError) throw processError;
+    if (stalled) throw new Error(`Subagent made no progress for ${stallMinutes} minutes outside a running command and was terminated; the model endpoint is likely stuck or rate-limited.`);
     if (code !== 0 || failure !== undefined || !lastMessage.trim()) throw new Error(`Subagent Codex run failed: ${failure || lastError || stderr.toString('utf8') || `exit code ${code}`}`);
     return lastMessage;
   } catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { subagent_id: id }); }
