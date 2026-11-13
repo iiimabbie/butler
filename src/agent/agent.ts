@@ -183,7 +183,7 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
       const appendOutput = async (call: FunctionCall, output: unknown) => {
         recovery.recordToolResult(call.name, output);
         const failed = hasToolError(output);
-        const serialized = JSON.stringify(output);
+        const serialized = boundedToolOutput(output);
         if (call.name === 'image_save' && isRecord(output) && !failed) imageSaveSucceeded = true;
         input.push({ type: 'function_call_output', call_id: call.call_id, output: serialized });
         logTrace('model_tool_output_appended', { askId: config.askId, traceId: config.traceId, sessionId: session, requestId, turn, callId: call.call_id, status: failed ? 'tool_error' : 'returned' });
@@ -204,6 +204,18 @@ export async function ask(store: Store, session: string, config: AgentConfig): P
     config.onAskFinishing?.();
     // Conversation handoff is owned by the persistent memory drain, not ask lifecycle.
   }
+}
+
+// Above every ordinary result so far; one larger output cannot fit the request and would end the turn.
+const MAX_TOOL_OUTPUT_CHARS = 500_000;
+const TOOL_OUTPUT_PREVIEW_CHARS = 20_000;
+
+/** The serialized tool output; an oversized one is replaced by a preview and its stored record ID, which history_get pages through. */
+function boundedToolOutput(output: unknown): string {
+  const serialized = JSON.stringify(output);
+  if (serialized.length <= MAX_TOOL_OUTPUT_CHARS) return serialized;
+  const id = isRecord(output) ? output.tool_history_id : undefined;
+  return JSON.stringify({ tool_history_id: id, output_truncated: true, total_length: serialized.length, notice: `This result is ${serialized.length} characters, over the ${MAX_TOOL_OUTPUT_CHARS}-character limit for one tool output. Only the first ${TOOL_OUTPUT_PREVIEW_CHARS} characters are shown; read the rest with history_get (id=tool_history_id, offset, limit) or narrow the request.`, preview: serialized.slice(0, TOOL_OUTPUT_PREVIEW_CHARS) });
 }
 
 /** A reply carrying the [no_reply] marker outside inline code is not delivered. */
