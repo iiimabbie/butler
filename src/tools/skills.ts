@@ -158,12 +158,19 @@ async function prepare(source: string, staging: string) {
       await cp(local, root, { recursive: true, dereference: false });
     }
     const candidates: Array<{ path: string; name: string; description: string }> = [];
+    // One malformed SKILL.md in a collection must not hide the valid ones.
+    const skipped: Array<{ path: string; error: string }> = [];
     for (const dir of await findSkillDirectories(root)) {
-      const meta = await skillMetadata(dir);
-      candidates.push({ path: dir, name: meta.name, description: meta.description });
+      try {
+        const meta = await skillMetadata(dir);
+        candidates.push({ path: dir, name: meta.name, description: meta.description });
+      } catch (error) {
+        if (!(error instanceof ToolUsageError)) throw error;
+        skipped.push({ path: dir, error: error.message });
+      }
     }
-    if (!candidates.length) throw new ToolUsageError('No SKILL.md found in source');
-    return { candidates };
+    if (!candidates.length) throw new ToolUsageError(skipped.length ? `No valid SKILL.md found in source: ${skipped.map(item => `${item.path}: ${item.error}`).join('; ')}` : 'No SKILL.md found in source');
+    return { candidates, ...(skipped.length ? { skipped } : {}) };
   } catch (error) {
     await rm(stage, { recursive: true, force: true });
     throw error;
