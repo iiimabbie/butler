@@ -5,7 +5,7 @@ import { codeExecuteDefinition, executeCode } from '../subagent/code-mode.js';
 import { isRecord, validateToolArgs } from '../tools/tool-schema.js';
 import { memoryTagsDefinition, listMemoryTagsTool } from '../memory/memory-tools.js';
 import { knowledgePageCreateDefinition, knowledgePageCreateTool } from '../memory/knowledge-tools.js';
-import { DiscordReactionInputError, errorMessage, ToolUsageError, WebFetchExtractionError, WebPoolError } from '../tools/tool-errors.js';
+import { DiscordQuietRejection, errorMessage, ToolUsageError, WebFetchExtractionError, WebPoolError } from '../tools/tool-errors.js';
 import type { Store, ToolRecord } from '../store.js';
 import type { GoogleToolRuntime } from '../tools/google-tools.js';
 import { formatRecall } from '../memory/hindsight.js';
@@ -171,7 +171,7 @@ export async function executeCall(store: Store, session: string, call: FunctionC
     }
   } catch (error) {
     if ((error as { auditPersistenceFailure?: boolean })?.auditPersistenceFailure) throw error;
-    if (error instanceof DiscordReactionInputError) logError(`Tool reaction input rejected tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
+    if (error instanceof DiscordQuietRejection) logError(`Tool rejected by Discord without notification tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
     else if (error instanceof WebPoolError && !error.notify) logWarn(`Web request ended tool=${call.name}`, undefined, { category: error.message });
     else if (error instanceof WebFetchExtractionError) logError(`Tool execution fallback available tool=${call.name} session=${session} audit=${id}`, error, { notify: false });
     else if (!(error instanceof ToolUsageError)) logError(`Tool execution failed tool=${call.name} session=${session} audit=${id}`, error, { notify: true, deduplicationKey: `Tool execution failed tool=${call.name} session=${session}` });

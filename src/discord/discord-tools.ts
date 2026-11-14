@@ -1,4 +1,4 @@
-import { errorMessage, DiscordReactionInputError, ToolUsageError } from '../tools/tool-errors.js';
+import { errorMessage, DiscordQuietRejection, ToolUsageError } from '../tools/tool-errors.js';
 import { realpathSync, statSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { allowedReferencePath } from '../tools/image-tools.js';
@@ -139,7 +139,8 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
         : response.status >= 400 && response.status < 500 && response.status !== 408
           ? 'request rejected by Discord; do not retry automatically'
           : 'outcome may be unknown; do not retry automatically';
-      const Rejection = method === 'PUT' && /\/reactions\/[^/]+\/@me$/.test(path) && response.status === 400 && String(code) === '10014' ? DiscordReactionInputError : Error;
+      const quiet = String(code) === '10008' || (method === 'PUT' && /\/reactions\/[^/]+\/@me$/.test(path) && response.status === 400 && String(code) === '10014');
+      const Rejection = quiet ? DiscordQuietRejection : Error;
       throw new Rejection(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} status=${response.status} code=${safeDiscordDiagnostic(String(code ?? 'unavailable'), options.token)} message=${JSON.stringify(safeDiscordDiagnostic(message, options.token))}; ${outcome}`);
     }
     if (response.status === 204) return null;
@@ -180,7 +181,7 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
           added.push(emoji);
         } catch (error) {
           const original = errorMessage(error);
-          const ReactionError = error instanceof DiscordReactionInputError ? DiscordReactionInputError : Error;
+          const ReactionError = error instanceof DiscordQuietRejection ? DiscordQuietRejection : Error;
           throw new ReactionError(`Failed to add reaction ${JSON.stringify(emoji)}; confirmed added: ${JSON.stringify(added)}. Successfully added reactions will not be rolled back; remaining reactions were not executed. The outcome for the current reaction may be unknown; do not retry automatically. Original error: ${original}`);
         }
       }

@@ -25,11 +25,11 @@ export function isHttp429(value: unknown, depth = 0): boolean {
   return 'cause' in record && isHttp429(record.cause, depth + 1);
 }
 
-/** A reaction rejected by Discord because the supplied emoji is unknown. */
-export class DiscordReactionInputError extends Error {
+/** Discord rejected the request because of its input or target (unknown emoji, deleted message); the caller sees it, the owner is not notified. */
+export class DiscordQuietRejection extends Error {
   constructor(message: string) {
     super(message);
-    this.name = 'DiscordReactionInputError';
+    this.name = 'DiscordQuietRejection';
   }
 }
 
