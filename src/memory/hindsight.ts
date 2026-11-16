@@ -40,6 +40,13 @@ class HindsightHttpError extends Error {
   constructor(readonly status: number) { super(`Hindsight returned HTTP ${status}`); }
 }
 
+/** Internal events: they get no automatic recall and are not conversation topic. */
+export const RECALL_SKIPPED_SOURCE_KINDS: readonly string[] = ['subagent_event', 'deployment_result', 'notification'];
+/** Each earlier message contributes this much to the recall query, so the current message stays the main subject. */
+const RECALL_TOPIC_CHARS = 150;
+/** Final-score floor for automatic recall. Measured on real queries: unrelated memories mostly rank below it, related ones above. */
+const RECALL_MIN_FINAL_SCORE = 0.6;
+
 export class Hindsight {
   constructor(private readonly config: HindsightConfig) {}
 
@@ -73,18 +80,23 @@ export class Hindsight {
     logMemoryPhase('bank_setup', started, 'completed');
   }
 
-  /** Recalls memories for this message, leaving out those already in the replayed history; returns '' when every recalled memory is already there. */
-  async prepare(store: Store, session: string, message: MemoryMessage, onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean, replayedMemoryIds: ReadonlySet<string> = new Set()): Promise<string> {
+  /**
+   * Recalls memories for this message. `history` is the session's messages still in context before it: the last two give the query
+   * its topic, and memories written from that same stretch of conversation are left out along with those already in the replayed
+   * history. Returns '' when every recalled memory is left out.
+   */
+  async prepare(store: Store, session: string, message: MemoryMessage, history: readonly MemoryMessage[], onProgress?: (event: ProgressEvent) => void, writeAllowed?: () => boolean, replayedMemoryIds: ReadonlySet<string> = new Set()): Promise<string> {
     try { await this.ensureBank(store, session, onProgress, writeAllowed); }
     catch (error) { if (!(error instanceof MemoryServiceError)) throw error; /* memory service is optional context */ }
-    const query = `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
+    const topic = history.filter(item => !RECALL_SKIPPED_SOURCE_KINDS.includes(item.source.sourceKind ?? '')).slice(-2).map(item => recallLine(item).slice(0, RECALL_TOPIC_CHARS));
+    const query = [...topic, recallLine(message)].join('\n');
     const request = { query };
     logInfo('tool_call', { tool: 'hindsight_recall', source: 'internal', sessionId: session });
     const audit = store.beginTool(session, 'hindsight_recall', { bankId: this.config.bankId, ...request, phase: 'ask-start' });
     const recallStarted = Date.now();
     emitMemoryProgress(onProgress, { type: 'tool_start', callId: audit, toolName: 'hindsight_recall', description: '查找相關的過往對話' });
     let result: unknown;
-    try { result = await this.recall(query); }
+    try { result = await this.recall(query, RECALL_MIN_FINAL_SCORE); }
     catch (error) {
       const recoverable = error instanceof RecallQueryError;
       logWarn(`Hindsight recall failed session=${session} audit=${audit}`, error);
@@ -98,14 +110,18 @@ export class Hindsight {
     logMemoryPhase('recall', recallStarted, 'completed');
     emitMemoryProgress(onProgress, { type: 'tool_end', callId: audit, toolName: 'hindsight_recall', status: 'completed' });
     const results = asRecord(result)!.results as Array<Record<string, unknown>>;
-    const fresh = results.filter(item => !replayedMemoryIds.has(String(item.id)));
+    // Memory times have minute precision, so the stretch still in context starts at the minute of its first message.
+    // A memory with no occurrence time is kept: it cannot be placed inside that stretch.
+    const liveSince = Math.floor(Date.parse(history[0]?.createdAt ?? message.createdAt) / 60_000) * 60_000;
+    const fresh = results.filter(item => !replayedMemoryIds.has(String(item.id))
+      && !(asRecord(item.metadata)?.session_id === session && Date.parse(String(item.occurred_start)) >= liveSince));
     if (results.length && !fresh.length) return '';
     return memoryBlock({ results: fresh });
   }
 
-  /** Recalls world and experience facts only; observations are left out. */
-  async recall(query: string): Promise<unknown> {
-    const result = asRecord(await this.post(`${this.bankUrl()}/memories/recall`, { query, types: ['world', 'experience'] }));
+  /** Recalls world and experience facts only; observations are left out. `minFinalScore` drops results ranked below it. */
+  async recall(query: string, minFinalScore?: number): Promise<unknown> {
+    const result = asRecord(await this.post(`${this.bankUrl()}/memories/recall`, { query, types: ['world', 'experience'], ...(minFinalScore === undefined ? {} : { min_scores: { final: minFinalScore } }) }));
     if (!Array.isArray(result?.results) || (result.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
     return result;
   }
@@ -374,6 +390,10 @@ class RecallQueryError extends Error {
 function assertWriteAllowed(writeAllowed?: () => boolean): void { if (writeAllowed && !writeAllowed()) throw new MemoryWriteSuppressedError(); }
 function emitMemoryProgress(callback: ((event: ProgressEvent) => void) | undefined, event: ProgressEvent): void { try { callback?.(event); } catch (error) { logWarn('Hindsight progress callback failed', error); /* progress must not affect memory behavior */ } }
 function logMemoryPhase(phase: string, started: number, status: string): void { const fields = { phase, status, durationMs: Date.now() - started }; if (status === 'completed') logInfo('hindsight_phase', fields); else if (phase === 'recall') logWarn('hindsight_phase', undefined, fields); else logError('hindsight_phase', undefined, { notify: false, fields }); }
+/** One message as a line of the automatic recall query. */
+function recallLine(message: MemoryMessage): string {
+  return `${message.role === 'assistant' ? 'System reply context' : message.source.sourceKind === 'scheduled_input' ? `Scheduled instruction requested by ${speaker(message)} at ${message.source.eventTime ?? message.createdAt}` : speaker(message)}: ${message.content}`;
+}
 function speaker(message: MemoryMessage): string { const id = message.source.authorId ?? 'Unknown speaker'; return message.source.authorName ? `${message.source.authorName} (${id})` : id; }
 function asRecord(value: unknown): Record<string, unknown> | null { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 function auditView(value: unknown): unknown { const r = asRecord(value); if (!r) return value; return { ...r, ...(typeof r.text === 'string' ? { text: r.text.slice(0, 8000) } : {}) }; }
