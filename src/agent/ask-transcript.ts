@@ -2,6 +2,7 @@ import { loadWorkspaceContext } from './context.js';
 import { formatDeliveryNotice, formatStoredMessageText, messageAttachmentContent } from '../attachments/input-attachments.js';
 import type { LiveGroup } from './compaction.js';
 import { promptPrefix } from './prompt-prefix.js';
+import { RECALL_SKIPPED_SOURCE_KINDS } from '../memory/hindsight.js';
 import type { Store, StoredMessage, SessionOpeningContext } from '../store.js';
 import type { GoogleToolRuntime } from '../tools/google-tools.js';
 import type { AgentConfig } from './agent.js';
@@ -87,7 +88,7 @@ export async function prepareAsk(store: Store, session: string, config: AgentCon
   const savedAskContexts = store.askContexts(sessionMessages.filter(message => storedInput.id !== message.id).map(message => message.id));
   // Memories already in the replayed history (formatRecall lines from earlier recalls) are not sent again.
   const replayedMemoryIds = new Set([...JSON.stringify([...savedAskContexts.values()]).matchAll(/\[id=([0-9a-f-]{36})/g)].map(match => match[1]!));
-  const memory = config.hindsight && !['subagent_event', 'deployment_result', 'notification'].includes(storedInput.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, storedInput, config.onProgress, config.memoryWriteAllowed, replayedMemoryIds) : '';
+  const memory = config.hindsight && !RECALL_SKIPPED_SOURCE_KINDS.includes(storedInput.source.sourceKind ?? '') ? await config.hindsight.prepare(store, session, storedInput, sessionMessages.filter(message => storedHistory.indexOf(message) < currentIndex), config.onProgress, config.memoryWriteAllowed, replayedMemoryIds) : '';
   // Per-message context follows the history so the prefix above stays cacheable across messages.
   const askContextInput: unknown[] = memory ? [{ role: 'user', content: memory }] : [];
   const initialGroups = await Promise.all(sessionMessages.map(async message => {
