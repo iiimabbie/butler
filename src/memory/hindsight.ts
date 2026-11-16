@@ -103,10 +103,13 @@ export class Hindsight {
     return memoryBlock({ results: fresh });
   }
 
+  /** Recalls memories, leaving out each observation whose source facts are all in the same results: it only retells them. */
   async recall(query: string): Promise<unknown> {
-    const result = await this.post(`${this.bankUrl()}/memories/recall`, { query });
-    if (!Array.isArray(asRecord(result)?.results) || (asRecord(result)!.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
-    return result;
+    const result = asRecord(await this.post(`${this.bankUrl()}/memories/recall`, { query, include: { source_facts: { max_tokens: 0 } } }));
+    if (!Array.isArray(result?.results) || (result.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
+    const results = result.results as Array<Record<string, unknown>>;
+    const ids = new Set(results.map(item => item.id));
+    return { ...result, results: results.filter(item => !(Array.isArray(item.source_fact_ids) && item.source_fact_ids.length && item.source_fact_ids.every(id => ids.has(id)))) };
   }
 
   async reflect(query: string): Promise<unknown> {
