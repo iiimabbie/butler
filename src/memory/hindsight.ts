@@ -103,12 +103,11 @@ export class Hindsight {
     return memoryBlock({ results: fresh });
   }
 
-  /** Recalls memories, leaving out each observation built from a single fact: it only retells that fact. */
+  /** Recalls world and experience facts only; observations are left out. */
   async recall(query: string): Promise<unknown> {
-    const result = asRecord(await this.post(`${this.bankUrl()}/memories/recall`, { query, include: { source_facts: { max_tokens: 0 } } }));
+    const result = asRecord(await this.post(`${this.bankUrl()}/memories/recall`, { query, types: ['world', 'experience'] }));
     if (!Array.isArray(result?.results) || (result.results as unknown[]).some(item => !asRecord(item))) throw new Error('Hindsight recall response is invalid');
-    const results = result.results as Array<Record<string, unknown>>;
-    return { ...result, results: results.filter(item => !(Array.isArray(item.source_fact_ids) && item.source_fact_ids.length < 2)) };
+    return result;
   }
 
   async reflect(query: string): Promise<unknown> {
