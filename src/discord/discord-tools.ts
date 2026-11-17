@@ -119,10 +119,19 @@ export function createDiscordToolRuntime(options: { token: string; context: Disc
     }
   };
   const api = async (method: string, path: string, body?: unknown, sanitize = true): Promise<unknown> => {
-    let response: Response;
-    try { response = await fetch(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
-    catch {
-      throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} stage=transport; ${method === 'GET' ? 'read failed; no mutation was requested' : 'outcome is unknown; do not retry this tool automatically'}`);
+    const send = async (): Promise<Response> => {
+      try { return await fetch(`https://discord.com/api/v10${path}`, { method, headers: { authorization: `Bot ${options.token}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(15_000) }); }
+      catch {
+        throw new Error(`Discord REST request failed method=${method} path=${safeDiscordDiagnostic(path, options.token)} stage=transport; ${method === 'GET' ? 'read failed; no mutation was requested' : 'outcome is unknown; do not retry this tool automatically'}`);
+      }
+    };
+    let response = await send();
+    // Paged reads hit Discord's per-route bucket; a GET is safe to repeat once after the wait Discord asks for.
+    const retryAfterSeconds = method === 'GET' && response.status === 429 ? Number(response.headers.get('retry-after') ?? NaN) : NaN;
+    if (retryAfterSeconds >= 0 && retryAfterSeconds <= 10) {
+      await response.body?.cancel();
+      await new Promise(resolve => setTimeout(resolve, retryAfterSeconds * 1000));
+      response = await send();
     }
     if (!response.ok) {
       // Only retain Discord's diagnostic fields, never request bodies, headers or the raw response.
