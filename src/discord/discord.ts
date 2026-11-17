@@ -531,7 +531,12 @@ class DiscordHandler {
     await this.runAgent({
       storedInput, model, channelId: request.outputChannelId, outputChannelId: request.outputChannelId, requesterId: request.job.creatorId,
       reply: (body, options) => target.send(body, options),
-      agent: { discordContext: { channelId: request.outputChannelId } },
+      agent: {
+        discordContext: { channelId: request.outputChannelId },
+        subagent: this.channelSubagent(request.outputChannelId, this.getRuntime().settings.subagent),
+        subagentCoordinator: this.subagentCoordinator,
+        subagentOrigin: { channelId: request.outputChannelId, outputChannelId: request.outputChannelId, entryKind: 'scheduled', requesterId: request.job.creatorId, triggerInputId: storedInput.id, model },
+      },
     });
   }
 
@@ -653,7 +658,7 @@ class DiscordHandler {
   private async runChannelInput(storedInput: StoredMessage, input: NonNullable<import('../subagent/subagent-coordinator.js').SubagentSnapshot['origin']>,
     target: OutputChannel): Promise<void> {
     const runtime = this.getRuntime();
-    const model = this.store.channelState(input.channelId, runtime.discord.defaultModel).model;
+    const model = input.model ?? this.store.channelState(input.channelId, runtime.discord.defaultModel).model;
     const openingContext = await this.sessionOpeningContext(storedInput.sessionId, input.channelId);
     await this.runAgent({
       storedInput, model, channelId: input.channelId, outputChannelId: input.outputChannelId, requesterId: input.requesterId,

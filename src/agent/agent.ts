@@ -57,7 +57,7 @@ export interface AgentConfig {
   workspaceDirectory?: string;
   subagent?: import('../config.js').ButlerConfig['subagent'];
   subagentCoordinator?: SubagentCoordinator;
-  subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled' | 'notification'; requesterId?: string; triggerInputId?: string };
+  subagentOrigin?: { channelId: string; outputChannelId: string; entryKind: 'normal' | 'scheduled' | 'notification'; requesterId?: string; triggerInputId?: string; model?: string };
   subagentEvent?: boolean;
 }
 
