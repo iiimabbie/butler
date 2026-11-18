@@ -116,6 +116,9 @@ export class SubagentCoordinator {
   freeze() { this.frozen = true; for (const entry of this.entries.values()) entry.abort.abort(); }
   async drain() { await Promise.allSettled([...this.running]); }
   get activeCount() { return this.running.size; }
+  activeRuns(parentSession: string): number {
+    return [...this.entries.values()].filter(({ snapshot }) => snapshot.parentSession === parentSession && ['queued', 'running', 'stopping'].includes(snapshot.status)).length;
+  }
   updateActivity(id: string, runId: string, patch: Pick<SubagentSnapshot, 'turns' | 'currentTool' | 'currentCallId' | 'activity'>) {
     const entry = this.entries.get(id);
     if (!entry || entry.snapshot.runId !== runId) return;
