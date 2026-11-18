@@ -287,6 +287,7 @@ class DiscordHandler {
     const state = this.store.channelSettings(context.channelId, config.defaultModel);
     if (context.command === 'status') {
       const policy = this.store.effectiveChannelPolicy(context.channelId);
+      const subagents = state.sessionId ? this.subagentCoordinator.activeRuns(state.sessionId) : 0;
       const embed = new EmbedBuilder().setTitle('Butler status ─ Glad to be of service.').addFields(
         { name: '💼 Work Phase', value: state.sessionId ?? '尚未建立 session' },
         { name: '🗿 Model', value: `${state.model}（思考：${this.store.effectiveChannelReasoningEffort(context.channelId) ?? '後端預設'}）` },
@@ -296,7 +297,7 @@ class DiscordHandler {
         { name: 'Tracked', value: String(policy.tracked) },
         { name: 'Bot Reply', value: String(policy.botReply) },
         { name: 'Hindsight write', value: String(policy.hindsightWrite) },
-        { name: '⚙️ Processing Status', value: this.queueStatus(context.channelId) === 'busy' ? 'Busy' : 'Idle' },
+        { name: '⚙️ Processing Status', value: `${this.queueStatus(context.channelId) === 'busy' ? 'Busy' : 'Idle'}${subagents ? `（子代理 ${subagents} 個執行中）` : ''}` },
         { name: 'Context usage', value: state.sessionId ? formatContextUsage(this.store.contextUsage(state.sessionId), state.model, config) : '尚無使用量' },
       ).toJSON();
       await context.reply('', { embed });
@@ -587,7 +588,7 @@ class DiscordHandler {
     // Work running or queued in this channel still belongs to the current session.
     if ((this.queues.get(channelId)?.pending ?? 0) > ownWork) return state;
     // A running subagent reports back to this session, so keep it until the result arrives.
-    if (this.subagentCoordinator.list(state.sessionId, 0, Number.MAX_SAFE_INTEGER).some(run => ['queued', 'running', 'stopping'].includes(run.status))) return state;
+    if (this.subagentCoordinator.activeRuns(state.sessionId)) return state;
     return { ...state, sessionId: this.switchChannelSession(channelId, state.sessionId, 'idle') };
   }
 
