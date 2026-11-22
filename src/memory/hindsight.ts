@@ -41,7 +41,7 @@ class HindsightHttpError extends Error {
 }
 
 /** Internal events: they get no automatic recall and are not conversation topic. */
-export const RECALL_SKIPPED_SOURCE_KINDS: readonly string[] = ['subagent_event', 'deployment_result', 'notification'];
+export const RECALL_SKIPPED_SOURCE_KINDS: readonly string[] = ['subagent_event', 'deployment_result', 'notification', 'scheduled_input'];
 /** Each earlier message contributes this much to the recall query, so the current message stays the main subject. */
 const RECALL_TOPIC_CHARS = 150;
 /** Final-score floor for automatic recall. Measured on real queries: unrelated memories mostly rank below it, related ones above. */
