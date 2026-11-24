@@ -3,7 +3,7 @@ import { ActivityType, Client, EmbedBuilder, GatewayIntentBits, MessageReference
 import { execFile } from 'node:child_process';
 import type { Store, StoredMessage } from '../store.js';
 import { ask, isNoReply, type AgentConfig } from '../agent/agent.js';
-import { startNotificationListener } from '../notifications.js';
+import { isImmediateNotification, startNotificationListener } from '../notifications.js';
 import { MailWatcher } from '../mail/imap-watcher.js';
 import { createDiscordToolRuntime, type DiscordToolContext, type DiscordToolRuntime, type HandoffInput } from './discord-tools.js';
 import { isRecord } from '../tools/tool-schema.js';
@@ -1071,7 +1071,11 @@ export async function startDiscord(getRuntime: () => RuntimeBundle, store: Store
   try {
     if (settings.notifications) {
       try {
-        const intake = await startNotificationListener(settings.notifications, payload => store.acceptNotification(payload));
+        const intake = await startNotificationListener(settings.notifications, payload => {
+          const result = store.acceptNotification(payload);
+          if (!result.duplicate && isImmediateNotification(payload)) handler.enqueueNotifications();
+          return result;
+        });
         if (closed) { await intake.close(); return; }
         closeNotifications = intake.close;
       } catch (error) { throw new Error('Notification listener could not start', { cause: error }); }
