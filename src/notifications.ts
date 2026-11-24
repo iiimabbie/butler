@@ -7,6 +7,10 @@ import { logError } from './log.js';
 export interface NotificationPayload { id: string; source: string; title: string; body: string; occurred_at: string }
 export const MAX_NOTIFICATION_BYTES = 65_536;
 
+// Arrivals at home or work are answered right away; everything else waits for the hourly batch.
+const IMMEDIATE_LOCATION_TITLES = new Set(['抵達家裡', '抵達公司']);
+export const isImmediateNotification = (payload: NotificationPayload) => payload.source === 'location' && IMMEDIATE_LOCATION_TITLES.has(payload.title);
+
 class IntakeError extends Error {
   constructor(readonly status: number, message: string) { super(message); }
 }
