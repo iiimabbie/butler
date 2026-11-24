@@ -38,6 +38,9 @@ services:
       # Total reflect deadline; Butler waits 30 s longer to receive this timeout response,
       # staying under Node fetch's 300 s response-headers timeout.
       HINDSIGHT_API_REFLECT_WALL_TIMEOUT: "270"
+      # Retain extraction with high reasoning can take ~6 min per 8k-char chunk; the 120 s default kept cutting it off.
+      HINDSIGHT_API_RETAIN_LLM_TIMEOUT: "600"
+      HINDSIGHT_API_RETAIN_WALL_TIMEOUT: "7200"
     ports:
       - "127.0.0.1:18888:8888"
       - "127.0.0.1:19999:9999"
